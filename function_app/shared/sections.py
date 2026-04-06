@@ -1,0 +1,211 @@
+"""
+Walk DI's analyzeResult to build a flat section index that maps a page
+number to header_1/header_2/header_3 and the section's text content.
+
+DI's "sections" are nested by hierarchy. Each section has elements[]
+that reference paragraphs/figures/tables via JSON pointer paths like
+"/paragraphs/0". A paragraph's bounding regions tell us which page it
+sits on; we use those to compute (start_page, end_page) for each
+section, then resolve headers by walking up the section tree.
+"""
+
+import re
+from typing import Dict, Any, List, Optional, Tuple
+
+
+PARAGRAPH_REF_RE = re.compile(r"^/paragraphs/(\d+)$")
+SECTION_REF_RE = re.compile(r"^/sections/(\d+)$")
+
+
+def _paragraph_pages(paragraphs: List[Dict[str, Any]], idx: int) -> List[int]:
+    if idx < 0 or idx >= len(paragraphs):
+        return []
+    para = paragraphs[idx]
+    pages = []
+    for br in para.get("boundingRegions", []) or []:
+        pn = br.get("pageNumber")
+        if isinstance(pn, int):
+            pages.append(pn)
+    return pages
+
+
+def _paragraph_role(paragraphs: List[Dict[str, Any]], idx: int) -> str:
+    if idx < 0 or idx >= len(paragraphs):
+        return ""
+    return (paragraphs[idx].get("role") or "").lower()
+
+
+def _paragraph_content(paragraphs: List[Dict[str, Any]], idx: int) -> str:
+    if idx < 0 or idx >= len(paragraphs):
+        return ""
+    return paragraphs[idx].get("content") or ""
+
+
+def build_section_index(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Returns a list of section descriptors. Each item:
+      {
+        "section_idx": int,
+        "header_1": str,
+        "header_2": str,
+        "header_3": str,
+        "page_start": int,
+        "page_end": int,
+        "content": str,        # concatenated paragraph content for this section
+      }
+
+    Header inheritance: walking sections in document order, we keep a
+    running stack of (level, title). When a sectionHeading is encountered
+    inside a section, we update the stack at the appropriate level.
+    """
+    sections = analyze_result.get("sections", []) or []
+    paragraphs = analyze_result.get("paragraphs", []) or []
+
+    # First pass: walk the section tree in DFS order so we can carry
+    # header_1/2/3 as we descend.
+    visited = [False] * len(sections)
+    flat: List[Dict[str, Any]] = []
+
+    def walk(section_idx: int, hdr_stack: List[Tuple[int, str]]):
+        if section_idx < 0 or section_idx >= len(sections) or visited[section_idx]:
+            return
+        visited[section_idx] = True
+        section = sections[section_idx]
+
+        local_stack = list(hdr_stack)
+        para_indices: List[int] = []
+        child_section_indices: List[int] = []
+
+        for ref in section.get("elements", []) or []:
+            m_p = PARAGRAPH_REF_RE.match(ref)
+            if m_p:
+                para_indices.append(int(m_p.group(1)))
+                continue
+            m_s = SECTION_REF_RE.match(ref)
+            if m_s:
+                child_section_indices.append(int(m_s.group(1)))
+                continue
+
+        # Update header stack from heading-role paragraphs
+        for pidx in para_indices:
+            role = _paragraph_role(paragraphs, pidx)
+            if role in ("title", "sectionheading"):
+                title = _paragraph_content(paragraphs, pidx).strip()
+                if not title:
+                    continue
+                level = 1 if role == "title" else _guess_heading_level(title, local_stack)
+                local_stack = [(lvl, txt) for (lvl, txt) in local_stack if lvl < level]
+                local_stack.append((level, title))
+
+        h1 = _stack_at(local_stack, 1)
+        h2 = _stack_at(local_stack, 2)
+        h3 = _stack_at(local_stack, 3)
+
+        page_set = set()
+        body_chunks: List[str] = []
+        for pidx in para_indices:
+            for pn in _paragraph_pages(paragraphs, pidx):
+                page_set.add(pn)
+            body_chunks.append(_paragraph_content(paragraphs, pidx))
+
+        if page_set:
+            flat.append({
+                "section_idx": section_idx,
+                "header_1": h1,
+                "header_2": h2,
+                "header_3": h3,
+                "page_start": min(page_set),
+                "page_end": max(page_set),
+                "content": "\n".join([c for c in body_chunks if c]),
+            })
+
+        for child_idx in child_section_indices:
+            walk(child_idx, local_stack)
+
+    if sections:
+        walk(0, [])
+        for i in range(len(sections)):
+            if not visited[i]:
+                walk(i, [])
+
+    return flat
+
+
+def _guess_heading_level(title: str, stack: List[Tuple[int, str]]) -> int:
+    """
+    Cheap heuristic for level when DI only tells us 'sectionHeading'.
+    Numbered prefixes like '1', '1.2', '1.2.3' map to levels 1/2/3.
+    Otherwise: deepen one level relative to the current stack top, capped at 3.
+    """
+    m = re.match(r"^(\d+(?:\.\d+){0,2})\b", title)
+    if m:
+        return min(3, len(m.group(1).split(".")))
+    if stack:
+        return min(3, stack[-1][0] + 1)
+    return 2
+
+
+def _stack_at(stack: List[Tuple[int, str]], level: int) -> str:
+    for lvl, txt in stack:
+        if lvl == level:
+            return txt
+    return ""
+
+
+def find_section_for_page(
+    sections_index: List[Dict[str, Any]],
+    page_number: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Return the most-specific section whose page range covers page_number.
+    Most-specific = smallest page span among matches; ties broken by
+    document order (later wins, since deeper sections are visited later).
+    """
+    matches = [
+        s for s in sections_index
+        if s["page_start"] <= page_number <= s["page_end"]
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda s: (s["page_end"] - s["page_start"], -s["section_idx"]))
+    return matches[0]
+
+
+def extract_surrounding_text(
+    section_content: str,
+    anchor: str,
+    chars: int = 200,
+) -> str:
+    """
+    If `anchor` (typically a figure caption) is found in section_content,
+    return up to `chars` characters before and after it. Otherwise return
+    the first 2*chars characters of the section. Strips simple repeating
+    header/footer noise.
+    """
+    if not section_content:
+        return ""
+    cleaned = _strip_running_artifacts(section_content)
+    if anchor:
+        idx = cleaned.find(anchor.strip())
+        if idx >= 0:
+            start = max(0, idx - chars)
+            end = min(len(cleaned), idx + len(anchor) + chars)
+            before = cleaned[start:idx].strip()
+            after = cleaned[idx + len(anchor):end].strip()
+            return f"{before} [...] {after}".strip()
+    return cleaned[: 2 * chars].strip()
+
+
+def _strip_running_artifacts(text: str) -> str:
+    lines = [ln for ln in text.splitlines()]
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        if re.fullmatch(r"page\s+\d+(\s+of\s+\d+)?", s, re.IGNORECASE):
+            continue
+        if re.fullmatch(r"\d{1,4}", s):
+            continue
+        out.append(s)
+    return "\n".join(out)

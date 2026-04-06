@@ -35,16 +35,30 @@ def _coerce_titles(value: Any) -> List[str]:
     return [str(value)]
 
 
+def _coalesce_markdown(value: Any) -> str:
+    """
+    Accepts either a single markdown string or a list of section markdown
+    strings (from /document/markdownDocument/*/content). Falls back to empty.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "\n\n".join([str(v) for v in value if v])
+    return str(value)
+
+
 def process_doc_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
+    markdown_text = _coalesce_markdown(data.get("markdown_text"))
     merged_text = safe_str(data.get("merged_text"))
+    primary_text = markdown_text.strip() or merged_text.strip()
     titles = _coerce_titles(data.get("section_titles"))
 
     parent_id = parent_id_for(source_path, source_file)
     chunk_id = summary_chunk_id(source_path, source_file)
 
-    if not merged_text.strip():
+    if not primary_text:
         return {
             "chunk_id": chunk_id,
             "parent_id": parent_id,
@@ -58,7 +72,7 @@ def process_doc_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     prompt = (
         f"Source file: {source_file}\n\n"
         f"Top-level section titles:\n- " + "\n- ".join(titles[:40]) + "\n\n"
-        f"Manual content (truncated):\n{merged_text[:18000]}"
+        f"Manual content (truncated):\n{primary_text[:18000]}"
     )
 
     try:

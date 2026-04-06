@@ -5,6 +5,7 @@
 - Azure AI Search service (Basic tier or higher; Standard recommended for skillset throughput)
 - Azure Blob Storage account + container holding source PDFs
 - Azure AI Services (Cognitive Services multi-service) — required by built-in OCR / Layout skills
+- Azure Document Intelligence resource — used by the `process-document` custom skill via REST
 - Azure OpenAI service with two deployments:
   - text-embedding-ada-002  (1536 dims)
   - a vision-capable chat model for diagram analysis and summary (e.g. gpt-4o)
@@ -25,4 +26,11 @@ Set these in App Settings (mirrors `local.settings.json.example`):
 - AOAI_API_VERSION
 - AOAI_VISION_DEPLOYMENT
 - AOAI_CHAT_DEPLOYMENT
-- SKILL_VERSION
+- DI_ENDPOINT
+- DI_API_KEY
+- DI_API_VERSION
+- STORAGE_BLOB_SAS              (container SAS so the function can fetch source PDFs)
+- SEARCH_ENDPOINT
+- SEARCH_ADMIN_KEY              (used only for the image-hash cache lookup)
+- SEARCH_INDEX_NAME             (defaults to mm-manuals-index)
+- SKILL_VERSION                 (e.g. 2.0.0)

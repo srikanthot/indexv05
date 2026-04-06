@@ -8,7 +8,6 @@
 
     { "name": "chunk", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "chunk_for_semantic", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
-    { "name": "chunk_type", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
 
     { "name": "text_vector", "type": "Collection(Edm.Single)", "searchable": true, "filterable": false, "retrievable": false, "stored": false, "sortable": false, "facetable": false, "dimensions": 1536, "vectorSearchProfile": "mm-hnsw-profile" },
 
@@ -22,10 +21,15 @@
     { "name": "header_2", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "header_3", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
 
+    { "name": "figure_id", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "figure_ref", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "figure_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "diagram_description", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "diagram_category", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "has_diagram", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+
+    { "name": "table_row_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_col_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
 
     { "name": "source_file", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": true, "facetable": true },
     { "name": "source_url", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
@@ -36,7 +40,8 @@
 
     { "name": "processing_status", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "skill_version", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
-    { "name": "image_hash", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false }
+    { "name": "image_hash", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "chunk_hash", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false }
   ],
 
   "similarity": { "@odata.type": "#Microsoft.Azure.Search.BM25Similarity" },
@@ -51,7 +56,8 @@
           "prioritizedContentFields": [
             { "fieldName": "chunk_for_semantic" },
             { "fieldName": "chunk" },
-            { "fieldName": "diagram_description" }
+            { "fieldName": "diagram_description" },
+            { "fieldName": "surrounding_context" }
           ],
           "prioritizedKeywordsFields": [
             { "fieldName": "header_1" },
@@ -75,9 +81,20 @@
       }
     ],
     "profiles": [
-      { "name": "mm-hnsw-profile", "algorithm": "mm-hnsw-algo" }
+      { "name": "mm-hnsw-profile", "algorithm": "mm-hnsw-algo", "vectorizer": "aoai-vectorizer" }
     ],
-    "vectorizers": [],
+    "vectorizers": [
+      {
+        "name": "aoai-vectorizer",
+        "kind": "azureOpenAI",
+        "azureOpenAIParameters": {
+          "resourceUri": "<AOAI_ENDPOINT>",
+          "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
+          "modelName": "text-embedding-ada-002",
+          "apiKey": "<AOAI_API_KEY>"
+        }
+      }
+    ],
     "compressions": []
   }
 }

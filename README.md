@@ -1,8 +1,22 @@
-# Azure AI Search — Multimodal Manual Indexing
+# Azure AI Search — Multimodal Manual Indexing (v2)
 
-Azure AI Search–native pipeline for indexing technical manuals into a single multimodal index. Text chunks, diagram chunks, and per-document summary chunks live as **peer records** in one index, all embedded with Ada-002 and ranked with a semantic configuration that does not let OCR fallback dominate.
+Azure AI Search–native pipeline for diagram-heavy technical manuals. One multimodal index holds **text**, **diagram**, **table**, and **summary** records as peers — all embedded with Ada-002, ranked with a semantic configuration that does not let OCR fallback dominate, and re-queryable via a built-in Azure OpenAI vectorizer.
 
-Custom logic (printed page labels, semantic-string assembly, vision diagram analysis, document summary) runs in an Azure Function exposed to the skillset as four Custom WebApi skills.
+Custom logic runs in an Azure Function exposed as Custom WebApi skills.
+
+## What v2 changes vs v1
+
+| Capability | v1 | v2 |
+|---|---|---|
+| Diagram extraction | one vision call per PDF page (multi-figure pages collapse) | one vision call **per figure**, cropped from the PDF |
+| Diagram → section linking | none | `header_1/2/3` populated from DI section index |
+| `surrounding_context` | field existed, never populated | populated from the section text around the figure caption |
+| Tables | sent through vision (lossy prose) | first-class `record_type=table` with structured markdown, multi-page merging, oversized split |
+| Vision prompt | image + OCR hint only | image + section path + page + caption + body figure refs + surrounding text |
+| Image hash caching | none | re-index skips vision calls when `parent_id + image_hash` already exists |
+| Doc summary source | OCR-merged text | DI markdown content (OCR is fallback) |
+| Query-time vectorizer | none | Azure OpenAI vectorizer attached to the HNSW profile |
+| Dead `chunk_type` field | present | removed |
 
 ## Architecture
 
@@ -10,34 +24,53 @@ Custom logic (printed page labels, semantic-string assembly, vision diagram anal
 Blob (PDFs)
    |
    v
-Data Source  ->  Indexer  ->  Skillset  ->  mm-manuals-index
-                                |
-                                +-- DocumentIntelligenceLayoutSkill
-                                +-- OcrSkill (fallback only)
-                                +-- MergeSkill (ocr_fallback_text)
-                                +-- SplitSkill (1200 / 200)
-                                +-- WebApi: extract-page-label    --> Function
-                                +-- WebApi: analyze-diagram       --> Function
-                                +-- WebApi: build-semantic-string --> Function
-                                +-- WebApi: build-doc-summary     --> Function
-                                +-- AOAI Embedding (text pages)
-                                +-- AOAI Embedding (diagrams)
-                                +-- AOAI Embedding (summary)
+Data Source -> Indexer -> Skillset -> mm-manuals-index
+                            |
+                            +-- DocumentIntelligenceLayoutSkill (built-in: markdown text path)
+                            +-- OcrSkill (fallback only)
+                            +-- MergeSkill (ocr_fallback_text)
+                            +-- SplitSkill (1200 / 200)
+                            +-- WebApi: process-document   --> Function -> DI direct -> figures + tables
+                            +-- WebApi: extract-page-label --> Function
+                            +-- WebApi: analyze-diagram    --> Function (per figure, hash-cached, vision-enriched)
+                            +-- WebApi: shape-table        --> Function (per table)
+                            +-- WebApi: build-semantic-string --> Function (text + diagram modes)
+                            +-- WebApi: build-doc-summary  --> Function (markdown source)
+                            +-- AOAI Embedding (text pages)
+                            +-- AOAI Embedding (figures)
+                            +-- AOAI Embedding (tables)
+                            +-- AOAI Embedding (summary)
 ```
 
-Index projections write three peer record types into `mm-manuals-index`:
+Index projections write four peer record types into `mm-manuals-index`:
 
 | record_type | sourceContext                          | chunk_id prefix |
 |-------------|----------------------------------------|-----------------|
-| text        | /document/markdownDocument/*/pages/*   | txt_            |
-| diagram     | /document/normalized_images/*          | dgm_            |
-| summary     | /document                              | sum_            |
+| text        | /document/markdownDocument/*/pages/*   | `txt_`          |
+| diagram     | /document/enriched_figures/*           | `dgm_`          |
+| table       | /document/enriched_tables/*            | `tbl_`          |
+| summary     | /document                              | `sum_`          |
 
 ## Repository layout
 
 ```
 search/         Azure AI Search REST bodies (datasource, index, skillset, indexer)
-function_app/   Python v2 Azure Function App with 4 custom skill routes
+function_app/   Python v2 Azure Function App with 6 custom skill routes
+  shared/
+    skill_io.py            Skill request/response envelope
+    ids.py                 Stable chunk_id helpers
+    aoai.py                Azure OpenAI client
+    di_client.py           Azure Document Intelligence REST client + blob fetch
+    pdf_crop.py            PyMuPDF figure cropping
+    sections.py            DI section index + surrounding context
+    tables.py              DI tables -> markdown (with multi-page merge + split)
+    search_cache.py        Image-hash cache lookup against the index
+    process_document.py    Orchestrates DI + crop + sections + tables
+    process_table.py       Per-table shaper
+    page_label.py          Printed page label extractor
+    semantic.py            chunk_for_semantic builder (text + diagram modes)
+    diagram.py             Per-figure vision analysis (hash-cached)
+    summary.py             Per-document summary (markdown source)
 docs/           Setup + validation checklists
 ```
 
@@ -46,103 +79,118 @@ docs/           Setup + validation checklists
 - Azure AI Search service
 - Azure Blob Storage account with a container of source PDFs
 - Azure AI Services (Cognitive Services multi-service) key
+- Azure Document Intelligence resource (prebuilt-layout, API `2024-11-30`)
 - Azure OpenAI with:
-  - text-embedding-ada-002 deployment (1536 dims)
-  - a vision-capable chat deployment (e.g. gpt-4o) used by both diagram analysis and document summary
+  - `text-embedding-ada-002` deployment (1536 dims)
+  - vision-capable chat deployment (e.g. gpt-4o)
 - Azure Function App: Linux, Python 3.11, Functions v4
+- A SAS token (or public read) so the Function App can fetch PDFs from blob to send to DI
 
 See `docs/setup.md` for permissions and required env vars.
 
-## Deployment / build order
+## Function App settings
 
-Follow this order exactly. Each step depends on the previous.
+Set in App Settings (mirrors `local.settings.json.example`):
+
+| Setting | Purpose |
+|---|---|
+| `AOAI_ENDPOINT` / `AOAI_API_KEY` / `AOAI_API_VERSION` | Azure OpenAI |
+| `AOAI_VISION_DEPLOYMENT` | Vision chat deployment for figures |
+| `AOAI_CHAT_DEPLOYMENT` | Chat deployment for summaries |
+| `DI_ENDPOINT` / `DI_API_KEY` / `DI_API_VERSION` | Document Intelligence direct call |
+| `STORAGE_BLOB_SAS` | Container-level SAS so the function can fetch source PDFs by URL |
+| `SEARCH_ENDPOINT` / `SEARCH_ADMIN_KEY` / `SEARCH_INDEX_NAME` | Image-hash cache lookup |
+| `SKILL_VERSION` | Stamped on every record (e.g. `2.0.0`) |
+
+## Deployment / build order
 
 1. **Deploy the Azure Function App** from `function_app/`
    ```bash
    cd function_app
    func azure functionapp publish <FUNCTION_APP_NAME>
    ```
-   Then in the Azure portal, set the App Settings listed in `local.settings.json.example` (with real values).
+   Then set the App Settings listed above.
 
 2. **Capture the function host and a function key**
    - Host: `https://<FUNCTION_APP_NAME>.azurewebsites.net`
-   - Key:  Function App -> App keys -> default (or per-function key)
+   - Key: Function App -> App keys -> default
 
 3. **Replace placeholders** in `search/skillset.json`:
-   - `<FUNCTION_APP_HOST>`  -> `<FUNCTION_APP_NAME>.azurewebsites.net`
-   - `<FUNCTION_KEY>`       -> the function key
+   - `<FUNCTION_APP_HOST>`, `<FUNCTION_KEY>` (multiple places)
    - `<AOAI_ENDPOINT>`, `<AOAI_API_KEY>`, `<AOAI_EMBED_DEPLOYMENT>`
    - `<AI_SERVICES_KEY>`
 
+   And in `search/index.json`:
+   - `<AOAI_ENDPOINT>`, `<AOAI_API_KEY>`, `<AOAI_EMBED_DEPLOYMENT>` (vectorizer block)
+
    And in `search/datasource.json`:
-   - `<STORAGE_CONNECTION_STRING>`
-   - `<STORAGE_CONTAINER_NAME>`
+   - `<STORAGE_CONNECTION_STRING>`, `<STORAGE_CONTAINER_NAME>`
 
 4. **Create the data source**
    ```
    PUT {SEARCH_ENDPOINT}/datasources/mm-manuals-ds?api-version=2024-05-01-preview
    ```
-   Body: `search/datasource.json`
 
 5. **Create the index**
    ```
    PUT {SEARCH_ENDPOINT}/indexes/mm-manuals-index?api-version=2024-05-01-preview
    ```
-   Body: `search/index.json`
 
 6. **Create the skillset**
    ```
    PUT {SEARCH_ENDPOINT}/skillsets/mm-manuals-skillset?api-version=2024-05-01-preview
    ```
-   Body: `search/skillset.json`
 
 7. **Create the indexer**
    ```
    PUT {SEARCH_ENDPOINT}/indexers/mm-manuals-indexer?api-version=2024-05-01-preview
    ```
-   Body: `search/indexer.json`
 
-8. **Run a Debug Session** in the Azure portal against one PDF. Verify the actual paths emitted by the Document Intelligence Layout skill match the source paths used in the skillset (see `docs/validation.md` step 1). Adjust if needed and re-PUT the skillset.
+8. **Run a Debug Session** in the Azure portal against one PDF. Verify:
+   - The built-in Layout skill emits the markdown paths the text projection uses (`pageNumber`, `sections/h1..h3`, `ordinal_position`).
+   - The `process-document` skill returns non-empty `enriched_figures[]` and `enriched_tables[]`.
+   - Each figure record has `dgm_header_1/2/3` and `dgm_surrounding_context` populated.
 
-9. **Run the indexer** against a single sample manual:
+9. **Run the indexer** on a single sample manual:
    ```
    POST {SEARCH_ENDPOINT}/indexers/mm-manuals-indexer/run?api-version=2024-05-01-preview
    ```
 
-10. **Inspect** results using the validation checklist (`docs/validation.md`).
+10. **Inspect** results using `docs/validation.md`.
 
 ## Validation (must pass before going wider)
 
-- Real Layout page-number path debugged from actual skill output.
-- Printed page labels verified against the visible labels in the source PDF.
-- Text **and** diagram peer records both present in `mm-manuals-index` for the same source file.
-- `chunk_for_semantic` is a real assembled string, not empty and not raw JSON.
-- All `chunk_id` values are unique and use the correct prefix (`txt_`, `dgm_`, `sum_`).
-- `text_vector` populates for text, diagram, and summary records.
-- Decorative images are correctly skipped (`record_type='diagram' and has_diagram=false` -> spot-check).
-- OCR text appears in `ocr_fallback_text` but does NOT appear in the semantic config priority list.
+- Multi-figure page → multiple `record_type=diagram` records (not one).
+- Diagram records have `header_1/2/3` populated.
+- Diagram records have `surrounding_context` populated.
+- Specification table → `record_type=table` with full markdown grid (not a vision description).
+- Multi-page table → single record with `physical_pdf_page < physical_pdf_page_end`.
+- Re-running the indexer on an unchanged PDF → vision call count drops (cache hits visible as `processing_status=cache_hit`).
+- Vector query against `text_vector` works **without** client-side embedding (the vectorizer handles it).
+- All `chunk_id` values are unique with the correct prefix (`txt_`, `dgm_`, `tbl_`, `sum_`).
+- OCR text appears in `ocr_fallback_text` only — never as a primary semantic-priority field.
 
 ## Open TODOs / blockers
 
-- **Layout skill output paths** (`pageNumber`, `sections/h1..h3`, `ordinal_position`) must be confirmed against the actual JSON emitted by the version of DocumentIntelligenceLayoutSkill in your region.
-- **End-page mapping** (`physical_pdf_page_end`, `printed_page_label_end`) is currently set equal to the start values. If the layout skill exposes a real end page per section, wire it in.
-- **Vision model availability** in your Azure OpenAI region must be confirmed (Gov / sovereign clouds may not yet have gpt-4o).
-- **Diagram-to-section linking**: in this design, diagrams are peer records and are not joined to the nearest text chunk. If you need that join, add a follow-on enrichment that fills `surrounding_context` by looking up the text chunk on the same physical page after first indexing.
+- **Layout skill output paths** (`pageNumber`, `sections/h1..h3`, `ordinal_position`) on the built-in skill must be confirmed against the actual JSON in your region. The `process-document` custom skill bypasses this entirely for the figure/table path.
+- **Blob fetch auth**: simplest path is a container SAS in `STORAGE_BLOB_SAS`. For production, prefer a managed identity on the Function App with Storage Blob Data Reader.
+- **End-page mapping for text chunks**: still set equal to start. Wire in real spans if Layout exposes them.
+- **Vision model availability** in Gov / sovereign cloud regions must be confirmed.
 
 ## Placeholders to replace
 
-| Placeholder | Where it appears | What to put |
+| Placeholder | Where | What to put |
 |---|---|---|
-| `<STORAGE_CONNECTION_STRING>` | `search/datasource.json` | Blob storage account connection string |
+| `<STORAGE_CONNECTION_STRING>` | `search/datasource.json` | Blob storage connection string |
 | `<STORAGE_CONTAINER_NAME>` | `search/datasource.json` | Container holding source PDFs |
-| `<FUNCTION_APP_HOST>` | `search/skillset.json` (4 places) | e.g. `myfuncapp.azurewebsites.net` |
-| `<FUNCTION_KEY>` | `search/skillset.json` (4 places) | Function App function key |
-| `<AOAI_ENDPOINT>` | `search/skillset.json` (3 embed skills) + Function App settings | e.g. `https://myaoai.openai.azure.com/` |
-| `<AOAI_API_KEY>` | `search/skillset.json` + Function App settings | Azure OpenAI key |
-| `<AOAI_EMBED_DEPLOYMENT>` | `search/skillset.json` (3 embed skills) | Ada-002 deployment name |
-| `<AOAI_VISION_DEPLOYMENT>` | Function App settings | Vision chat deployment name (e.g. gpt-4o) |
-| `<AOAI_CHAT_DEPLOYMENT>` | Function App settings | Chat deployment name for summaries |
-| `<AOAI_API_VERSION>` | Function App settings | e.g. `2024-08-01-preview` |
-| `<AI_SERVICES_KEY>` | `search/skillset.json` (`cognitiveServices.key`) | AI Services multi-service key |
-| `<AZURE_WEBJOBS_STORAGE_CONN>` | `function_app/local.settings.json.example` | Storage account for the Function App itself |
-| `<FUNCTION_APP_NAME>` | README deploy command | Your function app resource name |
+| `<FUNCTION_APP_HOST>` | `search/skillset.json` | e.g. `myfuncapp.azurewebsites.net` |
+| `<FUNCTION_KEY>` | `search/skillset.json` | Function App function key |
+| `<AOAI_ENDPOINT>` | `search/skillset.json`, `search/index.json`, Function settings | e.g. `https://myaoai.openai.azure.com/` |
+| `<AOAI_API_KEY>` | `search/skillset.json`, `search/index.json`, Function settings | Azure OpenAI key |
+| `<AOAI_EMBED_DEPLOYMENT>` | `search/skillset.json`, `search/index.json` | Ada-002 deployment name |
+| `<AOAI_VISION_DEPLOYMENT>` | Function settings | Vision chat deployment (e.g. gpt-4o) |
+| `<AOAI_CHAT_DEPLOYMENT>` | Function settings | Chat deployment for summaries |
+| `<DI_ENDPOINT>` / `<DI_API_KEY>` | Function settings | Document Intelligence resource |
+| `<AI_SERVICES_KEY>` | `search/skillset.json` | AI Services multi-service key |
+| `<SEARCH_ENDPOINT>` / `<SEARCH_ADMIN_KEY>` | Function settings | For image-hash cache lookup |
+| `STORAGE_BLOB_SAS` | Function settings | Container SAS so the function can fetch PDFs |

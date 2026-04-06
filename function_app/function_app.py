@@ -6,6 +6,8 @@ from shared.page_label import process_page_label
 from shared.diagram import process_diagram
 from shared.semantic import process_semantic_string
 from shared.summary import process_doc_summary
+from shared.process_document import process_document
+from shared.process_table import process_table
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -32,3 +34,15 @@ def analyze_diagram(req: func.HttpRequest) -> func.HttpResponse:
 def build_doc_summary(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("build-doc-summary invoked")
     return handle_skill_request(req, process_doc_summary)
+
+
+@app.route(route="process-document", methods=["POST"])
+def process_document_route(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("process-document invoked")
+    return handle_skill_request(req, process_document)
+
+
+@app.route(route="shape-table", methods=["POST"])
+def shape_table(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("shape-table invoked")
+    return handle_skill_request(req, process_table)

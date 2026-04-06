@@ -1,13 +1,13 @@
 {
   "name": "mm-manuals-skillset",
-  "description": "Multimodal manual skillset: layout + OCR + custom WebApi enrichments + per-context embeddings",
+  "description": "Multimodal manual skillset v2: layout + DI-direct figure/table enrichment + per-figure vision + per-context embeddings",
 
   "skills": [
 
     {
       "@odata.type": "#Microsoft.Skills.Util.DocumentIntelligenceLayoutSkill",
       "name": "layout-skill",
-      "description": "Extract structured markdown sections (h1-h3) and per-page content",
+      "description": "Built-in DI layout for the markdown text path (h1-h3 sections, page chunks)",
       "context": "/document",
       "outputMode": "oneToMany",
       "markdownHeaderDepth": "h3",
@@ -71,6 +71,28 @@
 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "process-document-skill",
+      "description": "Calls Azure DI directly to extract per-figure crops + per-table markdown with section enrichment",
+      "context": "/document",
+      "uri": "https://<FUNCTION_APP_HOST>/api/process-document?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT230S",
+      "batchSize": 1,
+      "degreeOfParallelism": 2,
+      "inputs": [
+        { "name": "source_file", "source": "/document/metadata_storage_name" },
+        { "name": "source_path", "source": "/document/metadata_storage_path" }
+      ],
+      "outputs": [
+        { "name": "enriched_figures", "targetName": "enriched_figures" },
+        { "name": "enriched_tables", "targetName": "enriched_tables" },
+        { "name": "processing_status", "targetName": "doc_processing_status" },
+        { "name": "skill_version", "targetName": "doc_skill_version" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "extract-page-label-skill",
       "description": "Extract printed page label from page text and emit text chunk_id + record_type",
       "context": "/document/markdownDocument/*/pages/*",
@@ -102,32 +124,90 @@
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "analyze-diagram-skill",
-      "description": "Vision-based diagram classification + description for each normalized page image",
-      "context": "/document/normalized_images/*",
+      "description": "Per-figure vision analysis. Iterates over enriched_figures from process-document.",
+      "context": "/document/enriched_figures/*",
       "uri": "https://<FUNCTION_APP_HOST>/api/analyze-diagram?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
       "timeout": "PT230S",
       "batchSize": 1,
       "degreeOfParallelism": 4,
       "inputs": [
-        { "name": "image", "source": "/document/normalized_images/*" },
-        { "name": "ocr_text", "source": "/document/normalized_images/*/ocrText" },
-        { "name": "source_file", "source": "/document/metadata_storage_name" },
-        { "name": "source_path", "source": "/document/metadata_storage_path" },
-        { "name": "physical_pdf_page", "source": "/document/normalized_images/*/pageNumber" }
+        { "name": "image_b64", "source": "/document/enriched_figures/*/image_b64" },
+        { "name": "figure_id", "source": "/document/enriched_figures/*/figure_id" },
+        { "name": "page_number", "source": "/document/enriched_figures/*/page_number" },
+        { "name": "caption", "source": "/document/enriched_figures/*/caption" },
+        { "name": "bbox", "source": "/document/enriched_figures/*/bbox" },
+        { "name": "header_1", "source": "/document/enriched_figures/*/header_1" },
+        { "name": "header_2", "source": "/document/enriched_figures/*/header_2" },
+        { "name": "header_3", "source": "/document/enriched_figures/*/header_3" },
+        { "name": "surrounding_context", "source": "/document/enriched_figures/*/surrounding_context" },
+        { "name": "source_file", "source": "/document/enriched_figures/*/source_file" },
+        { "name": "source_path", "source": "/document/enriched_figures/*/source_path" },
+        { "name": "parent_id", "source": "/document/enriched_figures/*/parent_id" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "dgm_chunk_id" },
         { "name": "parent_id", "targetName": "dgm_parent_id" },
         { "name": "record_type", "targetName": "dgm_record_type" },
-        { "name": "has_diagram", "targetName": "has_diagram" },
-        { "name": "diagram_description", "targetName": "diagram_description" },
-        { "name": "diagram_category", "targetName": "diagram_category" },
-        { "name": "figure_ref", "targetName": "figure_ref" },
-        { "name": "image_hash", "targetName": "image_hash" },
+        { "name": "figure_id", "targetName": "dgm_figure_id" },
+        { "name": "figure_bbox", "targetName": "dgm_figure_bbox" },
+        { "name": "image_hash", "targetName": "dgm_image_hash" },
         { "name": "physical_pdf_page", "targetName": "dgm_physical_pdf_page" },
+        { "name": "physical_pdf_page_end", "targetName": "dgm_physical_pdf_page_end" },
+        { "name": "header_1", "targetName": "dgm_header_1" },
+        { "name": "header_2", "targetName": "dgm_header_2" },
+        { "name": "header_3", "targetName": "dgm_header_3" },
+        { "name": "surrounding_context", "targetName": "dgm_surrounding_context" },
+        { "name": "has_diagram", "targetName": "dgm_has_diagram" },
+        { "name": "diagram_description", "targetName": "dgm_description" },
+        { "name": "diagram_category", "targetName": "dgm_category" },
+        { "name": "figure_ref", "targetName": "dgm_figure_ref" },
         { "name": "processing_status", "targetName": "dgm_processing_status" },
         { "name": "skill_version", "targetName": "dgm_skill_version" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "shape-table-skill",
+      "description": "Per-table shaper. Iterates over enriched_tables from process-document.",
+      "context": "/document/enriched_tables/*",
+      "uri": "https://<FUNCTION_APP_HOST>/api/shape-table?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT60S",
+      "batchSize": 5,
+      "degreeOfParallelism": 4,
+      "inputs": [
+        { "name": "table_index", "source": "/document/enriched_tables/*/table_index" },
+        { "name": "page_start", "source": "/document/enriched_tables/*/page_start" },
+        { "name": "page_end", "source": "/document/enriched_tables/*/page_end" },
+        { "name": "markdown", "source": "/document/enriched_tables/*/markdown" },
+        { "name": "row_count", "source": "/document/enriched_tables/*/row_count" },
+        { "name": "col_count", "source": "/document/enriched_tables/*/col_count" },
+        { "name": "caption", "source": "/document/enriched_tables/*/caption" },
+        { "name": "header_1", "source": "/document/enriched_tables/*/header_1" },
+        { "name": "header_2", "source": "/document/enriched_tables/*/header_2" },
+        { "name": "header_3", "source": "/document/enriched_tables/*/header_3" },
+        { "name": "source_file", "source": "/document/enriched_tables/*/source_file" },
+        { "name": "source_path", "source": "/document/enriched_tables/*/source_path" },
+        { "name": "parent_id", "source": "/document/enriched_tables/*/parent_id" }
+      ],
+      "outputs": [
+        { "name": "chunk_id", "targetName": "tbl_chunk_id" },
+        { "name": "parent_id", "targetName": "tbl_parent_id" },
+        { "name": "record_type", "targetName": "tbl_record_type" },
+        { "name": "chunk", "targetName": "tbl_chunk" },
+        { "name": "chunk_for_semantic", "targetName": "tbl_chunk_for_semantic" },
+        { "name": "header_1", "targetName": "tbl_header_1" },
+        { "name": "header_2", "targetName": "tbl_header_2" },
+        { "name": "header_3", "targetName": "tbl_header_3" },
+        { "name": "physical_pdf_page", "targetName": "tbl_physical_pdf_page" },
+        { "name": "physical_pdf_page_end", "targetName": "tbl_physical_pdf_page_end" },
+        { "name": "table_row_count", "targetName": "tbl_row_count" },
+        { "name": "table_col_count", "targetName": "tbl_col_count" },
+        { "name": "figure_ref", "targetName": "tbl_figure_ref" },
+        { "name": "processing_status", "targetName": "tbl_processing_status" },
+        { "name": "skill_version", "targetName": "tbl_skill_version" }
       ]
     },
 
@@ -159,7 +239,7 @@
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "build-semantic-string-diagram",
       "description": "Build the real chunk_for_semantic string for diagram chunks",
-      "context": "/document/normalized_images/*",
+      "context": "/document/enriched_figures/*",
       "uri": "https://<FUNCTION_APP_HOST>/api/build-semantic-string?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
       "timeout": "PT60S",
@@ -167,12 +247,12 @@
       "degreeOfParallelism": 4,
       "inputs": [
         { "name": "mode", "source": "='diagram'" },
-        { "name": "diagram_description", "source": "/document/normalized_images/*/diagram_description" },
-        { "name": "diagram_category", "source": "/document/normalized_images/*/diagram_category" },
-        { "name": "figure_ref", "source": "/document/normalized_images/*/figure_ref" },
-        { "name": "ocr_text", "source": "/document/normalized_images/*/ocrText" },
-        { "name": "source_file", "source": "/document/metadata_storage_name" },
-        { "name": "physical_pdf_page", "source": "/document/normalized_images/*/dgm_physical_pdf_page" }
+        { "name": "diagram_description", "source": "/document/enriched_figures/*/dgm_description" },
+        { "name": "diagram_category", "source": "/document/enriched_figures/*/dgm_category" },
+        { "name": "figure_ref", "source": "/document/enriched_figures/*/dgm_figure_ref" },
+        { "name": "ocr_text", "source": "/document/enriched_figures/*/surrounding_context" },
+        { "name": "source_file", "source": "/document/enriched_figures/*/source_file" },
+        { "name": "physical_pdf_page", "source": "/document/enriched_figures/*/page_number" }
       ],
       "outputs": [
         { "name": "chunk_for_semantic", "targetName": "dgm_chunk_for_semantic" }
@@ -182,7 +262,7 @@
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "build-doc-summary-skill",
-      "description": "Build one summary record per parent document",
+      "description": "Build one summary record per parent document. Uses markdown content.",
       "context": "/document",
       "uri": "https://<FUNCTION_APP_HOST>/api/build-doc-summary?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
@@ -192,6 +272,7 @@
       "inputs": [
         { "name": "source_file", "source": "/document/metadata_storage_name" },
         { "name": "source_path", "source": "/document/metadata_storage_path" },
+        { "name": "markdown_text", "source": "/document/markdownDocument/*/content" },
         { "name": "merged_text", "source": "/document/ocrMergedContent" },
         { "name": "section_titles", "source": "/document/markdownDocument/*/sections/h1" }
       ],
@@ -209,7 +290,7 @@
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-text-chunks",
-      "description": "Ada-002 embeddings for text chunks (uses chunk_for_semantic)",
+      "description": "Ada-002 embeddings for text chunks",
       "context": "/document/markdownDocument/*/pages/*",
       "resourceUri": "<AOAI_ENDPOINT>",
       "apiKey": "<AOAI_API_KEY>",
@@ -227,18 +308,36 @@
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-diagram-chunks",
-      "description": "Ada-002 embeddings for diagram chunks (uses dgm_chunk_for_semantic)",
-      "context": "/document/normalized_images/*",
+      "description": "Ada-002 embeddings for per-figure diagram chunks",
+      "context": "/document/enriched_figures/*",
       "resourceUri": "<AOAI_ENDPOINT>",
       "apiKey": "<AOAI_API_KEY>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
       "inputs": [
-        { "name": "text", "source": "/document/normalized_images/*/dgm_chunk_for_semantic" }
+        { "name": "text", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" }
       ],
       "outputs": [
         { "name": "embedding", "targetName": "dgm_text_vector" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "embed-table-chunks",
+      "description": "Ada-002 embeddings for table chunks",
+      "context": "/document/enriched_tables/*",
+      "resourceUri": "<AOAI_ENDPOINT>",
+      "apiKey": "<AOAI_API_KEY>",
+      "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
+      "modelName": "text-embedding-ada-002",
+      "dimensions": 1536,
+      "inputs": [
+        { "name": "text", "source": "/document/enriched_tables/*/tbl_chunk_for_semantic" }
+      ],
+      "outputs": [
+        { "name": "embedding", "targetName": "tbl_text_vector" }
       ]
     },
 
@@ -299,25 +398,57 @@
       {
         "targetIndexName": "mm-manuals-index",
         "parentKeyFieldName": "parent_id",
-        "sourceContext": "/document/normalized_images/*",
+        "sourceContext": "/document/enriched_figures/*",
         "mappings": [
-          { "name": "chunk_id", "source": "/document/normalized_images/*/dgm_chunk_id" },
-          { "name": "record_type", "source": "/document/normalized_images/*/dgm_record_type" },
-          { "name": "source_file", "source": "/document/metadata_storage_name" },
-          { "name": "source_url", "source": "/document/metadata_storage_path" },
-          { "name": "source_path", "source": "/document/metadata_storage_path" },
-          { "name": "physical_pdf_page", "source": "/document/normalized_images/*/dgm_physical_pdf_page" },
-          { "name": "diagram_description", "source": "/document/normalized_images/*/diagram_description" },
-          { "name": "diagram_category", "source": "/document/normalized_images/*/diagram_category" },
-          { "name": "has_diagram", "source": "/document/normalized_images/*/has_diagram" },
-          { "name": "figure_ref", "source": "/document/normalized_images/*/figure_ref" },
-          { "name": "image_hash", "source": "/document/normalized_images/*/image_hash" },
-          { "name": "chunk", "source": "/document/normalized_images/*/diagram_description" },
-          { "name": "chunk_for_semantic", "source": "/document/normalized_images/*/dgm_chunk_for_semantic" },
-          { "name": "ocr_fallback_text", "source": "/document/normalized_images/*/ocrText" },
-          { "name": "text_vector", "source": "/document/normalized_images/*/dgm_text_vector" },
-          { "name": "processing_status", "source": "/document/normalized_images/*/dgm_processing_status" },
-          { "name": "skill_version", "source": "/document/normalized_images/*/dgm_skill_version" }
+          { "name": "chunk_id", "source": "/document/enriched_figures/*/dgm_chunk_id" },
+          { "name": "record_type", "source": "/document/enriched_figures/*/dgm_record_type" },
+          { "name": "source_file", "source": "/document/enriched_figures/*/source_file" },
+          { "name": "source_url", "source": "/document/enriched_figures/*/source_path" },
+          { "name": "source_path", "source": "/document/enriched_figures/*/source_path" },
+          { "name": "physical_pdf_page", "source": "/document/enriched_figures/*/dgm_physical_pdf_page" },
+          { "name": "physical_pdf_page_end", "source": "/document/enriched_figures/*/dgm_physical_pdf_page_end" },
+          { "name": "header_1", "source": "/document/enriched_figures/*/dgm_header_1" },
+          { "name": "header_2", "source": "/document/enriched_figures/*/dgm_header_2" },
+          { "name": "header_3", "source": "/document/enriched_figures/*/dgm_header_3" },
+          { "name": "figure_id", "source": "/document/enriched_figures/*/dgm_figure_id" },
+          { "name": "figure_bbox", "source": "/document/enriched_figures/*/dgm_figure_bbox" },
+          { "name": "diagram_description", "source": "/document/enriched_figures/*/dgm_description" },
+          { "name": "diagram_category", "source": "/document/enriched_figures/*/dgm_category" },
+          { "name": "has_diagram", "source": "/document/enriched_figures/*/dgm_has_diagram" },
+          { "name": "figure_ref", "source": "/document/enriched_figures/*/dgm_figure_ref" },
+          { "name": "image_hash", "source": "/document/enriched_figures/*/dgm_image_hash" },
+          { "name": "surrounding_context", "source": "/document/enriched_figures/*/dgm_surrounding_context" },
+          { "name": "chunk", "source": "/document/enriched_figures/*/dgm_description" },
+          { "name": "chunk_for_semantic", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" },
+          { "name": "text_vector", "source": "/document/enriched_figures/*/dgm_text_vector" },
+          { "name": "processing_status", "source": "/document/enriched_figures/*/dgm_processing_status" },
+          { "name": "skill_version", "source": "/document/enriched_figures/*/dgm_skill_version" }
+        ]
+      },
+
+      {
+        "targetIndexName": "mm-manuals-index",
+        "parentKeyFieldName": "parent_id",
+        "sourceContext": "/document/enriched_tables/*",
+        "mappings": [
+          { "name": "chunk_id", "source": "/document/enriched_tables/*/tbl_chunk_id" },
+          { "name": "record_type", "source": "/document/enriched_tables/*/tbl_record_type" },
+          { "name": "source_file", "source": "/document/enriched_tables/*/source_file" },
+          { "name": "source_url", "source": "/document/enriched_tables/*/source_path" },
+          { "name": "source_path", "source": "/document/enriched_tables/*/source_path" },
+          { "name": "header_1", "source": "/document/enriched_tables/*/tbl_header_1" },
+          { "name": "header_2", "source": "/document/enriched_tables/*/tbl_header_2" },
+          { "name": "header_3", "source": "/document/enriched_tables/*/tbl_header_3" },
+          { "name": "physical_pdf_page", "source": "/document/enriched_tables/*/tbl_physical_pdf_page" },
+          { "name": "physical_pdf_page_end", "source": "/document/enriched_tables/*/tbl_physical_pdf_page_end" },
+          { "name": "table_row_count", "source": "/document/enriched_tables/*/tbl_row_count" },
+          { "name": "table_col_count", "source": "/document/enriched_tables/*/tbl_col_count" },
+          { "name": "figure_ref", "source": "/document/enriched_tables/*/tbl_figure_ref" },
+          { "name": "chunk", "source": "/document/enriched_tables/*/tbl_chunk" },
+          { "name": "chunk_for_semantic", "source": "/document/enriched_tables/*/tbl_chunk_for_semantic" },
+          { "name": "text_vector", "source": "/document/enriched_tables/*/tbl_text_vector" },
+          { "name": "processing_status", "source": "/document/enriched_tables/*/tbl_processing_status" },
+          { "name": "skill_version", "source": "/document/enriched_tables/*/tbl_skill_version" }
         ]
       },
 
