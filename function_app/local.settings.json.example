@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "<AZURE_WEBJOBS_STORAGE_CONN>",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AOAI_ENDPOINT": "<AOAI_ENDPOINT>",
+    "AOAI_API_KEY": "<AOAI_API_KEY>",
+    "AOAI_API_VERSION": "2024-08-01-preview",
+    "AOAI_VISION_DEPLOYMENT": "<AOAI_VISION_DEPLOYMENT>",
+    "AOAI_CHAT_DEPLOYMENT": "<AOAI_CHAT_DEPLOYMENT>",
+    "SKILL_VERSION": "1.0.0"
+  }
+}

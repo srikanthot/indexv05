@@ -1,0 +1,83 @@
+{
+  "name": "mm-manuals-index",
+  "fields": [
+    { "name": "chunk_id", "type": "Edm.String", "key": true, "searchable": true, "filterable": true, "retrievable": true, "sortable": true, "facetable": false, "analyzer": "keyword" },
+
+    { "name": "parent_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "record_type", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+
+    { "name": "chunk", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "chunk_for_semantic", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "chunk_type", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+
+    { "name": "text_vector", "type": "Collection(Edm.Single)", "searchable": true, "filterable": false, "retrievable": false, "stored": false, "sortable": false, "facetable": false, "dimensions": 1536, "vectorSearchProfile": "mm-hnsw-profile" },
+
+    { "name": "physical_pdf_page", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "physical_pdf_page_end", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "printed_page_label", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "printed_page_label_end", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "layout_ordinal", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+
+    { "name": "header_1", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "header_2", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "header_3", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+
+    { "name": "figure_ref", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "diagram_description", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "diagram_category", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "has_diagram", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+
+    { "name": "source_file", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": true, "facetable": true },
+    { "name": "source_url", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "source_path", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+
+    { "name": "ocr_fallback_text", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "surrounding_context", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+
+    { "name": "processing_status", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "skill_version", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "image_hash", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false }
+  ],
+
+  "similarity": { "@odata.type": "#Microsoft.Azure.Search.BM25Similarity" },
+
+  "semantic": {
+    "defaultConfiguration": "mm-semantic-config",
+    "configurations": [
+      {
+        "name": "mm-semantic-config",
+        "prioritizedFields": {
+          "titleField": { "fieldName": "source_file" },
+          "prioritizedContentFields": [
+            { "fieldName": "chunk_for_semantic" },
+            { "fieldName": "chunk" },
+            { "fieldName": "diagram_description" }
+          ],
+          "prioritizedKeywordsFields": [
+            { "fieldName": "header_1" },
+            { "fieldName": "header_2" },
+            { "fieldName": "header_3" },
+            { "fieldName": "figure_ref" },
+            { "fieldName": "printed_page_label" },
+            { "fieldName": "diagram_category" }
+          ]
+        }
+      }
+    ]
+  },
+
+  "vectorSearch": {
+    "algorithms": [
+      {
+        "name": "mm-hnsw-algo",
+        "kind": "hnsw",
+        "hnswParameters": { "m": 8, "efConstruction": 400, "efSearch": 500, "metric": "cosine" }
+      }
+    ],
+    "profiles": [
+      { "name": "mm-hnsw-profile", "algorithm": "mm-hnsw-algo" }
+    ],
+    "vectorizers": [],
+    "compressions": []
+  }
+}

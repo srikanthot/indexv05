@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Azure Functions
+.azurefunctions/
+bin/
+obj/
+local.settings.json
+.python_packages/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secrets / env
+*.env
+.env
+*.key
+*.pem

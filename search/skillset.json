@@ -1,0 +1,346 @@
+{
+  "name": "mm-manuals-skillset",
+  "description": "Multimodal manual skillset: layout + OCR + custom WebApi enrichments + per-context embeddings",
+
+  "skills": [
+
+    {
+      "@odata.type": "#Microsoft.Skills.Util.DocumentIntelligenceLayoutSkill",
+      "name": "layout-skill",
+      "description": "Extract structured markdown sections (h1-h3) and per-page content",
+      "context": "/document",
+      "outputMode": "oneToMany",
+      "markdownHeaderDepth": "h3",
+      "inputs": [
+        { "name": "file_data", "source": "/document/file_data" }
+      ],
+      "outputs": [
+        { "name": "markdown_document", "targetName": "markdownDocument" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Vision.OcrSkill",
+      "name": "ocr-skill",
+      "description": "OCR over normalized page images for fallback text only",
+      "context": "/document/normalized_images/*",
+      "defaultLanguageCode": "en",
+      "detectOrientation": true,
+      "inputs": [
+        { "name": "image", "source": "/document/normalized_images/*" }
+      ],
+      "outputs": [
+        { "name": "text", "targetName": "ocrText" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.MergeSkill",
+      "name": "merge-ocr",
+      "description": "Build doc-level OCR fallback string. Searchable, NOT semantic-priority.",
+      "context": "/document",
+      "insertPreTag": " ",
+      "insertPostTag": " ",
+      "inputs": [
+        { "name": "text", "source": "/document/content" },
+        { "name": "itemsToInsert", "source": "/document/normalized_images/*/ocrText" },
+        { "name": "offsets", "source": "/document/normalized_images/*/contentOffset" }
+      ],
+      "outputs": [
+        { "name": "mergedText", "targetName": "ocrMergedContent" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.SplitSkill",
+      "name": "split-pages",
+      "description": "Chunk each layout section into overlapping pages",
+      "context": "/document/markdownDocument/*",
+      "defaultLanguageCode": "en",
+      "textSplitMode": "pages",
+      "maximumPageLength": 1200,
+      "pageOverlapLength": 200,
+      "unit": "characters",
+      "inputs": [
+        { "name": "text", "source": "/document/markdownDocument/*/content" }
+      ],
+      "outputs": [
+        { "name": "textItems", "targetName": "pages" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "extract-page-label-skill",
+      "description": "Extract printed page label from page text and emit text chunk_id + record_type",
+      "context": "/document/markdownDocument/*/pages/*",
+      "uri": "https://<FUNCTION_APP_HOST>/api/extract-page-label?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT60S",
+      "batchSize": 5,
+      "degreeOfParallelism": 4,
+      "inputs": [
+        { "name": "page_text", "source": "/document/markdownDocument/*/pages/*" },
+        { "name": "source_file", "source": "/document/metadata_storage_name" },
+        { "name": "source_path", "source": "/document/metadata_storage_path" },
+        { "name": "layout_ordinal", "source": "/document/markdownDocument/*/ordinal_position" },
+        { "name": "physical_pdf_page", "source": "/document/markdownDocument/*/pageNumber" }
+      ],
+      "outputs": [
+        { "name": "chunk_id", "targetName": "text_chunk_id" },
+        { "name": "parent_id", "targetName": "text_parent_id" },
+        { "name": "record_type", "targetName": "text_record_type" },
+        { "name": "printed_page_label", "targetName": "printed_page_label" },
+        { "name": "printed_page_label_end", "targetName": "printed_page_label_end" },
+        { "name": "physical_pdf_page", "targetName": "text_physical_pdf_page" },
+        { "name": "physical_pdf_page_end", "targetName": "text_physical_pdf_page_end" },
+        { "name": "processing_status", "targetName": "text_processing_status" },
+        { "name": "skill_version", "targetName": "text_skill_version" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "analyze-diagram-skill",
+      "description": "Vision-based diagram classification + description for each normalized page image",
+      "context": "/document/normalized_images/*",
+      "uri": "https://<FUNCTION_APP_HOST>/api/analyze-diagram?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT230S",
+      "batchSize": 1,
+      "degreeOfParallelism": 4,
+      "inputs": [
+        { "name": "image", "source": "/document/normalized_images/*" },
+        { "name": "ocr_text", "source": "/document/normalized_images/*/ocrText" },
+        { "name": "source_file", "source": "/document/metadata_storage_name" },
+        { "name": "source_path", "source": "/document/metadata_storage_path" },
+        { "name": "physical_pdf_page", "source": "/document/normalized_images/*/pageNumber" }
+      ],
+      "outputs": [
+        { "name": "chunk_id", "targetName": "dgm_chunk_id" },
+        { "name": "parent_id", "targetName": "dgm_parent_id" },
+        { "name": "record_type", "targetName": "dgm_record_type" },
+        { "name": "has_diagram", "targetName": "has_diagram" },
+        { "name": "diagram_description", "targetName": "diagram_description" },
+        { "name": "diagram_category", "targetName": "diagram_category" },
+        { "name": "figure_ref", "targetName": "figure_ref" },
+        { "name": "image_hash", "targetName": "image_hash" },
+        { "name": "physical_pdf_page", "targetName": "dgm_physical_pdf_page" },
+        { "name": "processing_status", "targetName": "dgm_processing_status" },
+        { "name": "skill_version", "targetName": "dgm_skill_version" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "build-semantic-string-text",
+      "description": "Build the real chunk_for_semantic string for text chunks",
+      "context": "/document/markdownDocument/*/pages/*",
+      "uri": "https://<FUNCTION_APP_HOST>/api/build-semantic-string?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT60S",
+      "batchSize": 10,
+      "degreeOfParallelism": 4,
+      "inputs": [
+        { "name": "mode", "source": "='text'" },
+        { "name": "chunk", "source": "/document/markdownDocument/*/pages/*" },
+        { "name": "header_1", "source": "/document/markdownDocument/*/sections/h1" },
+        { "name": "header_2", "source": "/document/markdownDocument/*/sections/h2" },
+        { "name": "header_3", "source": "/document/markdownDocument/*/sections/h3" },
+        { "name": "source_file", "source": "/document/metadata_storage_name" },
+        { "name": "printed_page_label", "source": "/document/markdownDocument/*/pages/*/printed_page_label" }
+      ],
+      "outputs": [
+        { "name": "chunk_for_semantic", "targetName": "text_chunk_for_semantic" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "build-semantic-string-diagram",
+      "description": "Build the real chunk_for_semantic string for diagram chunks",
+      "context": "/document/normalized_images/*",
+      "uri": "https://<FUNCTION_APP_HOST>/api/build-semantic-string?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT60S",
+      "batchSize": 10,
+      "degreeOfParallelism": 4,
+      "inputs": [
+        { "name": "mode", "source": "='diagram'" },
+        { "name": "diagram_description", "source": "/document/normalized_images/*/diagram_description" },
+        { "name": "diagram_category", "source": "/document/normalized_images/*/diagram_category" },
+        { "name": "figure_ref", "source": "/document/normalized_images/*/figure_ref" },
+        { "name": "ocr_text", "source": "/document/normalized_images/*/ocrText" },
+        { "name": "source_file", "source": "/document/metadata_storage_name" },
+        { "name": "physical_pdf_page", "source": "/document/normalized_images/*/dgm_physical_pdf_page" }
+      ],
+      "outputs": [
+        { "name": "chunk_for_semantic", "targetName": "dgm_chunk_for_semantic" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
+      "name": "build-doc-summary-skill",
+      "description": "Build one summary record per parent document",
+      "context": "/document",
+      "uri": "https://<FUNCTION_APP_HOST>/api/build-doc-summary?code=<FUNCTION_KEY>",
+      "httpMethod": "POST",
+      "timeout": "PT230S",
+      "batchSize": 1,
+      "degreeOfParallelism": 2,
+      "inputs": [
+        { "name": "source_file", "source": "/document/metadata_storage_name" },
+        { "name": "source_path", "source": "/document/metadata_storage_path" },
+        { "name": "merged_text", "source": "/document/ocrMergedContent" },
+        { "name": "section_titles", "source": "/document/markdownDocument/*/sections/h1" }
+      ],
+      "outputs": [
+        { "name": "chunk_id", "targetName": "sum_chunk_id" },
+        { "name": "parent_id", "targetName": "sum_parent_id" },
+        { "name": "record_type", "targetName": "sum_record_type" },
+        { "name": "chunk", "targetName": "sum_chunk" },
+        { "name": "chunk_for_semantic", "targetName": "sum_chunk_for_semantic" },
+        { "name": "processing_status", "targetName": "sum_processing_status" },
+        { "name": "skill_version", "targetName": "sum_skill_version" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "embed-text-chunks",
+      "description": "Ada-002 embeddings for text chunks (uses chunk_for_semantic)",
+      "context": "/document/markdownDocument/*/pages/*",
+      "resourceUri": "<AOAI_ENDPOINT>",
+      "apiKey": "<AOAI_API_KEY>",
+      "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
+      "modelName": "text-embedding-ada-002",
+      "dimensions": 1536,
+      "inputs": [
+        { "name": "text", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" }
+      ],
+      "outputs": [
+        { "name": "embedding", "targetName": "text_vector" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "embed-diagram-chunks",
+      "description": "Ada-002 embeddings for diagram chunks (uses dgm_chunk_for_semantic)",
+      "context": "/document/normalized_images/*",
+      "resourceUri": "<AOAI_ENDPOINT>",
+      "apiKey": "<AOAI_API_KEY>",
+      "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
+      "modelName": "text-embedding-ada-002",
+      "dimensions": 1536,
+      "inputs": [
+        { "name": "text", "source": "/document/normalized_images/*/dgm_chunk_for_semantic" }
+      ],
+      "outputs": [
+        { "name": "embedding", "targetName": "dgm_text_vector" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "embed-summary",
+      "description": "Ada-002 embedding for the per-document summary record",
+      "context": "/document",
+      "resourceUri": "<AOAI_ENDPOINT>",
+      "apiKey": "<AOAI_API_KEY>",
+      "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
+      "modelName": "text-embedding-ada-002",
+      "dimensions": 1536,
+      "inputs": [
+        { "name": "text", "source": "/document/sum_chunk_for_semantic" }
+      ],
+      "outputs": [
+        { "name": "embedding", "targetName": "sum_text_vector" }
+      ]
+    }
+  ],
+
+  "cognitiveServices": {
+    "@odata.type": "#Microsoft.Azure.Search.CognitiveServicesByKey",
+    "key": "<AI_SERVICES_KEY>"
+  },
+
+  "indexProjections": {
+    "selectors": [
+
+      {
+        "targetIndexName": "mm-manuals-index",
+        "parentKeyFieldName": "parent_id",
+        "sourceContext": "/document/markdownDocument/*/pages/*",
+        "mappings": [
+          { "name": "chunk_id", "source": "/document/markdownDocument/*/pages/*/text_chunk_id" },
+          { "name": "record_type", "source": "/document/markdownDocument/*/pages/*/text_record_type" },
+          { "name": "source_file", "source": "/document/metadata_storage_name" },
+          { "name": "source_url", "source": "/document/metadata_storage_path" },
+          { "name": "source_path", "source": "/document/metadata_storage_path" },
+          { "name": "header_1", "source": "/document/markdownDocument/*/sections/h1" },
+          { "name": "header_2", "source": "/document/markdownDocument/*/sections/h2" },
+          { "name": "header_3", "source": "/document/markdownDocument/*/sections/h3" },
+          { "name": "layout_ordinal", "source": "/document/markdownDocument/*/ordinal_position" },
+          { "name": "physical_pdf_page", "source": "/document/markdownDocument/*/pages/*/text_physical_pdf_page" },
+          { "name": "physical_pdf_page_end", "source": "/document/markdownDocument/*/pages/*/text_physical_pdf_page_end" },
+          { "name": "printed_page_label", "source": "/document/markdownDocument/*/pages/*/printed_page_label" },
+          { "name": "printed_page_label_end", "source": "/document/markdownDocument/*/pages/*/printed_page_label_end" },
+          { "name": "chunk", "source": "/document/markdownDocument/*/pages/*" },
+          { "name": "chunk_for_semantic", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" },
+          { "name": "ocr_fallback_text", "source": "/document/ocrMergedContent" },
+          { "name": "text_vector", "source": "/document/markdownDocument/*/pages/*/text_vector" },
+          { "name": "processing_status", "source": "/document/markdownDocument/*/pages/*/text_processing_status" },
+          { "name": "skill_version", "source": "/document/markdownDocument/*/pages/*/text_skill_version" }
+        ]
+      },
+
+      {
+        "targetIndexName": "mm-manuals-index",
+        "parentKeyFieldName": "parent_id",
+        "sourceContext": "/document/normalized_images/*",
+        "mappings": [
+          { "name": "chunk_id", "source": "/document/normalized_images/*/dgm_chunk_id" },
+          { "name": "record_type", "source": "/document/normalized_images/*/dgm_record_type" },
+          { "name": "source_file", "source": "/document/metadata_storage_name" },
+          { "name": "source_url", "source": "/document/metadata_storage_path" },
+          { "name": "source_path", "source": "/document/metadata_storage_path" },
+          { "name": "physical_pdf_page", "source": "/document/normalized_images/*/dgm_physical_pdf_page" },
+          { "name": "diagram_description", "source": "/document/normalized_images/*/diagram_description" },
+          { "name": "diagram_category", "source": "/document/normalized_images/*/diagram_category" },
+          { "name": "has_diagram", "source": "/document/normalized_images/*/has_diagram" },
+          { "name": "figure_ref", "source": "/document/normalized_images/*/figure_ref" },
+          { "name": "image_hash", "source": "/document/normalized_images/*/image_hash" },
+          { "name": "chunk", "source": "/document/normalized_images/*/diagram_description" },
+          { "name": "chunk_for_semantic", "source": "/document/normalized_images/*/dgm_chunk_for_semantic" },
+          { "name": "ocr_fallback_text", "source": "/document/normalized_images/*/ocrText" },
+          { "name": "text_vector", "source": "/document/normalized_images/*/dgm_text_vector" },
+          { "name": "processing_status", "source": "/document/normalized_images/*/dgm_processing_status" },
+          { "name": "skill_version", "source": "/document/normalized_images/*/dgm_skill_version" }
+        ]
+      },
+
+      {
+        "targetIndexName": "mm-manuals-index",
+        "parentKeyFieldName": "parent_id",
+        "sourceContext": "/document",
+        "mappings": [
+          { "name": "chunk_id", "source": "/document/sum_chunk_id" },
+          { "name": "record_type", "source": "/document/sum_record_type" },
+          { "name": "source_file", "source": "/document/metadata_storage_name" },
+          { "name": "source_url", "source": "/document/metadata_storage_path" },
+          { "name": "source_path", "source": "/document/metadata_storage_path" },
+          { "name": "chunk", "source": "/document/sum_chunk" },
+          { "name": "chunk_for_semantic", "source": "/document/sum_chunk_for_semantic" },
+          { "name": "text_vector", "source": "/document/sum_text_vector" },
+          { "name": "processing_status", "source": "/document/sum_processing_status" },
+          { "name": "skill_version", "source": "/document/sum_skill_version" }
+        ]
+      }
+    ],
+    "parameters": {
+      "projectionMode": "skipIndexingParentDocuments"
+    }
+  }
+}

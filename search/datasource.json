@@ -1,0 +1,19 @@
+{
+  "name": "mm-manuals-ds",
+  "description": "Blob source for multimodal manual indexing",
+  "type": "azureblob",
+  "credentials": {
+    "connectionString": "<STORAGE_CONNECTION_STRING>"
+  },
+  "container": {
+    "name": "<STORAGE_CONTAINER_NAME>",
+    "query": ""
+  },
+  "dataChangeDetectionPolicy": {
+    "@odata.type": "#Microsoft.Azure.Search.HighWaterMarkChangeDetectionPolicy",
+    "highWaterMarkColumnName": "metadata_storage_last_modified"
+  },
+  "dataDeletionDetectionPolicy": {
+    "@odata.type": "#Microsoft.Azure.Search.NativeBlobSoftDeleteDeletionDetectionPolicy"
+  }
+}

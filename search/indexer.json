@@ -1,0 +1,24 @@
+{
+  "name": "mm-manuals-indexer",
+  "dataSourceName": "mm-manuals-ds",
+  "targetIndexName": "mm-manuals-index",
+  "skillsetName": "mm-manuals-skillset",
+  "schedule": null,
+  "parameters": {
+    "batchSize": 1,
+    "maxFailedItems": -1,
+    "maxFailedItemsPerBatch": -1,
+    "configuration": {
+      "dataToExtract": "contentAndMetadata",
+      "parsingMode": "default",
+      "allowSkillsetToReadFileData": true,
+      "imageAction": "generateNormalizedImages",
+      "normalizedImageMaxWidth": 2000,
+      "normalizedImageMaxHeight": 2000,
+      "failOnUnsupportedContentType": false,
+      "failOnUnprocessableDocument": false
+    }
+  },
+  "fieldMappings": [],
+  "outputFieldMappings": []
+}
