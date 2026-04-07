@@ -81,7 +81,6 @@ def process_table(data: Dict[str, Any]) -> Dict[str, Any]:
         "physical_pdf_page_end": page_end,
         "table_row_count": row_count,
         "table_col_count": col_count,
-        "figure_ref": caption,
         "source_file": source_file,
         "source_path": source_path,
         "processing_status": "ok",

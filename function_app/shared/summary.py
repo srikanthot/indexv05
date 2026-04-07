@@ -51,8 +51,7 @@ def process_doc_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
     markdown_text = _coalesce_markdown(data.get("markdown_text"))
-    merged_text = safe_str(data.get("merged_text"))
-    primary_text = markdown_text.strip() or merged_text.strip()
+    primary_text = markdown_text.strip()
     titles = _coerce_titles(data.get("section_titles"))
 
     parent_id = parent_id_for(source_path, source_file)

@@ -1,4 +1,16 @@
-# Validation checklist (v2)
+# Validation checklist (v2.1)
+
+## Local (no Azure required)
+
+```bash
+python tests/test_unit.py
+```
+
+Exercises page-span parsing (DI marker timeline), section index walking,
+table extraction with multi-page merge, semantic-string assembly, and
+process_table shaping. Should report `45/45 passed`.
+
+## Azure runtime checks
 
 Run these after the first indexer execution.
 
@@ -88,8 +100,14 @@ Should return results without the client embedding the query.
 
 No collisions. Prefixes: `txt_`, `dgm_`, `tbl_`, `sum_`.
 
-## 13. OCR fallback isolation
-Confirm `ocr_fallback_text` is **not** in `semantic.configurations[].prioritizedContentFields`. (`surrounding_context` is allowed there; raw OCR is not.)
+## 13. Multi-page text spans
+For 5 random text records that visually cross a page boundary in the source PDF, confirm:
+
+  $filter=record_type eq 'text' and physical_pdf_page lt physical_pdf_page_end
+
+Returns at least one record per multi-page chunk. Spot-check that the
+`physical_pdf_page_end` matches the actual last page the chunk text
+appears on in the PDF.
 
 ## 14. Page grounding
 For 5 random text records, confirm `physical_pdf_page` matches the PDF page and `printed_page_label` matches the visible page label.

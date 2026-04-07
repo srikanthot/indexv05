@@ -1,10 +1,20 @@
-# Azure AI Search — Multimodal Manual Indexing (v2)
+# Azure AI Search — Multimodal Manual Indexing (v2.1)
 
-Azure AI Search–native pipeline for diagram-heavy technical manuals. One multimodal index holds **text**, **diagram**, **table**, and **summary** records as peers — all embedded with Ada-002, ranked with a semantic configuration that does not let OCR fallback dominate, and re-queryable via a built-in Azure OpenAI vectorizer.
+Azure AI Search–native pipeline for diagram-heavy technical manuals. One multimodal index holds **text**, **diagram**, **table**, and **summary** records as peers — all embedded with Ada-002 and re-queryable via a built-in Azure OpenAI vectorizer.
 
 Custom logic runs in an Azure Function exposed as Custom WebApi skills.
 
-## What v2 changes vs v1
+## v2.1 targeted fixes (over v2)
+
+| Fix | What changed |
+|---|---|
+| **Multi-page text spans** | `extract-page-label` skill now parses DI's `<!-- PageNumber="N" -->` and `<!-- PageBreak -->` markers in the section markdown to compute real `physical_pdf_page` and `physical_pdf_page_end` per chunk. The skill now also takes `section_content` as input. |
+| **OCR path removed** | The built-in `OcrSkill` and `MergeSkill` are gone. They were only feeding `ocr_fallback_text`, which was never on the semantic priority list and added no retrieval value over DI Layout's markdown. Removed `ocr_fallback_text` field, projection mapping, and `merged_text` input on the summary skill. |
+| **Diagram semantic input renamed** | `build-semantic-string-diagram` now takes `context_text` (was misleadingly named `ocr_text`). The string label changed from "Visible text:" to "Context:". |
+| **Tables drop misleading `figure_ref`** | `process_table` no longer reuses the `figure_ref` field for the table caption. The caption is rendered into `chunk_for_semantic` instead. Removed from the projection mapping. |
+| **Dead `chunk_hash` field removed** | Was added speculatively, never populated. |
+
+## What v2 already changed vs v1
 
 | Capability | v1 | v2 |
 |---|---|---|
@@ -14,7 +24,7 @@ Custom logic runs in an Azure Function exposed as Custom WebApi skills.
 | Tables | sent through vision (lossy prose) | first-class `record_type=table` with structured markdown, multi-page merging, oversized split |
 | Vision prompt | image + OCR hint only | image + section path + page + caption + body figure refs + surrounding text |
 | Image hash caching | none | re-index skips vision calls when `parent_id + image_hash` already exists |
-| Doc summary source | OCR-merged text | DI markdown content (OCR is fallback) |
+| Doc summary source | OCR-merged text | DI markdown content |
 | Query-time vectorizer | none | Azure OpenAI vectorizer attached to the HNSW profile |
 | Dead `chunk_type` field | present | removed |
 
@@ -27,8 +37,6 @@ Blob (PDFs)
 Data Source -> Indexer -> Skillset -> mm-manuals-index
                             |
                             +-- DocumentIntelligenceLayoutSkill (built-in: markdown text path)
-                            +-- OcrSkill (fallback only)
-                            +-- MergeSkill (ocr_fallback_text)
                             +-- SplitSkill (1200 / 200)
                             +-- WebApi: process-document   --> Function -> DI direct -> figures + tables
                             +-- WebApi: extract-page-label --> Function
@@ -165,10 +173,24 @@ Set in App Settings (mirrors `local.settings.json.example`):
 - Diagram records have `surrounding_context` populated.
 - Specification table → `record_type=table` with full markdown grid (not a vision description).
 - Multi-page table → single record with `physical_pdf_page < physical_pdf_page_end`.
+- Multi-page text chunk → record with `physical_pdf_page < physical_pdf_page_end` (DI page markers parsed by `extract-page-label`).
 - Re-running the indexer on an unchanged PDF → vision call count drops (cache hits visible as `processing_status=cache_hit`).
 - Vector query against `text_vector` works **without** client-side embedding (the vectorizer handles it).
 - All `chunk_id` values are unique with the correct prefix (`txt_`, `dgm_`, `tbl_`, `sum_`).
-- OCR text appears in `ocr_fallback_text` only — never as a primary semantic-priority field.
+- No `ocr_fallback_text` field in the index — the OCR path was removed in v2.1.
+
+## Local tests
+
+Pure-Python helpers (page-span parser, section index, table extractor,
+semantic builders, ID helpers) have unit tests under `tests/`:
+
+```bash
+python tests/test_unit.py
+```
+
+These run without Azure credentials. They use synthetic inputs that match
+the shapes Document Intelligence and the built-in skills emit, and they
+catch regressions in the deterministic logic before deploy.
 
 ## Open TODOs / blockers
 

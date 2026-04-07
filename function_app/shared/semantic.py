@@ -40,7 +40,10 @@ def _build_diagram_string(data: Dict[str, Any]) -> str:
     description = safe_str(data.get("diagram_description"))
     category = safe_str(data.get("diagram_category"))
     figure_ref = safe_str(data.get("figure_ref"))
-    ocr = safe_str(data.get("ocr_text"))
+    # Surrounding section text the figure was cropped from. Named
+    # context_text in the skill payload to make it clear this is body
+    # context, not raw OCR.
+    context_text = safe_str(data.get("context_text"))
     page = safe_str(data.get("physical_pdf_page"))
 
     head_bits = []
@@ -54,10 +57,10 @@ def _build_diagram_string(data: Dict[str, Any]) -> str:
     page_line = f"Page: {page}" if page else ""
     head_line = f"Diagram: {head}" if head else "Diagram"
     desc_line = description.strip()
-    ocr_line = f"Visible text: {ocr.strip()[:600]}" if ocr.strip() else ""
+    context_line = f"Context: {context_text.strip()[:600]}" if context_text.strip() else ""
 
     return _join_nonempty(
-        [source_line, page_line, head_line, desc_line, ocr_line],
+        [source_line, page_line, head_line, desc_line, context_line],
         "\n",
     )
 
