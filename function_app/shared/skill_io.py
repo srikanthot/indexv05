@@ -24,6 +24,8 @@ from typing import Callable, Dict, Any
 
 import azure.functions as func
 
+from .config import ConfigError
+
 
 def handle_skill_request(
     req: func.HttpRequest,
@@ -46,6 +48,17 @@ def handle_skill_request(
                 "recordId": record_id,
                 "data": data_out,
                 "errors": [],
+                "warnings": [],
+            })
+        except ConfigError as exc:
+            # Misconfigured Function App: surface as a clean per-record
+            # error instead of a 500. The skillset run will continue and
+            # the indexer error column will show exactly what is missing.
+            logging.error("record %s config error: %s", record_id, exc)
+            values_out.append({
+                "recordId": record_id,
+                "data": {"processing_status": "config_error"},
+                "errors": [{"message": f"ConfigError: {exc}"}],
                 "warnings": [],
             })
         except Exception as exc:

@@ -30,6 +30,7 @@
 
     { "name": "table_row_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_col_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_caption", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
 
     { "name": "source_file", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": true, "facetable": true },
     { "name": "source_url", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
@@ -62,6 +63,7 @@
             { "fieldName": "header_2" },
             { "fieldName": "header_3" },
             { "fieldName": "figure_ref" },
+            { "fieldName": "table_caption" },
             { "fieldName": "printed_page_label" },
             { "fieldName": "diagram_category" }
           ]

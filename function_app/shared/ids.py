@@ -18,15 +18,39 @@ def parent_id_for(source_path: str, source_file: str) -> str:
     return _short_hash(base, 16)
 
 
-def text_chunk_id(source_path: str, source_file: str, layout_ordinal, page_index: int = 0) -> str:
+def chunk_content_hash(chunk_text: str, length: int = 12) -> str:
+    """
+    Stable hash of the actual chunk text. Used to disambiguate multiple
+    pages produced by SplitSkill for the same layout section.
+    """
+    return _short_hash(chunk_text or "", length)
+
+
+def text_chunk_id(
+    source_path: str,
+    source_file: str,
+    layout_ordinal,
+    chunk_text: str = "",
+) -> str:
+    """
+    Stable text chunk ID. Layout ordinal locates the section; the chunk
+    content hash disambiguates the page within the section. This survives
+    re-indexing as long as the chunk text doesn't change.
+    """
     pid = parent_id_for(source_path, source_file)
     ord_str = str(layout_ordinal) if layout_ordinal is not None else "0"
-    return f"txt_{pid}_{ord_str}_{page_index}"
+    chash = chunk_content_hash(chunk_text)
+    return f"txt_{pid}_{ord_str}_{chash}"
 
 
 def diagram_chunk_id(source_path: str, source_file: str, image_hash: str) -> str:
     pid = parent_id_for(source_path, source_file)
     return f"dgm_{pid}_{image_hash[:16]}"
+
+
+def table_chunk_id(source_path: str, source_file: str, table_index: str) -> str:
+    pid = parent_id_for(source_path, source_file)
+    return f"tbl_{pid}_{table_index}"
 
 
 def summary_chunk_id(source_path: str, source_file: str) -> str:
