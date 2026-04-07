@@ -1,4 +1,4 @@
-$zipPath = "C:\AzureIndex\function_app\function_app_deploy.zip"
+$zipPath = "C:\AzureIndex\function_app\function_app_deploy.zip.zip"
 $publishProfilePath = "$env:USERPROFILE\Downloads\azureindex-function.PublishSettings"
 
 [xml]$xml = Get-Content $publishProfilePath
