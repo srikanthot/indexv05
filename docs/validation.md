@@ -3,12 +3,21 @@
 ## Local (no Azure required)
 
 ```bash
-python tests/test_unit.py
+python tests/test_unit.py             # 68 unit assertions
+python tests/test_e2e_simulator.py    # full handler-side end-to-end run
 ```
 
-Exercises page-span parsing (DI marker timeline), section index walking,
-table extraction with multi-page merge, semantic-string assembly, and
-process_table shaping. Should report `45/45 passed`.
+`test_unit.py` exercises page-span parsing (DI marker timeline), section
+index walking, table extraction with multi-page merge, semantic-string
+assembly, process_table shaping, chunk_id collision regression,
+table_caption flow, OData escaping, and config error handling. Should
+report `68/68 passed`.
+
+`test_e2e_simulator.py` drives the real handler functions through the
+exact JSON envelope Azure AI Search sends and prints one finalized
+record of every type (text / multi-page text / diagram / table /
+summary), then validates each against the index schema. Should end
+with `ALL E2E SIMULATION CHECKS PASSED`.
 
 ## Azure runtime checks
 

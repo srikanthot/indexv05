@@ -174,6 +174,7 @@
         { "name": "physical_pdf_page_end", "targetName": "tbl_physical_pdf_page_end" },
         { "name": "table_row_count", "targetName": "tbl_row_count" },
         { "name": "table_col_count", "targetName": "tbl_col_count" },
+        { "name": "table_caption", "targetName": "tbl_caption" },
         { "name": "processing_status", "targetName": "tbl_processing_status" },
         { "name": "skill_version", "targetName": "tbl_skill_version" }
       ]
@@ -409,6 +410,7 @@
           { "name": "physical_pdf_page_end", "source": "/document/enriched_tables/*/tbl_physical_pdf_page_end" },
           { "name": "table_row_count", "source": "/document/enriched_tables/*/tbl_row_count" },
           { "name": "table_col_count", "source": "/document/enriched_tables/*/tbl_col_count" },
+          { "name": "table_caption", "source": "/document/enriched_tables/*/tbl_caption" },
           { "name": "chunk", "source": "/document/enriched_tables/*/tbl_chunk" },
           { "name": "chunk_for_semantic", "source": "/document/enriched_tables/*/tbl_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/enriched_tables/*/tbl_text_vector" },

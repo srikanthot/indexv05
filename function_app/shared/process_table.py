@@ -3,22 +3,18 @@ shape-table custom skill.
 
 Runs once per enriched_table item produced by process-document. Builds
 the index-projection-ready record (chunk_id, chunk, chunk_for_semantic,
-headers, page span, etc.).
+headers, page span, table_caption, etc.).
 """
 
-import hashlib
 from typing import Dict, Any
 
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
+    table_chunk_id,
     safe_int,
     safe_str,
 )
-
-
-def _table_chunk_id(parent_id: str, table_index: str) -> str:
-    return f"tbl_{parent_id}_{table_index}"
 
 
 def _build_semantic(record: Dict[str, Any]) -> str:
@@ -61,7 +57,7 @@ def process_table(data: Dict[str, Any]) -> Dict[str, Any]:
     h2 = safe_str(data.get("header_2"))
     h3 = safe_str(data.get("header_3"))
 
-    chunk_id = _table_chunk_id(parent_id, table_index)
+    chunk_id = table_chunk_id(source_path, source_file, table_index)
     chunk_for_semantic = _build_semantic({
         "source_file": source_file,
         "header_1": h1, "header_2": h2, "header_3": h3,
@@ -81,6 +77,7 @@ def process_table(data: Dict[str, Any]) -> Dict[str, Any]:
         "physical_pdf_page_end": page_end,
         "table_row_count": row_count,
         "table_col_count": col_count,
+        "table_caption": caption,
         "source_file": source_file,
         "source_path": source_path,
         "processing_status": "ok",

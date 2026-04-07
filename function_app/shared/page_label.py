@@ -232,7 +232,7 @@ def process_page_label(data: Dict[str, Any]) -> Dict[str, Any]:
         end_label = str(end_page) if end_page is not None else label
 
     return {
-        "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, 0),
+        "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
         "parent_id": parent_id_for(source_path, source_file),
         "record_type": "text",
         "printed_page_label": label,

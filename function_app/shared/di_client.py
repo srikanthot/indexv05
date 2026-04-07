@@ -14,17 +14,19 @@ from typing import Dict, Any
 
 import httpx
 
+from .config import required_env, optional_env
+
 
 def _endpoint() -> str:
-    return os.environ["DI_ENDPOINT"].rstrip("/")
+    return required_env("DI_ENDPOINT").rstrip("/")
 
 
 def _key() -> str:
-    return os.environ["DI_API_KEY"]
+    return required_env("DI_API_KEY")
 
 
 def _api_version() -> str:
-    return os.environ.get("DI_API_VERSION", "2024-11-30")
+    return optional_env("DI_API_VERSION", "2024-11-30")
 
 
 def analyze_layout(pdf_bytes: bytes, timeout_s: int = 300) -> Dict[str, Any]:
@@ -85,7 +87,7 @@ def fetch_blob_bytes(blob_url: str) -> bytes:
     Simplest path: STORAGE_BLOB_SAS contains a container-level SAS that gets
     appended to every fetch.
     """
-    sas = os.environ.get("STORAGE_BLOB_SAS", "").lstrip("?")
+    sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
     fetch_url = blob_url
     if sas and "?" not in blob_url:
         fetch_url = f"{blob_url}?{sas}"

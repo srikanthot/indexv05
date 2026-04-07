@@ -1,8 +1,18 @@
-# Azure AI Search — Multimodal Manual Indexing (v2.1)
+# Azure AI Search — Multimodal Manual Indexing (v2.2)
 
 Azure AI Search–native pipeline for diagram-heavy technical manuals. One multimodal index holds **text**, **diagram**, **table**, and **summary** records as peers — all embedded with Ada-002 and re-queryable via a built-in Azure OpenAI vectorizer.
 
 Custom logic runs in an Azure Function exposed as Custom WebApi skills.
+
+## v2.2 targeted fixes (over v2.1)
+
+| Fix | What changed |
+|---|---|
+| **chunk_id collision** | `text_chunk_id` now mixes a `chunk_content_hash` of the chunk text instead of a hardcoded `0`, so multiple SplitSkill pages produced from the same layout section get distinct, deterministic IDs. New `chunk_content_hash` and `table_chunk_id` helpers. |
+| **`table_caption` first-class** | Added `table_caption` field to the index, populated by `process_table`, projected by the table selector, and added to the semantic config keywords priority list. Tables no longer reuse `figure_ref` for captions. |
+| **OData injection hardening** | `search_cache.lookup_existing_by_hash` now (a) escapes single quotes in OData literals, (b) whitelists the parent_id/image_hash inputs against `^[A-Za-z0-9_\-]+$`, (c) limits the SELECT to a fixed list of fields known to exist in the index, (d) is feature-gated and silently no-ops if the search env vars are not set. |
+| **Env validation** | New `shared/config.py` with `required_env`/`optional_env`/`feature_enabled` + `ConfigError`. `aoai.py` and `di_client.py` now route through it. `skill_io.handle_skill_request` translates `ConfigError` into a clear per-record `processing_status=config_error` instead of a 500. |
+| **Local end-to-end simulator** | New `tests/test_e2e_simulator.py` drives the actual handler functions through the same JSON envelope Azure AI Search sends and emits one finalized record of every type (text / multi-page text / diagram / table / summary), then cross-checks every projected field against `index.json`. |
 
 ## v2.1 targeted fixes (over v2)
 
@@ -181,16 +191,24 @@ Set in App Settings (mirrors `local.settings.json.example`):
 
 ## Local tests
 
-Pure-Python helpers (page-span parser, section index, table extractor,
-semantic builders, ID helpers) have unit tests under `tests/`:
+Two test files run without any Azure credentials:
 
 ```bash
-python tests/test_unit.py
+python tests/test_unit.py             # 68 unit assertions
+python tests/test_e2e_simulator.py    # full handler-side end-to-end run
 ```
 
-These run without Azure credentials. They use synthetic inputs that match
-the shapes Document Intelligence and the built-in skills emit, and they
-catch regressions in the deterministic logic before deploy.
+`test_unit.py` covers the deterministic helpers: page-span parser,
+section index walking, table extractor with multi-page merge, semantic
+string builders, chunk_id helpers (including the v2.2 collision
+regression), OData escaping, and config error handling.
+
+`test_e2e_simulator.py` drives the actual handler functions through the
+exact JSON envelope Azure AI Search sends, with a stub for the AOAI
+vision/chat call and the search-cache REST call. It produces one
+finalized record of each type (text, multi-page text, diagram, table,
+summary), validates page spans, and confirms every projected field
+exists in `index.json`.
 
 ## Open TODOs / blockers
 

@@ -32,7 +32,15 @@ from shared.sections import (
 from shared.tables import extract_table_records
 from shared.semantic import process_semantic_string
 from shared.process_table import process_table
-from shared.ids import text_chunk_id, diagram_chunk_id, summary_chunk_id
+from shared.ids import (
+    text_chunk_id,
+    diagram_chunk_id,
+    table_chunk_id,
+    summary_chunk_id,
+    chunk_content_hash,
+)
+from shared.search_cache import _odata_escape, _safe_token, lookup_existing_by_hash
+from shared.config import ConfigError, required_env, optional_env, feature_enabled
 
 
 # ---------- harness ----------
@@ -316,12 +324,146 @@ check("diagram semantic includes Context (not Visible text)", "Context:" in s_dg
 # ---------- 9. id helpers ----------
 section("9. id helpers")
 
-t1 = text_chunk_id("p", "f", 0, 0)
-t2 = text_chunk_id("p", "f", 0, 1)
-check("text ids unique by page_index", t1 != t2)
+t1 = text_chunk_id("p", "f", 0, "first chunk text")
+t2 = text_chunk_id("p", "f", 0, "second chunk text")
+check("text ids unique by chunk content", t1 != t2)
 check("text id prefix txt_", t1.startswith("txt_"))
+# Same content -> same id (stable across reindex)
+t1_again = text_chunk_id("p", "f", 0, "first chunk text")
+check("text id stable for same content", t1 == t1_again)
 check("diagram id prefix dgm_", diagram_chunk_id("p", "f", "deadbeef" * 4).startswith("dgm_"))
+check("table id prefix tbl_", table_chunk_id("p", "f", "0_0").startswith("tbl_"))
 check("summary id prefix sum_", summary_chunk_id("p", "f").startswith("sum_"))
+
+
+# ---------- 10. chunk_id collision regression ----------
+section("10. chunk_id collision regression")
+
+# Same source + same layout_ordinal but DIFFERENT chunk text — these
+# represent SplitSkill producing two pages from one section. v2 had a
+# bug here: hardcoded page_index=0 made both ids identical and the
+# second projection silently overwrote the first in the index.
+
+multi_page_section = (
+    "<!-- PageNumber=\"1\" -->\n"
+    "Alpha content on page 1. " + ("alpha " * 60)
+    + "\n<!-- PageBreak -->\n<!-- PageNumber=\"2\" -->\n"
+    + "Beta content on page 2. " + ("beta " * 60)
+)
+chunk_a = "Alpha content on page 1. " + ("alpha " * 60)
+chunk_b = "Beta content on page 2. " + ("beta " * 60)
+
+rec_a = process_page_label({
+    "page_text": chunk_a,
+    "section_content": multi_page_section,
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/c/manual.pdf",
+    "layout_ordinal": 7,
+    "physical_pdf_page": 1,
+})
+rec_b = process_page_label({
+    "page_text": chunk_b,
+    "section_content": multi_page_section,
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/c/manual.pdf",
+    "layout_ordinal": 7,
+    "physical_pdf_page": 1,
+})
+check("two split pages get different chunk_ids", rec_a["chunk_id"] != rec_b["chunk_id"], f"{rec_a['chunk_id']} == {rec_b['chunk_id']}")
+check("chunk A page=1", rec_a["physical_pdf_page"] == 1)
+check("chunk B page=2", rec_b["physical_pdf_page"] == 2, str(rec_b))
+
+# Determinism: same input twice -> same id (so reindex doesn't churn)
+rec_a2 = process_page_label({
+    "page_text": chunk_a,
+    "section_content": multi_page_section,
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/c/manual.pdf",
+    "layout_ordinal": 7,
+    "physical_pdf_page": 1,
+})
+check("chunk_id deterministic across runs", rec_a["chunk_id"] == rec_a2["chunk_id"])
+
+
+# ---------- 11. table_caption flow ----------
+section("11. table_caption first-class")
+
+shaped_with_caption = process_table({
+    "table_index": "0_0",
+    "page_start": 14,
+    "page_end": 14,
+    "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+    "row_count": 2,
+    "col_count": 2,
+    "caption": "Table 5: Transformer ratings",
+    "header_1": "Specs",
+    "header_2": "Electrical",
+    "header_3": "",
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/c/manual.pdf",
+    "parent_id": "abc",
+})
+check("table_caption populated", shaped_with_caption.get("table_caption") == "Table 5: Transformer ratings")
+check("no figure_ref overload on tables", "figure_ref" not in shaped_with_caption)
+check(
+    "table_caption appears in chunk_for_semantic",
+    "Table 5: Transformer ratings" in shaped_with_caption["chunk_for_semantic"],
+)
+
+shaped_no_caption = process_table({
+    "table_index": "1_0",
+    "page_start": 20, "page_end": 20,
+    "markdown": "| X |\n| --- |\n| y |",
+    "row_count": 2, "col_count": 1,
+    "caption": "",
+    "header_1": "", "header_2": "", "header_3": "",
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/c/manual.pdf",
+    "parent_id": "abc",
+})
+check("missing caption -> empty string, not crash", shaped_no_caption.get("table_caption") == "")
+
+
+# ---------- 12. OData escaping in search_cache ----------
+section("12. OData escaping + token whitelist")
+
+check("escape doubles single quotes", _odata_escape("o'malley") == "o''malley")
+check("escape on empty string ok", _odata_escape("") == "")
+check("hex token accepted", _safe_token("abcdef0123456789") == "abcdef0123456789")
+check("dash token accepted", _safe_token("txt_abc-123") == "txt_abc-123")
+check("apostrophe rejected", _safe_token("o'malley") is None)
+check("space rejected", _safe_token("ab cd") is None)
+check("none rejected", _safe_token("") is None)
+
+# Lookup function: when env vars are not set, must return None and not raise.
+import os
+for k in ("SEARCH_ENDPOINT", "SEARCH_ADMIN_KEY"):
+    os.environ.pop(k, None)
+result = lookup_existing_by_hash("parent123", "deadbeef")
+check("lookup returns None when feature disabled", result is None)
+
+
+# ---------- 13. config error handling ----------
+section("13. config helpers")
+
+import os
+for k in ("TEST_REQUIRED_VAR",):
+    os.environ.pop(k, None)
+raised = False
+try:
+    required_env("TEST_REQUIRED_VAR")
+except ConfigError as e:
+    raised = True
+    msg = str(e)
+check("required_env raises ConfigError when missing", raised)
+check("ConfigError message names the variable", "TEST_REQUIRED_VAR" in msg)
+
+os.environ["TEST_REQUIRED_VAR"] = "value"
+check("required_env returns value when set", required_env("TEST_REQUIRED_VAR") == "value")
+del os.environ["TEST_REQUIRED_VAR"]
+
+check("optional_env returns default", optional_env("UNSET_VAR_X", "fallback") == "fallback")
+check("feature_enabled false when missing", feature_enabled("UNSET_VAR_X", "UNSET_VAR_Y") is False)
 
 
 # ---------- summary ----------
