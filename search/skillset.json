@@ -44,7 +44,7 @@
       "context": "/document",
       "uri": "https://<FUNCTION_APP_HOST>/api/process-document?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
-      "timeout": "PT230S",
+      "timeout": "PT300S",
       "batchSize": 1,
       "degreeOfParallelism": 2,
       "inputs": [
