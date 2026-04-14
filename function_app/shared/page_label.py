@@ -167,11 +167,31 @@ def _last_page_segment(chunk: str) -> str:
     return chunk[last_end:]
 
 
+# Matches any run of trailing DI page markers (+ whitespace) at the end
+# of a chunk. Stripped before offset computation so a chunk whose final
+# content sits on page N but whose tail happens to include a PageBreak
+# marker is not mis-attributed to page N+1.
+TRAILING_MARKERS_RE = re.compile(
+    r"(?:\s*<!--\s*(?:PageNumber\s*=\s*\"?\d+\"?|PageBreak)\s*-->\s*)+\Z",
+    re.IGNORECASE,
+)
+
+
+def _trim_trailing_markers(chunk: str) -> str:
+    """Return chunk with any trailing DI page markers + whitespace removed."""
+    if not chunk:
+        return chunk
+    return TRAILING_MARKERS_RE.sub("", chunk)
+
+
 def _locate_chunk_in_section(chunk: str, section_content: str) -> int:
     """
-    Find chunk start offset in section_content. Tries exact substring,
-    then a leading-prefix probe (first 200 chars without markers) to
-    survive minor whitespace differences.
+    Find chunk start offset in section_content.
+
+    In production SplitSkill emits chunks that are exact substrings of
+    the section markdown, so `find(chunk)` is the fast path. The probe
+    fallback handles edge cases where whitespace or marker rendering
+    normalized slightly.
     """
     if not chunk or not section_content:
         return -1
@@ -184,47 +204,80 @@ def _locate_chunk_in_section(chunk: str, section_content: str) -> int:
     return idx
 
 
+def _pages_in_range(
+    timeline: list[tuple[int, int]],
+    start_off: int,
+    end_off: int,
+) -> list[int]:
+    """All distinct pages active anywhere in [start_off, end_off]."""
+    if end_off < start_off:
+        end_off = start_off
+    pages = {_page_at_offset(timeline, start_off)}
+    for off, pn in timeline:
+        if start_off <= off <= end_off:
+            pages.add(pn)
+        elif off > end_off:
+            break
+    return sorted(pages)
+
+
 def compute_page_span(
     chunk: str,
     section_content: str,
     section_start_page: int | None,
-) -> tuple[int | None, int | None]:
+) -> tuple[int | None, int | None, list[int]]:
     """
-    Returns (start_page, end_page). Falls back to (section_start_page,
-    section_start_page) if we cannot locate the chunk inside the section.
+    Returns (start_page, end_page, pages_covered).
+
+    pages_covered is the full sorted list of physical PDF pages the
+    chunk touches — critical for citation / highlight UIs that need to
+    resolve every page the chunk grounds.
+
+    Falls back to (section_start_page, section_start_page, [section_start_page])
+    if we cannot locate the chunk inside the section.
     """
     if section_start_page is None:
-        return None, None
+        return None, None, []
     if not chunk:
-        return section_start_page, section_start_page
+        return section_start_page, section_start_page, [section_start_page]
 
-    # Look for explicit markers inside the chunk first; this handles the
-    # built-in skill case where SplitSkill preserves DI page comments.
+    # Explicit markers inside the chunk: covers the no-section-context fallback.
     nums_in_chunk = [int(m.group(1)) for m in PAGE_NUMBER_MARKER_RE.finditer(chunk)]
     breaks_in_chunk = list(PAGE_BREAK_MARKER_RE.finditer(chunk))
 
     if not section_content:
-        # No section context — use chunk-only signal.
         if nums_in_chunk:
-            return min([section_start_page] + nums_in_chunk), max([section_start_page] + nums_in_chunk)
+            lo = min([section_start_page] + nums_in_chunk)
+            hi = max([section_start_page] + nums_in_chunk)
+            return lo, hi, list(range(lo, hi + 1))
         if breaks_in_chunk:
-            return section_start_page, section_start_page + len(breaks_in_chunk)
-        return section_start_page, section_start_page
+            hi = section_start_page + len(breaks_in_chunk)
+            return section_start_page, hi, list(range(section_start_page, hi + 1))
+        return section_start_page, section_start_page, [section_start_page]
 
     timeline = _marker_timeline(section_content, section_start_page)
     chunk_start = _locate_chunk_in_section(chunk, section_content)
     if chunk_start < 0:
-        # Couldn't find the chunk; fall back to section bounds.
         if nums_in_chunk:
-            return min(nums_in_chunk), max(nums_in_chunk)
-        return section_start_page, section_start_page
+            lo = min(nums_in_chunk)
+            hi = max(nums_in_chunk)
+            return lo, hi, list(range(lo, hi + 1))
+        return section_start_page, section_start_page, [section_start_page]
 
-    chunk_end = chunk_start + len(chunk)
+    # Use the *trimmed* chunk length so a trailing PageBreak marker
+    # doesn't push chunk_end into the next page.
+    effective_len = len(_trim_trailing_markers(chunk))
+    chunk_end = chunk_start + effective_len
     start_page = _page_at_offset(timeline, chunk_start)
     end_page = _page_at_offset(timeline, chunk_end)
     if end_page < start_page:
         end_page = start_page
-    return start_page, end_page
+    pages = _pages_in_range(timeline, chunk_start, chunk_end)
+    # Ensure start/end are present in the list.
+    pages_set = set(pages)
+    pages_set.add(start_page)
+    pages_set.add(end_page)
+    return start_page, end_page, sorted(pages_set)
 
 
 # ---------- skill entry point ----------
@@ -238,7 +291,9 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     layout_ordinal = safe_int(data.get("layout_ordinal"), default=0)
     section_start_page = safe_int(data.get("physical_pdf_page"), default=None)
 
-    start_page, end_page = compute_page_span(page_text, section_content, section_start_page)
+    start_page, end_page, pages_covered = compute_page_span(
+        page_text, section_content, section_start_page
+    )
 
     label = _extract_label(page_text)
     if not label:
@@ -266,6 +321,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "printed_page_label_end": end_label,
         "physical_pdf_page": start_page,
         "physical_pdf_page_end": end_page,
+        "physical_pdf_pages": pages_covered,
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
     }

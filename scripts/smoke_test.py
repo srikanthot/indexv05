@@ -39,9 +39,15 @@ API_VERSION = "2024-05-01-preview"
 # corresponding field will be empty for every text record and this
 # assertion will catch it.
 REQUIRED_FIELDS = {
-    "text": ["chunk_id", "chunk", "physical_pdf_page", "header_1"],
+    "text": [
+        "chunk_id",
+        "chunk",
+        "physical_pdf_page",
+        "physical_pdf_pages",
+        "header_1",
+    ],
     "diagram": ["chunk_id", "figure_id", "diagram_description", "header_1"],
-    "table": ["chunk_id", "chunk", "physical_pdf_page"],
+    "table": ["chunk_id", "chunk", "physical_pdf_page", "physical_pdf_pages"],
     "summary": ["chunk_id", "chunk"],
 }
 
@@ -117,10 +123,22 @@ def assert_populated(record: dict, fields: list[str], record_type: str) -> list[
     missing = []
     for f in fields:
         v = record.get(f)
-        if v in (None, "", 0):
+        if v is None or v == "" or v == 0:
+            missing.append(f)
+        elif isinstance(v, list) and len(v) == 0:
             missing.append(f)
     if missing:
         return [f"{record_type}: required field(s) empty or missing: {missing}"]
+    # Extra cross-field consistency: if both physical_pdf_page{,_end} and
+    # physical_pdf_pages are present, the list must cover the endpoints.
+    start = record.get("physical_pdf_page")
+    end = record.get("physical_pdf_page_end")
+    pages = record.get("physical_pdf_pages") or []
+    if pages and isinstance(pages, list):
+        if start is not None and start not in pages:
+            return [f"{record_type}: physical_pdf_pages {pages} missing start={start}"]
+        if end is not None and end not in pages:
+            return [f"{record_type}: physical_pdf_pages {pages} missing end={end}"]
     return []
 
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.2.0 — Full multi-page citation support
+
+### Code
+- **`physical_pdf_pages: Collection(Edm.Int32)`** on text and table records —
+  the complete sorted list of physical PDF pages the chunk covers.
+  Production citation / page-navigation / highlight UIs can now resolve
+  every page a chunk grounds, not just the start + end.
+- `compute_page_span` returns `(start, end, pages_covered)`. Start/end
+  remain backward compatible; the pages list is new.
+- Trailing DI page markers are stripped from the chunk before offset
+  math, so a chunk whose visible content ends on page N but whose tail
+  carries a `<!-- PageBreak -->` marker is no longer mis-attributed to
+  page N+1.
+- Unit tests extended to 79/79: three-page span, trailing-marker
+  regression, pages-list parity across single / cross-page / fully-
+  internal chunks.
+
+### Search schema
+- `search/index.json`: new field `physical_pdf_pages` (filterable,
+  facetable, retrievable).
+- `search/skillset.json`: new output + projection for both the text
+  (`/markdownDocument/*/pages/*`) and table (`/enriched_tables/*`)
+  selectors.
+
+### Validation
+- `scripts/smoke_test.py` now asserts `physical_pdf_pages` is populated
+  and that the list covers the declared start + end pages.
+
 ## 3.1.0 — Mandatory release gates + cloud validation
 
 ### Release gates (mandatory)

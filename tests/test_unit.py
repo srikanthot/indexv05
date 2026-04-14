@@ -81,8 +81,9 @@ SECTION_5_7 = (
 
 # Chunk that lives entirely on page 5
 chunk_p5 = "First paragraph on page 5. " + ("alpha " * 30)
-start, end = compute_page_span(chunk_p5, SECTION_5_7, section_start_page=5)
+start, end, pages = compute_page_span(chunk_p5, SECTION_5_7, section_start_page=5)
 check("chunk entirely on page 5 -> (5,5)", (start, end) == (5, 5), f"got ({start},{end})")
+check("chunk p5 pages=[5]", pages == [5], str(pages))
 
 # Chunk that crosses page 5 -> 6
 chunk_5_6 = (
@@ -91,8 +92,9 @@ chunk_5_6 = (
     "<!-- PageNumber=\"6\" -->\n"
     "Page 6 content. " + ("gamma " * 20)
 )
-start, end = compute_page_span(chunk_5_6, SECTION_5_7, section_start_page=5)
+start, end, pages = compute_page_span(chunk_5_6, SECTION_5_7, section_start_page=5)
 check("chunk crosses 5->6", (start, end) == (5, 6), f"got ({start},{end})")
+check("chunk 5->6 pages=[5,6]", pages == [5, 6], str(pages))
 
 # Chunk that crosses 6 -> 7
 chunk_6_7 = (
@@ -101,23 +103,49 @@ chunk_6_7 = (
     "<!-- PageNumber=\"7\" -->\n"
     "Final page content. " + ("delta " * 20)
 )
-start, end = compute_page_span(chunk_6_7, SECTION_5_7, section_start_page=5)
+start, end, pages = compute_page_span(chunk_6_7, SECTION_5_7, section_start_page=5)
 check("chunk crosses 6->7", (start, end) == (6, 7), f"got ({start},{end})")
+check("chunk 6->7 pages=[6,7]", pages == [6, 7], str(pages))
+
+# Chunk spanning all three pages 5..7. In production SplitSkill emits
+# chunks that are exact substrings of the section markdown, so we build
+# the test chunk the same way: slice from the start of page 5 body.
+_offset_page5 = SECTION_5_7.index("First paragraph")
+chunk_5_7 = SECTION_5_7[_offset_page5:]
+start, end, pages = compute_page_span(chunk_5_7, SECTION_5_7, section_start_page=5)
+check("chunk spans 5..7", (start, end) == (5, 7), f"got ({start},{end})")
+check("chunk 5..7 pages=[5,6,7]", pages == [5, 6, 7], str(pages))
 
 # Chunk entirely on page 7 (after both breaks)
 chunk_p7 = "Final page content. " + ("delta " * 40)
-start, end = compute_page_span(chunk_p7, SECTION_5_7, section_start_page=5)
+start, end, pages = compute_page_span(chunk_p7, SECTION_5_7, section_start_page=5)
 check("chunk entirely on page 7 -> (7,7)", (start, end) == (7, 7), f"got ({start},{end})")
+check("chunk p7 pages=[7]", pages == [7], str(pages))
+
+# Chunk whose visible content is on page 5 but which happens to end with
+# a PageBreak marker must NOT be attributed to page 6.
+chunk_trailing_break = (
+    "First paragraph on page 5. " + ("alpha " * 20) + "\n<!-- PageBreak -->\n"
+)
+start, end, pages = compute_page_span(chunk_trailing_break, SECTION_5_7, section_start_page=5)
+check(
+    "trailing PageBreak stays on page 5",
+    (start, end) == (5, 5),
+    f"got ({start},{end})",
+)
+check("trailing-break pages=[5]", pages == [5], str(pages))
 
 # Section with no markers — single-page section
 SECTION_FLAT = "Just one page of text. " * 20
-start, end = compute_page_span("Just one page of text.", SECTION_FLAT, section_start_page=12)
+start, end, pages = compute_page_span("Just one page of text.", SECTION_FLAT, section_start_page=12)
 check("flat single-page section -> (12,12)", (start, end) == (12, 12), f"got ({start},{end})")
+check("flat single-page pages=[12]", pages == [12], str(pages))
 
 # Empty section_content fallback path
 chunk_with_marker = "lead text <!-- PageNumber=\"9\" --> trailing text"
-start, end = compute_page_span(chunk_with_marker, "", section_start_page=8)
+start, end, pages = compute_page_span(chunk_with_marker, "", section_start_page=8)
 check("no section_content but marker in chunk", (start, end) == (8, 9), f"got ({start},{end})")
+check("no section_content pages=[8,9]", pages == [8, 9], str(pages))
 
 
 # ---------- 2. process_page_label end-to-end ----------
@@ -135,6 +163,7 @@ check("record_type=text", result["record_type"] == "text")
 check("chunk_id has txt_ prefix", result["chunk_id"].startswith("txt_"))
 check("physical_pdf_page=5", result["physical_pdf_page"] == 5)
 check("physical_pdf_page_end=6", result["physical_pdf_page_end"] == 6, str(result))
+check("physical_pdf_pages=[5,6]", result["physical_pdf_pages"] == [5, 6], str(result))
 check("processing_status=ok", result["processing_status"] == "ok")
 
 # ---------- 3. printed-label heuristic ----------

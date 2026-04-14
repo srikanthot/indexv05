@@ -13,6 +13,7 @@
 
     { "name": "physical_pdf_page", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
     { "name": "physical_pdf_page_end", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "physical_pdf_pages", "type": "Collection(Edm.Int32)", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "printed_page_label", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "printed_page_label_end", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "layout_ordinal", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },

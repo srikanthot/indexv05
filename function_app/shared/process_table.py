@@ -64,6 +64,15 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "caption": caption, "page_start": page_start, "markdown": markdown,
     })
 
+    # Full list of physical pages this (possibly multi-page-merged) table
+    # spans. Parity with text records for consistent citation UI.
+    pages_covered: list[int] = []
+    if page_start is not None:
+        hi = page_end if page_end is not None else page_start
+        if hi < page_start:
+            hi = page_start
+        pages_covered = list(range(page_start, hi + 1))
+
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -75,6 +84,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "header_3": h3,
         "physical_pdf_page": page_start,
         "physical_pdf_page_end": page_end,
+        "physical_pdf_pages": pages_covered,
         "table_row_count": row_count,
         "table_col_count": col_count,
         "table_caption": caption,

@@ -97,9 +97,14 @@ For 5 random text records that cross a page boundary:
 $filter=record_type eq 'text' and physical_pdf_page lt physical_pdf_page_end
 ```
 
-Confirm `physical_pdf_page_end` matches the last source page. v3.0
-`printed_page_label_end` now uses DI page markers to slice the chunk
-at the real page boundary, so the end label should also be accurate.
+Confirm:
+- `physical_pdf_page_end` matches the last source page.
+- `physical_pdf_pages` (v3.2) is the full sorted list of every page
+  the chunk touches. For a chunk that spans pages 5–8, this must be
+  `[5, 6, 7, 8]`, not just `[5, 8]` — citation UIs rely on this.
+- `printed_page_label_end` (v3.0) uses DI markers to slice the chunk
+  at the real page boundary, so the end label should match the printed
+  label on the final physical page the chunk covers.
 
 #### 7. Hash cache hits on re-index
 Reset the indexer and run it a second time on the same PDFs:

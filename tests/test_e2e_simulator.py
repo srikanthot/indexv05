@@ -297,6 +297,7 @@ final_text_record = {
     "layout_ordinal": 4,
     "physical_pdf_page": text2_data["physical_pdf_page"],
     "physical_pdf_page_end": text2_data["physical_pdf_page_end"],
+    "physical_pdf_pages": text2_data["physical_pdf_pages"],
     "printed_page_label": text2_data["printed_page_label"],
     "printed_page_label_end": text2_data["printed_page_label_end"],
     "chunk": CHUNK_PAGE_11_TO_13[:200] + "...",
@@ -320,7 +321,10 @@ assert text1_data["physical_pdf_page_end"] == 11, f"chunk1 end should be 11, got
 print(f"  chunk1 (single-page): physical_pdf_page={text1_data['physical_pdf_page']}, end={text1_data['physical_pdf_page_end']}  OK")
 assert text2_data["physical_pdf_page"] == 11, f"chunk2 start should be 11, got {text2_data['physical_pdf_page']}"
 assert text2_data["physical_pdf_page_end"] == 13, f"chunk2 end should be 13, got {text2_data['physical_pdf_page_end']}"
-print(f"  chunk2 (multi-page):  physical_pdf_page={text2_data['physical_pdf_page']}, end={text2_data['physical_pdf_page_end']}  OK")
+assert text2_data["physical_pdf_pages"] == [11, 12, 13], (
+    f"chunk2 pages should be [11,12,13], got {text2_data['physical_pdf_pages']}"
+)
+print(f"  chunk2 (multi-page):  physical_pdf_page={text2_data['physical_pdf_page']}, end={text2_data['physical_pdf_page_end']}, pages={text2_data['physical_pdf_pages']}  OK")
 
 
 # ===========================================================
@@ -459,6 +463,7 @@ final_table_record = {
     "header_3": tbl_data["header_3"],
     "physical_pdf_page": tbl_data["physical_pdf_page"],
     "physical_pdf_page_end": tbl_data["physical_pdf_page_end"],
+    "physical_pdf_pages": tbl_data["physical_pdf_pages"],
     "table_row_count": tbl_data["table_row_count"],
     "table_col_count": tbl_data["table_col_count"],
     "table_caption": tbl_data["table_caption"],
