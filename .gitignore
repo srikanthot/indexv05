@@ -24,3 +24,9 @@ local.settings.json
 .env
 *.key
 *.pem
+
+# Deploy-time config (per-environment, never commit real values)
+deploy.config.json
+
+# Tooling caches
+.ruff_cache/

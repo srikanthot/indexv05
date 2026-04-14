@@ -38,7 +38,7 @@ if "azure.functions" not in sys.modules:
 
     class _FakeHttpResponse:
         def __init__(self, body, mimetype="application/json", status_code=200):
-            self._body = body if isinstance(body, (bytes, bytearray)) else body.encode("utf-8")
+            self._body = body if isinstance(body, bytes | bytearray) else body.encode("utf-8")
             self.mimetype = mimetype
             self.status_code = status_code
 
@@ -129,6 +129,7 @@ class _FakeAOAIClient:
 
 
 import shared.aoai as aoai_module
+
 aoai_module.get_client = lambda: _FakeAOAIClient()
 aoai_module.vision_deployment = lambda: "stub-vision"
 aoai_module.chat_deployment = lambda: "stub-chat"
@@ -136,20 +137,21 @@ aoai_module.chat_deployment = lambda: "stub-chat"
 # diagram.py and summary.py do `from .aoai import get_client` so they
 # bind their own reference at import time. Patch both AFTER import.
 import shared.diagram as diagram_module
+
 diagram_module.get_client = lambda: _FakeAOAIClient()
 diagram_module.vision_deployment = lambda: "stub-vision"
 
 import shared.search_cache as cache_module
+
 cache_module.lookup_existing_by_hash = lambda parent_id, image_hash: None
 
 # Now safe to import the rest.
-from shared.skill_io import handle_skill_request
-from shared.page_label import process_page_label
 from shared.diagram import process_diagram
-from shared.semantic import process_semantic_string
+from shared.page_label import process_page_label
 from shared.process_table import process_table
+from shared.semantic import process_semantic_string
+from shared.skill_io import handle_skill_request
 from shared.summary import process_doc_summary
-
 
 # ---------- minimal HttpRequest stub ----------
 
@@ -169,8 +171,7 @@ def call_skill(handler, *records):
             for i, rec in enumerate(records)
         ]
     }
-    resp = handler(FakeRequest(payload), None) if False else None  # placeholder
-    # We bypass the function-app decorator wrapper and call handle_skill_request directly:
+    # Bypass the function-app decorator wrapper and call handle_skill_request directly.
     return handle_skill_request(FakeRequest(payload), handler)
 
 
@@ -526,6 +527,7 @@ class _SummaryFakeAOAIClient:
 # Hot-swap the client BOTH at module level and at summary's own binding
 # (summary.py did `from .aoai import get_client` so it has its own ref).
 import shared.summary as summary_module
+
 aoai_module.get_client = lambda: _SummaryFakeAOAIClient()
 summary_module.get_client = lambda: _SummaryFakeAOAIClient()
 
