@@ -283,3 +283,13 @@ records keep the old one until touched.
 
 Enforce these as required checks in GitHub branch protection so broken
 builds cannot merge.
+
+## Licensing note
+
+PyMuPDF (used for figure cropping in `shared/pdf_crop.py`) is licensed
+under **AGPL-3.0**. For a closed-source internal Azure Function App
+this is generally fine — the AGPL network clause is triggered by
+distributing modified source, not by running the library behind a
+function endpoint. If you plan to ship this pipeline as part of a
+public-facing SaaS or redistribute it, review PyMuPDF's license terms
+(or swap to a permissively-licensed PDF library such as `pypdfium2`).

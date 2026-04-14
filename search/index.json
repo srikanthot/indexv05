@@ -26,7 +26,7 @@
     { "name": "figure_ref", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "figure_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "diagram_description", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
-    { "name": "diagram_category", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "diagram_category", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true, "analyzer": "keyword" },
     { "name": "has_diagram", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
 
     { "name": "table_row_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
