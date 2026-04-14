@@ -1,0 +1,41 @@
+{
+  "_comment": "Copy to deploy.config.json and fill in values for your existing Azure resources. This file is the single source of truth for every deploy script — no Bicep, no portal clicks.",
+
+  "functionApp": {
+    "name": "",
+    "resourceGroup": ""
+  },
+
+  "search": {
+    "endpoint": "https://<your-search>.search.windows.net",
+    "artifactPrefix": "mm-manuals"
+  },
+
+  "azureOpenAI": {
+    "endpoint": "https://<your-aoai>.openai.azure.com",
+    "apiVersion": "2024-12-01-preview",
+    "chatDeployment": "gpt-4.1",
+    "visionDeployment": "gpt-4.1",
+    "embedDeployment": "text-embedding-ada-002"
+  },
+
+  "documentIntelligence": {
+    "endpoint": "https://<your-di>.cognitiveservices.azure.com",
+    "apiVersion": "2024-11-30"
+  },
+
+  "aiServices": {
+    "subdomainUrl": "https://<your-ai-services>.cognitiveservices.azure.com"
+  },
+
+  "storage": {
+    "accountResourceId": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>",
+    "pdfContainerName": "manuals"
+  },
+
+  "appInsights": {
+    "connectionString": ""
+  },
+
+  "skillVersion": "1.0.0"
+}

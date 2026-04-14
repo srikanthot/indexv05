@@ -1,29 +1,26 @@
 """
 Render the Azure AI Search artifacts (datasource, index, skillset,
-indexer) with environment-specific values and PUT them to the target
+indexer) with values from deploy.config.json and PUT them to the target
 Search service using AAD auth.
 
-Inputs come from Bicep outputs (via `az deployment sub show`) and from
-the Function App's function key (fetched via `az functionapp keys list`).
+The function key is fetched live from the Function App via az CLI so it
+never sits in the config file.
 
 Usage:
-    python scripts/deploy_search.py --env dev
+    python scripts/deploy_search.py --config deploy.config.json
+    python scripts/deploy_search.py --config deploy.config.json --run-indexer
 
-Requires:
-  - Azure CLI login with Contributor + Search Service Contributor on the
-    target subscription (and Search Index Data Contributor on the service).
-  - azure-identity installed locally.
-
-Everything is idempotent: PUT on each resource updates in place. The
-script prints the resolved values it substituted so the operator can
-eyeball them before the index is rebuilt.
+Prerequisites:
+    - Azure CLI logged in
+    - The signed-in principal has Search Service Contributor +
+      Search Index Data Contributor on the target search service
+    - azure-identity and httpx installed
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -37,46 +34,43 @@ SEARCH_DIR = REPO_ROOT / "search"
 API_VERSION = "2024-05-01-preview"
 
 ARTIFACT_FILES = [
-    ("datasources", "datasourceName", SEARCH_DIR / "datasource.json"),
-    ("indexes", "indexName", SEARCH_DIR / "index.json"),
-    ("skillsets", "skillsetName", SEARCH_DIR / "skillset.json"),
-    ("indexers", "indexerName", SEARCH_DIR / "indexer.json"),
+    ("datasources", "datasource", SEARCH_DIR / "datasource.json"),
+    ("indexes",     "index",      SEARCH_DIR / "index.json"),
+    ("skillsets",   "skillset",   SEARCH_DIR / "skillset.json"),
+    ("indexers",    "indexer",    SEARCH_DIR / "indexer.json"),
 ]
 
 
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        raise SystemExit(f"config file not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def run(cmd: list[str]) -> str:
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return result.stdout.strip()
-
-
-def deployment_outputs(env: str) -> dict:
-    """Read the subscription-scoped Bicep deployment outputs."""
-    deployment_name = f"mm-manuals-{env}"
-    raw = run([
-        "az", "deployment", "sub", "show",
-        "--name", deployment_name,
-        "--query", "properties.outputs",
-        "-o", "json",
-    ])
-    return {k: v["value"] for k, v in json.loads(raw).items()}
+    r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return r.stdout.strip()
 
 
 def function_key(resource_group: str, function_app_name: str) -> str:
     raw = run([
         "az", "functionapp", "keys", "list",
-        "-g", resource_group,
-        "-n", function_app_name,
-        "-o", "json",
+        "-g", resource_group, "-n", function_app_name, "-o", "json",
     ])
     keys = json.loads(raw)
-    # Prefer the default host key (works across all functions).
     return keys["functionKeys"].get("default") or next(iter(keys["functionKeys"].values()))
 
 
+def function_host(resource_group: str, function_app_name: str) -> str:
+    raw = run([
+        "az", "functionapp", "show",
+        "-g", resource_group, "-n", function_app_name,
+        "--query", "defaultHostName", "-o", "tsv",
+    ])
+    return raw.strip()
+
+
 def render(body: str, mapping: dict[str, str]) -> str:
-    """Replace every <PLACEHOLDER> token. Unknown placeholders are an error
-    — silent substitution failures in production would be painful to
-    diagnose after the fact."""
     out = body
     for placeholder, value in mapping.items():
         out = out.replace(placeholder, value)
@@ -84,94 +78,80 @@ def render(body: str, mapping: dict[str, str]) -> str:
     if remaining:
         raise SystemExit(
             f"Unrendered placeholders remain: {sorted(set(remaining))}. "
-            f"Add them to the mapping in scripts/deploy_search.py."
+            f"Add a mapping in scripts/deploy_search.py or fill the matching "
+            f"field in deploy.config.json."
         )
     return out
 
 
-def put_artifact(
-    endpoint: str,
-    token: str,
-    collection: str,
-    name: str,
-    body_json: dict,
-) -> None:
+def put_artifact(endpoint: str, token: str, collection: str, name: str, body: dict) -> None:
     url = f"{endpoint}/{collection}/{name}?api-version={API_VERSION}"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
-    with httpx.Client(timeout=60.0) as client:
-        resp = client.put(url, json=body_json, headers=headers)
-        if resp.status_code not in (200, 201, 204):
-            raise SystemExit(
-                f"PUT {collection}/{name} failed: {resp.status_code} {resp.text[:600]}"
-            )
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    with httpx.Client(timeout=60.0) as c:
+        resp = c.put(url, json=body, headers=headers)
+    if resp.status_code not in (200, 201, 204):
+        raise SystemExit(f"PUT {collection}/{name} failed: {resp.status_code} {resp.text[:600]}")
     print(f"  ok  {collection}/{name}  ({resp.status_code})")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--env", required=True, help="dev|staging|prod")
-    ap.add_argument("--run-indexer", action="store_true", help="POST indexer/run after deploy")
+    ap.add_argument("--config", default="deploy.config.json")
+    ap.add_argument("--run-indexer", action="store_true")
     args = ap.parse_args()
 
-    print(f"Reading Bicep outputs for env={args.env} ...")
-    outputs = deployment_outputs(args.env)
-    rg = outputs["resourceGroupName"]
-    func_app = outputs["functionAppName"]
-    func_host = outputs["functionAppHost"]
-    search_endpoint = outputs["searchEndpoint"]
-    aoai_endpoint = outputs["aoaiEndpoint"]
-    ais_subdomain = outputs["aiServicesSubdomainUrl"]
-    storage_id = outputs["storageAccountId"]
-    container = outputs["pdfContainerName"]
+    cfg = load_config(Path(args.config))
 
-    print(f"Fetching function key for {func_app} ...")
-    fkey = function_key(rg, func_app)
+    func_name = cfg["functionApp"]["name"]
+    func_rg = cfg["functionApp"]["resourceGroup"]
+    prefix = cfg["search"].get("artifactPrefix") or "mm-manuals"
+    search_endpoint = cfg["search"]["endpoint"].rstrip("/")
+
+    names = {
+        "datasource": f"{prefix}-ds",
+        "index":      f"{prefix}-index",
+        "skillset":   f"{prefix}-skillset",
+        "indexer":    f"{prefix}-indexer",
+    }
+
+    print(f"Fetching function host + key for {func_name}")
+    fhost = function_host(func_rg, func_name)
+    fkey = function_key(func_rg, func_name)
 
     mapping = {
-        "<STORAGE_RESOURCE_ID>": storage_id,
-        "<STORAGE_CONTAINER_NAME>": container,
-        "<STORAGE_CONNECTION_STRING>": f"ResourceId={storage_id};",
-        "<FUNCTION_APP_HOST>": func_host,
-        "<FUNCTION_KEY>": fkey,
-        "<AOAI_ENDPOINT>": aoai_endpoint.rstrip("/"),
-        "<AOAI_EMBED_DEPLOYMENT>": os.environ.get("AOAI_EMBED_DEPLOYMENT", "text-embedding-ada-002"),
-        "<AI_SERVICES_SUBDOMAIN_URL>": ais_subdomain.rstrip("/"),
+        "<STORAGE_RESOURCE_ID>":       cfg["storage"]["accountResourceId"],
+        "<STORAGE_CONTAINER_NAME>":    cfg["storage"]["pdfContainerName"],
+        "<FUNCTION_APP_HOST>":         fhost,
+        "<FUNCTION_KEY>":              fkey,
+        "<AOAI_ENDPOINT>":             cfg["azureOpenAI"]["endpoint"].rstrip("/"),
+        "<AOAI_EMBED_DEPLOYMENT>":     cfg["azureOpenAI"]["embedDeployment"],
+        "<AI_SERVICES_SUBDOMAIN_URL>": cfg["aiServices"]["subdomainUrl"].rstrip("/"),
+        "<DATASOURCE_NAME>":           names["datasource"],
+        "<INDEX_NAME>":                names["index"],
+        "<SKILLSET_NAME>":             names["skillset"],
+        "<INDEXER_NAME>":              names["indexer"],
     }
 
     print("Substitutions:")
     for k, v in mapping.items():
-        if k == "<FUNCTION_KEY>":
-            v = v[:4] + "…" + v[-4:]
-        print(f"  {k} -> {v}")
+        shown = (v[:4] + "…" + v[-4:]) if k == "<FUNCTION_KEY>" else v
+        print(f"  {k} -> {shown}")
 
-    print("Acquiring AAD token for Search ...")
-    cred = DefaultAzureCredential()
-    token = cred.get_token("https://search.azure.com/.default").token
+    print("Acquiring AAD token for Search")
+    token = DefaultAzureCredential().get_token("https://search.azure.com/.default").token
 
-    # Resource names come from Bicep outputs so multiple stacks can share
-    # a single search service without hardcoding names here.
-    mapping["<DATASOURCE_NAME>"] = outputs["datasourceName"]
-    mapping["<INDEX_NAME>"] = outputs["indexName"]
-    mapping["<SKILLSET_NAME>"] = outputs["skillsetName"]
-    mapping["<INDEXER_NAME>"] = outputs["indexerName"]
-
-    print(f"PUTting artifacts to {search_endpoint} ...")
-    for collection, name_key, path in ARTIFACT_FILES:
-        raw = path.read_text(encoding="utf-8")
-        rendered = render(raw, mapping)
-        body = json.loads(rendered)
-        put_artifact(search_endpoint, token, collection, outputs[name_key], body)
+    print(f"PUTting artifacts to {search_endpoint}")
+    for collection, key, path in ARTIFACT_FILES:
+        rendered = render(path.read_text(encoding="utf-8"), mapping)
+        put_artifact(search_endpoint, token, collection, names[key], json.loads(rendered))
 
     if args.run_indexer:
-        print("Triggering indexer run ...")
-        url = f"{search_endpoint}/indexers/{outputs['indexerName']}/run?api-version={API_VERSION}"
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.post(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code not in (200, 202, 204):
-                raise SystemExit(f"indexer run failed: {resp.status_code} {resp.text[:400]}")
+        print("Triggering indexer run")
+        url = f"{search_endpoint}/indexers/{names['indexer']}/run?api-version={API_VERSION}"
+        with httpx.Client(timeout=30.0) as c:
+            resp = c.post(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code not in (200, 202, 204):
+            raise SystemExit(f"indexer run failed: {resp.status_code} {resp.text[:400]}")
         print("  indexer run accepted")
 
     print("Done.")

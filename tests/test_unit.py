@@ -18,30 +18,29 @@ import traceback
 # Make the function_app package importable as a flat module path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "function_app"))
 
+from shared.config import ConfigError, feature_enabled, optional_env, required_env
+from shared.ids import (
+    chunk_content_hash,
+    diagram_chunk_id,
+    summary_chunk_id,
+    table_chunk_id,
+    text_chunk_id,
+)
 from shared.page_label import (
-    compute_page_span,
-    process_page_label,
     _extract_label,
     _marker_timeline,
+    compute_page_span,
+    process_page_label,
 )
+from shared.process_table import process_table
+from shared.search_cache import _odata_escape, _safe_token, lookup_existing_by_hash
 from shared.sections import (
     build_section_index,
-    find_section_for_page,
     extract_surrounding_text,
+    find_section_for_page,
 )
-from shared.tables import extract_table_records
 from shared.semantic import process_semantic_string
-from shared.process_table import process_table
-from shared.ids import (
-    text_chunk_id,
-    diagram_chunk_id,
-    table_chunk_id,
-    summary_chunk_id,
-    chunk_content_hash,
-)
-from shared.search_cache import _odata_escape, _safe_token, lookup_existing_by_hash
-from shared.config import ConfigError, required_env, optional_env, feature_enabled
-
+from shared.tables import extract_table_records
 
 # ---------- harness ----------
 
@@ -466,6 +465,7 @@ check("none rejected", _safe_token("") is None)
 
 # Lookup function: when env vars are not set, must return None and not raise.
 import os
+
 for k in ("SEARCH_ENDPOINT", "SEARCH_ADMIN_KEY"):
     os.environ.pop(k, None)
 result = lookup_existing_by_hash("parent123", "deadbeef")
@@ -476,6 +476,7 @@ check("lookup returns None when feature disabled", result is None)
 section("13. config helpers")
 
 import os
+
 for k in ("TEST_REQUIRED_VAR",):
     os.environ.pop(k, None)
 raised = False
