@@ -12,9 +12,7 @@
       "dataToExtract": "contentAndMetadata",
       "parsingMode": "default",
       "allowSkillsetToReadFileData": true,
-      "imageAction": "generateNormalizedImages",
-      "normalizedImageMaxWidth": 2000,
-      "normalizedImageMaxHeight": 2000,
+      "imageAction": "none",
       "failOnUnsupportedContentType": false,
       "failOnUnprocessableDocument": false
     }
