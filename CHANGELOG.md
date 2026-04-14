@@ -1,5 +1,39 @@
 # Changelog
 
+## 3.1.0 — Mandatory release gates + cloud validation
+
+### Release gates (mandatory)
+- `.github/workflows/deploy.yml` now has a `gate` job that re-runs unit
+  tests, e2e simulator, ruff lint, and Bicep build on the exact SHA
+  being deployed. Deploy job `needs: gate`.
+- New `scripts/smoke_test.py`: post-deploy validation that runs the
+  indexer, waits for success, and asserts record counts + field
+  population per `record_type`. Wired as `scripts/deploy.sh --smoke`.
+- New `.github/CODEOWNERS` and `.github/pull_request_template.md`
+  enforce review + checklist coverage.
+- New [`docs/branch-protection.md`](docs/branch-protection.md) and
+  [`docs/release-gates.md`](docs/release-gates.md) document the required
+  branch-protection configuration.
+
+### Parameterization
+- New Bicep params: `searchArtifactsPrefix`, `skillVersion`,
+  `aoaiChatCapacity`, `aoaiEmbedCapacity`. Artifact names are emitted as
+  outputs so multiple stacks can share a search service.
+- `search/*.json` now templates the resource names themselves
+  (`<DATASOURCE_NAME>`, `<INDEX_NAME>`, `<SKILLSET_NAME>`,
+  `<INDEXER_NAME>`) alongside endpoints and keys.
+
+### Page-span hardening
+- `printed_page_label_end` now slices the chunk at the last DI page
+  marker (`PageNumber` / `PageBreak`) before label extraction, instead
+  of scanning the second half. Multi-page chunks now produce accurate
+  end labels on manuals where labels only appear at the top of a page.
+
+### Docs aligned with code
+- `docs/validation.md` rewritten around the automated smoke test.
+- `local.settings.json.example` calls out SAS as break-glass only.
+- README surfaces the release-gate flow.
+
 ## 3.0.0 — Production readiness
 
 ### Security

@@ -38,6 +38,18 @@ param aoaiEmbedDeployment string = 'text-embedding-ada-002'
 @description('SKU name for the Azure AI Search service.')
 param searchSku string = 'standard'
 
+@description('Prefix for the four Azure AI Search artifact names (datasource, index, skillset, indexer). Distinct prefixes let multiple stacks share a single search service without collisions.')
+param searchArtifactsPrefix string = 'mm-manuals'
+
+@description('SKILL_VERSION app setting; bump to invalidate cached diagram records when behavior changes.')
+param skillVersion string = '3.0.0'
+
+@description('AOAI chat/vision deployment capacity (in thousands of TPM units).')
+param aoaiChatCapacity int = 50
+
+@description('AOAI embedding deployment capacity (in thousands of TPM units).')
+param aoaiEmbedCapacity int = 120
+
 var rgName = '${baseName}-${env}-rg'
 var tags = {
   env: env
@@ -62,6 +74,10 @@ module resources 'modules/resources.bicep' = {
     aoaiChatDeployment: aoaiChatDeployment
     aoaiEmbedDeployment: aoaiEmbedDeployment
     searchSku: searchSku
+    searchArtifactsPrefix: searchArtifactsPrefix
+    skillVersion: skillVersion
+    aoaiChatCapacity: aoaiChatCapacity
+    aoaiEmbedCapacity: aoaiEmbedCapacity
     tags: tags
   }
 }
@@ -78,3 +94,9 @@ output storageAccountId string = resources.outputs.storageAccountId
 output pdfContainerName string = pdfContainerName
 output aiServicesSubdomainUrl string = resources.outputs.aiServicesSubdomainUrl
 output appInsightsConnectionString string = resources.outputs.appInsightsConnectionString
+
+// Search artifact names (consumed by scripts/deploy_search.py).
+output datasourceName string = '${searchArtifactsPrefix}-ds'
+output indexName string = '${searchArtifactsPrefix}-index'
+output skillsetName string = '${searchArtifactsPrefix}-skillset'
+output indexerName string = '${searchArtifactsPrefix}-indexer'

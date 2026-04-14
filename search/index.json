@@ -1,5 +1,5 @@
 {
-  "name": "mm-manuals-index",
+  "name": "<INDEX_NAME>",
   "fields": [
     { "name": "chunk_id", "type": "Edm.String", "key": true, "searchable": true, "filterable": true, "retrievable": true, "sortable": true, "facetable": false, "analyzer": "keyword" },
 

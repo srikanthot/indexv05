@@ -1,122 +1,139 @@
-# Validation checklist (v2.1)
+# Validation (v3.0)
+
+Two layers: **local** (runs with no Azure access) and **cloud**
+(runs against a real deployed environment). Both are wired as mandatory
+release gates in [`release-gates.md`](release-gates.md).
 
 ## Local (no Azure required)
 
 ```bash
-python tests/test_unit.py             # 68 unit assertions
+python tests/test_unit.py             # 68 deterministic unit checks
 python tests/test_e2e_simulator.py    # full handler-side end-to-end run
+ruff check function_app scripts       # lint
+bicep build infra/main.bicep --stdout > /dev/null   # template syntax
 ```
 
-`test_unit.py` exercises page-span parsing (DI marker timeline), section
-index walking, table extraction with multi-page merge, semantic-string
-assembly, process_table shaping, chunk_id collision regression,
-table_caption flow, OData escaping, and config error handling. Should
-report `68/68 passed`.
+- `test_unit.py`: page-span parsing (DI marker timeline), section index
+  walking, table extraction with multi-page merge, semantic-string
+  assembly, `process_table` shaping, `chunk_id` collision regression,
+  `table_caption` flow, OData escaping, config error handling. Should
+  report `68/68 passed`.
+- `test_e2e_simulator.py`: drives real handler functions through the
+  exact JSON envelope Azure AI Search sends and emits one finalized
+  record of each type (text, multi-page text, diagram, table, summary),
+  validated against `search/index.json`. Should end with
+  `ALL E2E SIMULATION CHECKS PASSED`.
 
-`test_e2e_simulator.py` drives the real handler functions through the
-exact JSON envelope Azure AI Search sends and prints one finalized
-record of every type (text / multi-page text / diagram / table /
-summary), then validates each against the index schema. Should end
-with `ALL E2E SIMULATION CHECKS PASSED`.
+## Cloud (after deploy)
 
-## Azure runtime checks
+### Automated: `scripts/smoke_test.py`
 
-Run these after the first indexer execution.
+```bash
+python scripts/smoke_test.py --env dev
+```
 
-## 1. Built-in Layout output paths
-The skillset still uses the built-in `DocumentIntelligenceLayoutSkill` for the markdown text path. Verify these paths in a Debug Session:
+This is the canonical cloud validation. It:
 
-- /document/markdownDocument/*/sections/h1
-- /document/markdownDocument/*/pageNumber
-- /document/markdownDocument/*/ordinal_position
+1. Triggers the indexer on the deployed environment.
+2. Waits up to `--wait-minutes` (default 15) for completion.
+3. Asserts `status == success`, `itemsProcessed > 0`.
+4. For each `record_type` (text, diagram, table, summary):
+   - Asserts at least one record exists.
+   - Samples one record and verifies the required fields are populated.
+5. Reports the multi-page text chunk count (informational).
 
-If they differ in your region's API version, update `search/skillset.json`.
+Non-zero exit on any failure. Wire into your deploy with
+`scripts/deploy.sh <env> --smoke` or the `smoke: true` input on the
+GitHub Deploy workflow.
 
-## 2. process-document skill
-In the Debug Session, expand the `/document` enrichment after `process-document-skill` runs and confirm:
+### Manual spot-checks
 
-- `enriched_figures[]` is non-empty for any PDF that contains figures.
-- Each figure entry has `image_b64`, `bbox`, `caption`, `header_1/2/3`, `surrounding_context`.
-- `enriched_tables[]` is non-empty for any PDF that contains tables.
-- Each table entry has `markdown` (an actual markdown grid), `row_count`, `col_count`, `page_start`, `page_end`.
+Everything below is still worth eyeballing the first time you bring up
+an environment. The smoke test catches the mechanical failures; the
+checks below catch retrieval-quality regressions.
 
-## 3. Records actually projected
-Query the index after a single-document run:
+#### 1. Multi-figure page → multiple diagram records
+Pick a PDF page with 2+ figures:
 
-  GET /indexes/mm-manuals-index/docs?search=*&$filter=record_type eq 'text'&$count=true
-  GET /indexes/mm-manuals-index/docs?search=*&$filter=record_type eq 'diagram'&$count=true
-  GET /indexes/mm-manuals-index/docs?search=*&$filter=record_type eq 'table'&$count=true
-  GET /indexes/mm-manuals-index/docs?search=*&$filter=record_type eq 'summary'&$count=true
+```
+$filter=record_type eq 'diagram' and physical_pdf_page eq <page>
+```
 
-All four counts must be > 0 for a manual that contains diagrams and tables.
+Should return one record per figure, not one collapsed record.
 
-## 4. Multi-figure pages
-Pick a PDF page that visually contains 2+ figures. Confirm:
+#### 2. Diagram → section linking
+For 5 random diagram records, confirm `header_1/2/3` match the
+chapter/section the figure visually belongs to.
 
-  $filter=record_type eq 'diagram' and physical_pdf_page eq <page>
+#### 3. `surrounding_context` populated
+For 5 random diagram records, confirm `surrounding_context` contains
+real body prose, not just headers or empty strings.
 
-Returns one record per figure (not one collapsed record per page).
+#### 4. Table records structured
+For a known spec table:
 
-## 5. Diagram → section linking
-For 5 random diagram records confirm `header_1`, `header_2`, `header_3` are populated and match the chapter/section the figure visually belongs to.
+```
+$filter=record_type eq 'table' and contains(table_caption, '<caption>')
+```
 
-## 6. surrounding_context populated
-For 5 random diagram records confirm `surrounding_context` contains real prose from the body around the figure caption (not empty, not just headers).
+Confirm `chunk` is a real markdown grid (`|` separators, `---`
+separator row). Not a vision description.
 
-## 7. Table records are structured
-For a known specification table:
+#### 5. Multi-page table merge
+For a known table that spans pages, confirm one record covers both
+pages:
 
-  $filter=record_type eq 'table'
+```
+physical_pdf_page lt physical_pdf_page_end
+```
 
-Confirm `chunk` contains a real markdown grid (`| col1 | col2 |` and `| --- | --- |` rows). Not a vision description.
+And the `chunk` contains data rows from both source pages, with the
+continuation-page header deduplicated (fixed in v3.0).
 
-## 8. Multi-page table merge
-For a known multi-page table confirm:
+#### 6. Multi-page text chunks
+For 5 random text records that cross a page boundary:
 
-  physical_pdf_page < physical_pdf_page_end
+```
+$filter=record_type eq 'text' and physical_pdf_page lt physical_pdf_page_end
+```
 
-And the markdown grid spans both page contents in one record.
+Confirm `physical_pdf_page_end` matches the last source page. v3.0
+`printed_page_label_end` now uses DI page markers to slice the chunk
+at the real page boundary, so the end label should also be accurate.
 
-## 9. Vision prompt enrichment
-Tail the Function App logs while the indexer runs and confirm the `analyze-diagram` prompt body contains:
+#### 7. Hash cache hits on re-index
+Reset the indexer and run it a second time on the same PDFs:
+
+```
+$filter=record_type eq 'diagram' and processing_status eq 'cache_hit'
+```
+
+Count should be > 0 on the second run (no re-vision calls).
+
+#### 8. Vectorizer query (no client embedding)
+
+```
+POST /indexes/<INDEX_NAME>/docs/search?api-version=2024-05-01-preview
+{
+  "vectorQueries": [{
+    "kind": "text",
+    "text": "wiring diagram for control relay",
+    "fields": "text_vector",
+    "k": 5
+  }]
+}
+```
+
+Returns results without the caller embedding the query.
+
+#### 9. `chunk_id` uniqueness
+No collisions across the index. Prefixes: `txt_`, `dgm_`, `tbl_`, `sum_`.
+
+#### 10. Vision prompt enrichment (log inspection)
+Tail Function App logs during an indexer run. The `analyze-diagram`
+prompt body must contain:
+
 - `Section: <header path>`
 - `Page: <number>`
 - `Caption (from layout): <caption>`
-- `Surrounding text: ...`
-
-## 10. Hash cache hits on re-index
-Run the indexer twice on the same PDF. Second run should produce diagram records with `processing_status=cache_hit` (no new vision calls).
-
-  $filter=record_type eq 'diagram' and processing_status eq 'cache_hit'
-
-## 11. Vectorizer query (no client embedding)
-Send a vector query as raw text:
-
-  POST /indexes/mm-manuals-index/docs/search?api-version=2024-05-01-preview
-  {
-    "vectorQueries": [{
-      "kind": "text",
-      "text": "wiring diagram for control relay",
-      "fields": "text_vector",
-      "k": 5
-    }]
-  }
-
-Should return results without the client embedding the query.
-
-## 12. chunk_id uniqueness
-  GET /indexes/mm-manuals-index/docs?search=*&$select=chunk_id&$top=1000
-
-No collisions. Prefixes: `txt_`, `dgm_`, `tbl_`, `sum_`.
-
-## 13. Multi-page text spans
-For 5 random text records that visually cross a page boundary in the source PDF, confirm:
-
-  $filter=record_type eq 'text' and physical_pdf_page lt physical_pdf_page_end
-
-Returns at least one record per multi-page chunk. Spot-check that the
-`physical_pdf_page_end` matches the actual last page the chunk text
-appears on in the PDF.
-
-## 14. Page grounding
-For 5 random text records, confirm `physical_pdf_page` matches the PDF page and `printed_page_label` matches the visible page label.
+- `Surrounding text: "..."`

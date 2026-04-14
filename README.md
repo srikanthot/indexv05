@@ -126,7 +126,19 @@ the Azure CLI login chain.
 
 ## Validation
 
-See [`docs/validation.md`](docs/validation.md) for post-deploy checks.
+See [`docs/validation.md`](docs/validation.md) for the full checklist.
+The mechanical checks are automated as `scripts/smoke_test.py`:
+
+```bash
+python scripts/smoke_test.py --env dev
+```
+
+## Release gates
+
+Mandatory on every PR and every deploy — see
+[`docs/release-gates.md`](docs/release-gates.md). CI enforces unit
+tests, e2e simulator, ruff lint, and Bicep build; deploy re-runs them on
+the exact SHA being deployed, then runs the smoke test post-deploy.
 
 ## Operations
 

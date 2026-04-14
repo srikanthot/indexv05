@@ -1,0 +1,13 @@
+# Code owners for required review on PRs.
+# Replace @org/team with the actual team handles.
+
+# Global fallback
+*                       @srikanthot
+
+# Infra and deploy require extra scrutiny
+/infra/                 @srikanthot
+/scripts/               @srikanthot
+/.github/               @srikanthot
+
+# Search schema changes affect the live index
+/search/                @srikanthot

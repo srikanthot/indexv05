@@ -1,5 +1,5 @@
 {
-  "name": "mm-manuals-skillset",
+  "name": "<SKILLSET_NAME>",
   "description": "Multimodal manual skillset v2: layout + DI-direct figure/table enrichment + per-figure vision + per-context embeddings",
 
   "skills": [
@@ -334,7 +334,7 @@
     "selectors": [
 
       {
-        "targetIndexName": "mm-manuals-index",
+        "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "parent_id",
         "sourceContext": "/document/markdownDocument/*/pages/*",
         "mappings": [
@@ -360,7 +360,7 @@
       },
 
       {
-        "targetIndexName": "mm-manuals-index",
+        "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "parent_id",
         "sourceContext": "/document/enriched_figures/*",
         "mappings": [
@@ -391,7 +391,7 @@
       },
 
       {
-        "targetIndexName": "mm-manuals-index",
+        "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "parent_id",
         "sourceContext": "/document/enriched_tables/*",
         "mappings": [
@@ -417,7 +417,7 @@
       },
 
       {
-        "targetIndexName": "mm-manuals-index",
+        "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "parent_id",
         "sourceContext": "/document",
         "mappings": [

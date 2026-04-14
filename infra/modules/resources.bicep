@@ -7,6 +7,10 @@ param pdfContainerName string
 param aoaiChatDeployment string
 param aoaiEmbedDeployment string
 param searchSku string
+param searchArtifactsPrefix string
+param skillVersion string
+param aoaiChatCapacity int
+param aoaiEmbedCapacity int
 param tags object
 
 var namePrefix = '${baseName}-${env}'
@@ -82,7 +86,7 @@ resource aoai 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
 resource aoaiEmbed 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
   parent: aoai
   name: aoaiEmbedDeployment
-  sku: { name: 'Standard', capacity: 120 }
+  sku: { name: 'Standard', capacity: aoaiEmbedCapacity }
   properties: {
     model: { format: 'OpenAI', name: 'text-embedding-ada-002', version: '2' }
   }
@@ -91,7 +95,7 @@ resource aoaiEmbed 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01'
 resource aoaiChat 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {
   parent: aoai
   name: aoaiChatDeployment
-  sku: { name: 'GlobalStandard', capacity: 50 }
+  sku: { name: 'GlobalStandard', capacity: aoaiChatCapacity }
   properties: {
     model: { format: 'OpenAI', name: 'gpt-4.1', version: '2025-04-14' }
   }
@@ -187,8 +191,8 @@ resource func 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'DI_ENDPOINT', value: di.properties.endpoint }
         { name: 'DI_API_VERSION', value: '2024-11-30' }
         { name: 'SEARCH_ENDPOINT', value: 'https://${search.name}.search.windows.net' }
-        { name: 'SEARCH_INDEX_NAME', value: 'mm-manuals-index' }
-        { name: 'SKILL_VERSION', value: '3.0.0' }
+        { name: 'SEARCH_INDEX_NAME', value: '${searchArtifactsPrefix}-index' }
+        { name: 'SKILL_VERSION', value: skillVersion }
       ]
     }
   }

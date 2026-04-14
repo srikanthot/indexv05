@@ -36,11 +36,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SEARCH_DIR = REPO_ROOT / "search"
 API_VERSION = "2024-05-01-preview"
 
-ARTIFACTS = [
-    ("datasources", "mm-manuals-ds", SEARCH_DIR / "datasource.json"),
-    ("indexes", "mm-manuals-index", SEARCH_DIR / "index.json"),
-    ("skillsets", "mm-manuals-skillset", SEARCH_DIR / "skillset.json"),
-    ("indexers", "mm-manuals-indexer", SEARCH_DIR / "indexer.json"),
+ARTIFACT_FILES = [
+    ("datasources", "datasourceName", SEARCH_DIR / "datasource.json"),
+    ("indexes", "indexName", SEARCH_DIR / "index.json"),
+    ("skillsets", "skillsetName", SEARCH_DIR / "skillset.json"),
+    ("indexers", "indexerName", SEARCH_DIR / "indexer.json"),
 ]
 
 
@@ -151,16 +151,23 @@ def main() -> None:
     cred = DefaultAzureCredential()
     token = cred.get_token("https://search.azure.com/.default").token
 
+    # Resource names come from Bicep outputs so multiple stacks can share
+    # a single search service without hardcoding names here.
+    mapping["<DATASOURCE_NAME>"] = outputs["datasourceName"]
+    mapping["<INDEX_NAME>"] = outputs["indexName"]
+    mapping["<SKILLSET_NAME>"] = outputs["skillsetName"]
+    mapping["<INDEXER_NAME>"] = outputs["indexerName"]
+
     print(f"PUTting artifacts to {search_endpoint} ...")
-    for collection, name, path in ARTIFACTS:
+    for collection, name_key, path in ARTIFACT_FILES:
         raw = path.read_text(encoding="utf-8")
         rendered = render(raw, mapping)
         body = json.loads(rendered)
-        put_artifact(search_endpoint, token, collection, name, body)
+        put_artifact(search_endpoint, token, collection, outputs[name_key], body)
 
     if args.run_indexer:
         print("Triggering indexer run ...")
-        url = f"{search_endpoint}/indexers/mm-manuals-indexer/run?api-version={API_VERSION}"
+        url = f"{search_endpoint}/indexers/{outputs['indexerName']}/run?api-version={API_VERSION}"
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code not in (200, 202, 204):

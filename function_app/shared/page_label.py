@@ -149,6 +149,24 @@ def _page_at_offset(timeline: list[tuple[int, int]], offset: int) -> int:
     return page
 
 
+def _last_page_segment(chunk: str) -> str:
+    """Return the slice of `chunk` that follows the last DI page marker
+    (PageNumber or PageBreak). Used for end-label extraction on
+    multi-page chunks so we scan only the final physical page's text."""
+    if not chunk:
+        return ""
+    last_end = -1
+    for m in PAGE_NUMBER_MARKER_RE.finditer(chunk):
+        last_end = max(last_end, m.end())
+    for m in PAGE_BREAK_MARKER_RE.finditer(chunk):
+        last_end = max(last_end, m.end())
+    if last_end < 0:
+        # No markers — fall back to the tail half so we still bias toward
+        # the end of the chunk rather than scanning the whole thing.
+        return chunk[len(chunk) // 2 :]
+    return chunk[last_end:]
+
+
 def _locate_chunk_in_section(chunk: str, section_content: str) -> int:
     """
     Find chunk start offset in section_content. Tries exact substring,
@@ -226,15 +244,16 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     if not label:
         label = str(start_page) if start_page is not None else ""
 
-    # Look for an end label only when the chunk actually spans multiple
-    # physical pages; otherwise reuse the start label (printed labels
-    # usually appear once per physical page, and scanning the lower half
-    # of a single-page chunk produces false negatives).
+    # End-label extraction: for multi-page chunks, slice the chunk text
+    # at the last DI page marker and scan only that final segment. This
+    # is marker-aware and far more accurate than "scan the second half".
+    end_label = ""
     if page_text and end_page is not None and start_page is not None and end_page > start_page:
-        end_label = _extract_label(page_text[len(page_text) // 2 :]) or ""
-    else:
-        end_label = ""
+        end_label = _extract_label(_last_page_segment(page_text)) or ""
     if not end_label:
+        # Single-page chunk or no marker found: reuse the start label for
+        # human readability when start==end; otherwise fall back to the
+        # numeric page so the field is never empty.
         end_label = label if start_page == end_page else (
             str(end_page) if end_page is not None else label
         )

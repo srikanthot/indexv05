@@ -1,8 +1,8 @@
 {
-  "name": "mm-manuals-indexer",
-  "dataSourceName": "mm-manuals-ds",
-  "targetIndexName": "mm-manuals-index",
-  "skillsetName": "mm-manuals-skillset",
+  "name": "<INDEXER_NAME>",
+  "dataSourceName": "<DATASOURCE_NAME>",
+  "targetIndexName": "<INDEX_NAME>",
+  "skillsetName": "<SKILLSET_NAME>",
   "schedule": null,
   "parameters": {
     "batchSize": 1,

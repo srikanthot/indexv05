@@ -1,5 +1,5 @@
 {
-  "name": "mm-manuals-ds",
+  "name": "<DATASOURCE_NAME>",
   "description": "Blob source for multimodal manual indexing. Uses managed identity: the Search service's system-assigned identity has Storage Blob Data Reader on the account.",
   "type": "azureblob",
   "credentials": {

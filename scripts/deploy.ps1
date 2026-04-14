@@ -7,6 +7,7 @@
 param(
   [Parameter(Mandatory = $true)][ValidateSet('dev', 'staging', 'prod')][string]$Env,
   [switch]$RunIndexer,
+  [switch]$Smoke,
   [string]$Location = 'eastus2'
 )
 
@@ -36,5 +37,10 @@ Write-Host "==> Applying Azure AI Search artifacts"
 $args = @('--env', $Env)
 if ($RunIndexer) { $args += '--run-indexer' }
 python (Join-Path $RepoRoot 'scripts/deploy_search.py') @args
+
+if ($Smoke) {
+  Write-Host "==> Running smoke test"
+  python (Join-Path $RepoRoot 'scripts/smoke_test.py') --env $Env
+}
 
 Write-Host "==> Done. Function App: $FuncApp  RG: $Rg"

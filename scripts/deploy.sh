@@ -13,9 +13,15 @@
 
 set -euo pipefail
 
-ENV="${1:?usage: deploy.sh <env> [--run-indexer]}"
+ENV="${1:?usage: deploy.sh <env> [--run-indexer] [--smoke]}"
 RUN_INDEXER=""
-[[ "${2:-}" == "--run-indexer" ]] && RUN_INDEXER="--run-indexer"
+SMOKE=""
+for arg in "${@:2}"; do
+  case "$arg" in
+    --run-indexer) RUN_INDEXER="--run-indexer" ;;
+    --smoke) SMOKE="1" ;;
+  esac
+done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INFRA="${REPO_ROOT}/infra"
@@ -41,5 +47,10 @@ popd >/dev/null
 
 echo "==> Applying Azure AI Search artifacts"
 python "${REPO_ROOT}/scripts/deploy_search.py" --env "${ENV}" ${RUN_INDEXER}
+
+if [[ -n "${SMOKE}" ]]; then
+  echo "==> Running smoke test"
+  python "${REPO_ROOT}/scripts/smoke_test.py" --env "${ENV}"
+fi
 
 echo "==> Done. Function App: ${FUNC_APP}  RG: ${RG}"
