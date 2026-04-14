@@ -4,8 +4,7 @@
 # Global fallback
 *                       @srikanthot
 
-# Infra and deploy require extra scrutiny
-/infra/                 @srikanthot
+# Deploy + CI require extra scrutiny
 /scripts/               @srikanthot
 /.github/               @srikanthot
 

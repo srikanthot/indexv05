@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to deploy.config.json and fill in values for your existing Azure resources. This file is the single source of truth for every deploy script — no Bicep, no portal clicks.",
+  "_comment": "Copy to deploy.config.json and fill in the identifiers for your existing Azure resources. Every deploy script reads from this single file.",
 
   "functionApp": {
     "name": "",
