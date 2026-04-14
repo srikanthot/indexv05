@@ -19,17 +19,16 @@ import base64
 import hashlib
 import json
 import re
-from typing import Dict, Any
+from typing import Any
 
+from .aoai import get_client, vision_deployment
 from .ids import (
     SKILL_VERSION,
     diagram_chunk_id,
     safe_int,
     safe_str,
 )
-from .aoai import get_client, vision_deployment
 from .search_cache import lookup_existing_by_hash
-
 
 VALID_CATEGORIES = {
     "circuit_diagram",
@@ -77,7 +76,7 @@ def _image_hash(image_b64: str) -> str:
         return hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
 
 
-def _build_user_text(data: Dict[str, Any]) -> str:
+def _build_user_text(data: dict[str, Any]) -> str:
     source_file = safe_str(data.get("source_file"))
     h1 = safe_str(data.get("header_1"))
     h2 = safe_str(data.get("header_2"))
@@ -91,20 +90,24 @@ def _build_user_text(data: Dict[str, Any]) -> str:
         sorted(set(f"{m.group(1).title()} {m.group(2)}" for m in FIGURE_REF_RE.finditer(surrounding)))
     )
 
+    # Strip stray quotes from the surrounding text so body content cannot
+    # terminate the quoted block and leak instructions into the prompt.
+    surrounding_safe = surrounding[:1500].replace('"', "'")
+
     return (
         f"You are analyzing a figure from technical manual \"{source_file}\".\n"
         f"Section: {header_path or '(unknown)'}\n"
         f"Page: {page or '(unknown)'}\n"
         f"Caption (from layout): {caption or '(none)'}\n"
         f"Body text references this figure as: {refs or '(none)'}\n"
-        f"Surrounding text: \"{surrounding[:1500]}\"\n\n"
+        f"Surrounding text: \"{surrounding_safe}\"\n\n"
         f"If this is a technical diagram, describe it in full detail.\n"
         f"If any text/value is unclear, say so explicitly. Do not guess.\n"
         f"If decorative/logo/photo, return category=decorative and is_useful=false."
     )
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
+def _extract_json(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?", "", text).rstrip("`").strip()
@@ -117,7 +120,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
         raise
 
 
-def _call_vision(image_b64: str, user_text: str) -> Dict[str, Any]:
+def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
     client = get_client()
     user_content = [
         {"type": "text", "text": user_text},
@@ -139,7 +142,7 @@ def _call_vision(image_b64: str, user_text: str) -> Dict[str, Any]:
     return _extract_json(resp.choices[0].message.content or "{}")
 
 
-def process_diagram(data: Dict[str, Any]) -> Dict[str, Any]:
+def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     image_b64 = safe_str(data.get("image_b64"))
     figure_id = safe_str(data.get("figure_id"))
     page_number = safe_int(data.get("page_number"), default=None)

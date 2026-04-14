@@ -1,13 +1,13 @@
 import logging
-import azure.functions as func
 
-from shared.skill_io import handle_skill_request
-from shared.page_label import process_page_label
+import azure.functions as func
 from shared.diagram import process_diagram
-from shared.semantic import process_semantic_string
-from shared.summary import process_doc_summary
+from shared.page_label import process_page_label
 from shared.process_document import process_document
 from shared.process_table import process_table
+from shared.semantic import process_semantic_string
+from shared.skill_io import handle_skill_request
+from shared.summary import process_doc_summary
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 

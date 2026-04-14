@@ -261,7 +261,6 @@
       "description": "Ada-002 embeddings for text chunks",
       "context": "/document/markdownDocument/*/pages/*",
       "resourceUri": "<AOAI_ENDPOINT>",
-      "apiKey": "<AOAI_API_KEY>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
@@ -279,7 +278,6 @@
       "description": "Ada-002 embeddings for per-figure diagram chunks",
       "context": "/document/enriched_figures/*",
       "resourceUri": "<AOAI_ENDPOINT>",
-      "apiKey": "<AOAI_API_KEY>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
@@ -297,7 +295,6 @@
       "description": "Ada-002 embeddings for table chunks",
       "context": "/document/enriched_tables/*",
       "resourceUri": "<AOAI_ENDPOINT>",
-      "apiKey": "<AOAI_API_KEY>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
@@ -315,7 +312,6 @@
       "description": "Ada-002 embedding for the per-document summary record",
       "context": "/document",
       "resourceUri": "<AOAI_ENDPOINT>",
-      "apiKey": "<AOAI_API_KEY>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
@@ -329,8 +325,9 @@
   ],
 
   "cognitiveServices": {
-    "@odata.type": "#Microsoft.Azure.Search.CognitiveServicesByKey",
-    "key": "<AI_SERVICES_KEY>"
+    "@odata.type": "#Microsoft.Azure.Search.AIServicesByIdentity",
+    "subdomainUrl": "<AI_SERVICES_SUBDOMAIN_URL>",
+    "identity": null
   },
 
   "indexProjections": {

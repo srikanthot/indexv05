@@ -16,24 +16,24 @@ skill so we can keep batching/parallelism tunable from the skillset.
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Any
 
+from .di_client import analyze_layout, fetch_blob_bytes
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
     safe_str,
 )
-from .di_client import analyze_layout, fetch_blob_bytes
 from .pdf_crop import crop_figure_png_b64
 from .sections import (
     build_section_index,
-    find_section_for_page,
     extract_surrounding_text,
+    find_section_for_page,
 )
 from .tables import extract_table_records
 
 
-def _figure_first_page(figure: Dict[str, Any]) -> int:
+def _figure_first_page(figure: dict[str, Any]) -> int:
     for br in figure.get("boundingRegions", []) or []:
         pn = br.get("pageNumber")
         if isinstance(pn, int):
@@ -41,7 +41,7 @@ def _figure_first_page(figure: Dict[str, Any]) -> int:
     return 0
 
 
-def _figure_polygon(figure: Dict[str, Any]) -> List[float]:
+def _figure_polygon(figure: dict[str, Any]) -> list[float]:
     for br in figure.get("boundingRegions", []) or []:
         poly = br.get("polygon")
         if poly:
@@ -49,12 +49,12 @@ def _figure_polygon(figure: Dict[str, Any]) -> List[float]:
     return []
 
 
-def _figure_caption(figure: Dict[str, Any]) -> str:
+def _figure_caption(figure: dict[str, Any]) -> str:
     cap = figure.get("caption") or {}
     return (cap.get("content") or "").strip()
 
 
-def process_document(data: Dict[str, Any]) -> Dict[str, Any]:
+def process_document(data: dict[str, Any]) -> dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
     parent_id = parent_id_for(source_path, source_file)
@@ -91,7 +91,7 @@ def process_document(data: Dict[str, Any]) -> Dict[str, Any]:
 
     sections_index = build_section_index(analyze)
 
-    enriched_figures: List[Dict[str, Any]] = []
+    enriched_figures: list[dict[str, Any]] = []
     for fig_idx, figure in enumerate(analyze.get("figures", []) or []):
         page = _figure_first_page(figure)
         polygon = _figure_polygon(figure)
@@ -130,7 +130,7 @@ def process_document(data: Dict[str, Any]) -> Dict[str, Any]:
             "parent_id": parent_id,
         })
 
-    enriched_tables: List[Dict[str, Any]] = []
+    enriched_tables: list[dict[str, Any]] = []
     for tbl in extract_table_records(analyze):
         section = find_section_for_page(sections_index, tbl["page_start"])
         h1 = section["header_1"] if section else ""

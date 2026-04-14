@@ -7,29 +7,39 @@ does not surface. Built-in skill remains in the skillset for the markdown
 text path; this client is for the figure/table enrichment path.
 """
 
-import os
 import time
-import logging
-from typing import Dict, Any
+from typing import Any
 
 import httpx
 
-from .config import required_env, optional_env
+from .config import optional_env, required_env
+from .credentials import (
+    DI_SCOPE,
+    STORAGE_SCOPE,
+    bearer_token,
+    use_managed_identity,
+)
 
 
 def _endpoint() -> str:
     return required_env("DI_ENDPOINT").rstrip("/")
 
 
-def _key() -> str:
-    return required_env("DI_API_KEY")
-
-
 def _api_version() -> str:
     return optional_env("DI_API_VERSION", "2024-11-30")
 
 
-def analyze_layout(pdf_bytes: bytes, timeout_s: int = 300) -> Dict[str, Any]:
+def _auth_headers() -> dict[str, str]:
+    """
+    Header set for DI requests. MI path uses a bearer token; key path uses
+    Ocp-Apim-Subscription-Key. DI supports both natively.
+    """
+    if use_managed_identity():
+        return {"Authorization": f"Bearer {bearer_token(DI_SCOPE)}"}
+    return {"Ocp-Apim-Subscription-Key": required_env("DI_API_KEY")}
+
+
+def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
     """
     Submit a PDF to the prebuilt-layout model and poll until the result is ready.
     Returns the full analyzeResult payload (pages, paragraphs, sections,
@@ -39,10 +49,8 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 300) -> Dict[str, Any]:
         f"{_endpoint()}/documentintelligence/documentModels/prebuilt-layout:analyze"
         f"?api-version={_api_version()}&outputContentFormat=markdown"
     )
-    headers = {
-        "Ocp-Apim-Subscription-Key": _key(),
-        "Content-Type": "application/pdf",
-    }
+    auth = _auth_headers()
+    headers = {**auth, "Content-Type": "application/pdf"}
 
     with httpx.Client(timeout=60.0) as client:
         submit = client.post(url, headers=headers, content=pdf_bytes)
@@ -57,7 +65,8 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 300) -> Dict[str, Any]:
         deadline = time.time() + timeout_s
         backoff = 2.0
         while time.time() < deadline:
-            poll = client.get(op_loc, headers={"Ocp-Apim-Subscription-Key": _key()})
+            # Re-fetch the auth header each poll so MI token refreshes are picked up.
+            poll = client.get(op_loc, headers=_auth_headers())
             if poll.status_code != 200:
                 raise RuntimeError(
                     f"DI poll failed: {poll.status_code} {poll.text[:500]}"
@@ -77,23 +86,28 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 300) -> Dict[str, Any]:
 def fetch_blob_bytes(blob_url: str) -> bytes:
     """
     Fetch a blob over HTTPS. The url passed in by the indexer is
-    metadata_storage_path which is the *unauthenticated* blob URL.
+    metadata_storage_path — the unauthenticated blob URL.
 
-    The Function App must have either:
-      - the blob's container set to public read, OR
-      - a SAS token appended via STORAGE_BLOB_SAS env var, OR
-      - storage account key in STORAGE_ACCOUNT_KEY (not used here)
-
-    Simplest path: STORAGE_BLOB_SAS contains a container-level SAS that gets
-    appended to every fetch.
+    Auth priority:
+      1. Managed identity (production). Requires the Function App's MI to
+         have the 'Storage Blob Data Reader' role on the account.
+      2. SAS token in STORAGE_BLOB_SAS (useful for local dev when MI is
+         not available).
+      3. Bare URL (blob must be public-read).
     """
-    sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
+    headers: dict[str, str] = {}
     fetch_url = blob_url
-    if sas and "?" not in blob_url:
-        fetch_url = f"{blob_url}?{sas}"
+
+    if use_managed_identity():
+        headers["Authorization"] = f"Bearer {bearer_token(STORAGE_SCOPE)}"
+        headers["x-ms-version"] = "2023-11-03"
+    else:
+        sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
+        if sas and "?" not in blob_url:
+            fetch_url = f"{blob_url}?{sas}"
 
     with httpx.Client(timeout=120.0) as client:
-        resp = client.get(fetch_url)
+        resp = client.get(fetch_url, headers=headers)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"blob fetch failed: {resp.status_code} {resp.text[:200]}"

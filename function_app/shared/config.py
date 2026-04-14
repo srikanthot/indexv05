@@ -8,7 +8,6 @@ will translate into a per-record error with a clear message instead of a
 """
 
 import os
-from typing import Optional
 
 
 class ConfigError(RuntimeError):

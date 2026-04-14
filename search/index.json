@@ -90,8 +90,7 @@
         "azureOpenAIParameters": {
           "resourceUri": "<AOAI_ENDPOINT>",
           "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
-          "modelName": "text-embedding-ada-002",
-          "apiKey": "<AOAI_API_KEY>"
+          "modelName": "text-embedding-ada-002"
         }
       }
     ],

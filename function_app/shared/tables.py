@@ -10,17 +10,16 @@ Features:
   header row in each split.
 """
 
-from typing import Dict, Any, List, Tuple
-
+from typing import Any
 
 MAX_TABLE_CHARS = 3000
 
 
-def _cell_text(cell: Dict[str, Any]) -> str:
+def _cell_text(cell: dict[str, Any]) -> str:
     return (cell.get("content") or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _table_pages(table: Dict[str, Any]) -> List[int]:
+def _table_pages(table: dict[str, Any]) -> list[int]:
     pages = set()
     for br in table.get("boundingRegions", []) or []:
         pn = br.get("pageNumber")
@@ -29,12 +28,12 @@ def _table_pages(table: Dict[str, Any]) -> List[int]:
     return sorted(pages)
 
 
-def _table_caption(table: Dict[str, Any]) -> str:
+def _table_caption(table: dict[str, Any]) -> str:
     cap = table.get("caption") or {}
     return (cap.get("content") or "").strip()
 
 
-def _table_to_grid(table: Dict[str, Any]) -> List[List[str]]:
+def _table_to_grid(table: dict[str, Any]) -> list[list[str]]:
     rows = table.get("rowCount") or 0
     cols = table.get("columnCount") or 0
     grid = [["" for _ in range(cols)] for _ in range(rows)]
@@ -52,7 +51,7 @@ def _table_to_grid(table: Dict[str, Any]) -> List[List[str]]:
     return grid
 
 
-def _grid_to_markdown(grid: List[List[str]]) -> str:
+def _grid_to_markdown(grid: list[list[str]]) -> str:
     if not grid or not grid[0]:
         return ""
     header = grid[0]
@@ -63,7 +62,7 @@ def _grid_to_markdown(grid: List[List[str]]) -> str:
     return "\n".join(lines)
 
 
-def _try_merge_continuation(prev: Dict[str, Any], curr: Dict[str, Any]) -> bool:
+def _try_merge_continuation(prev: dict[str, Any], curr: dict[str, Any]) -> bool:
     """
     True if `curr` looks like a continuation of `prev`:
       - immediately following page
@@ -83,7 +82,15 @@ def _try_merge_continuation(prev: Dict[str, Any], curr: Dict[str, Any]) -> bool:
     return True
 
 
-def _split_oversized(markdown: str) -> List[str]:
+def _first_row_matches(prev_grid: list[list[str]], curr_grid: list[list[str]]) -> bool:
+    """True if curr_grid's first row equals prev_grid's first row (header
+    repeated on continuation page)."""
+    if not prev_grid or not curr_grid:
+        return False
+    return prev_grid[0] == curr_grid[0]
+
+
+def _split_oversized(markdown: str) -> list[str]:
     if len(markdown) <= MAX_TABLE_CHARS:
         return [markdown]
     lines = markdown.splitlines()
@@ -93,8 +100,8 @@ def _split_oversized(markdown: str) -> List[str]:
     sep = lines[1]
     body = lines[2:]
 
-    out: List[str] = []
-    cur: List[str] = []
+    out: list[str] = []
+    cur: list[str] = []
     cur_len = len(header) + len(sep) + 2
     for row in body:
         if cur_len + len(row) + 1 > MAX_TABLE_CHARS and cur:
@@ -108,7 +115,7 @@ def _split_oversized(markdown: str) -> List[str]:
     return out
 
 
-def extract_table_records(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Returns a list of table record dicts:
       {
@@ -128,17 +135,21 @@ def extract_table_records(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]
         key=lambda t: (_table_pages(t)[0] if _table_pages(t) else 0),
     )
 
-    merged: List[Tuple[List[Dict[str, Any]], List[List[str]]]] = []
+    merged: list[tuple[list[dict[str, Any]], list[list[str]]]] = []
     for tbl in sorted_tables:
         if merged and _try_merge_continuation(merged[-1][0][-1], tbl):
             prev_grid = merged[-1][1]
             new_grid = _table_to_grid(tbl)
+            # DI often repeats the header row on continuation pages; drop it
+            # so it does not appear as a data row in the merged markdown.
+            if _first_row_matches(prev_grid, new_grid):
+                new_grid = new_grid[1:]
             prev_grid.extend(new_grid)
             merged[-1][0].append(tbl)
         else:
             merged.append(([tbl], _table_to_grid(tbl)))
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for cluster_idx, (cluster, grid) in enumerate(merged):
         first = cluster[0]
         last = cluster[-1]
@@ -150,12 +161,15 @@ def extract_table_records(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]
         md = _grid_to_markdown(grid)
 
         for split_idx, chunk in enumerate(_split_oversized(md)):
+            # Count data rows in this split chunk (total lines minus header
+            # + separator), so callers see the real shape of the split.
+            chunk_rows = max(0, len(chunk.splitlines()) - 2)
             out.append({
                 "index": f"{cluster_idx}_{split_idx}",
                 "page_start": page_start,
                 "page_end": page_end,
                 "markdown": chunk,
-                "row_count": len(grid),
+                "row_count": chunk_rows,
                 "col_count": len(grid[0]) if grid else 0,
                 "caption": caption,
             })

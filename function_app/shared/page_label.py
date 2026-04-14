@@ -18,16 +18,15 @@ page it ends on.
 """
 
 import re
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any
 
 from .ids import (
     SKILL_VERSION,
-    text_chunk_id,
     parent_id_for,
     safe_int,
     safe_str,
+    text_chunk_id,
 )
-
 
 # ---------- printed-label heuristics ----------
 
@@ -73,7 +72,7 @@ def _strip_di_markers(text: str) -> str:
     return text
 
 
-def _extract_label(text: str) -> Optional[str]:
+def _extract_label(text: str) -> str | None:
     if not text:
         return None
     text = _strip_di_markers(text)
@@ -109,17 +108,17 @@ def _extract_label(text: str) -> Optional[str]:
 # ---------- page-span computation ----------
 
 
-def _marker_timeline(section_content: str, section_start_page: int) -> List[Tuple[int, int]]:
+def _marker_timeline(section_content: str, section_start_page: int) -> list[tuple[int, int]]:
     """
     Walk the section content and return a sorted list of (offset, page_number).
     The first entry is always (0, section_start_page) so any chunk that
     sits before the first explicit marker still resolves to a real page.
     """
-    timeline: List[Tuple[int, int]] = [(0, section_start_page)]
+    timeline: list[tuple[int, int]] = [(0, section_start_page)]
     current_page = section_start_page
 
     # Combine both marker types in document order.
-    events: List[Tuple[int, str, Optional[int]]] = []
+    events: list[tuple[int, str, int | None]] = []
     for m in PAGE_NUMBER_MARKER_RE.finditer(section_content or ""):
         events.append((m.end(), "num", int(m.group(1))))
     for m in PAGE_BREAK_MARKER_RE.finditer(section_content or ""):
@@ -136,7 +135,7 @@ def _marker_timeline(section_content: str, section_start_page: int) -> List[Tupl
     return timeline
 
 
-def _page_at_offset(timeline: List[Tuple[int, int]], offset: int) -> int:
+def _page_at_offset(timeline: list[tuple[int, int]], offset: int) -> int:
     """
     Binary-walk: return the page number active at `offset` (the page of the
     most recent marker whose end <= offset).
@@ -170,8 +169,8 @@ def _locate_chunk_in_section(chunk: str, section_content: str) -> int:
 def compute_page_span(
     chunk: str,
     section_content: str,
-    section_start_page: Optional[int],
-) -> Tuple[Optional[int], Optional[int]]:
+    section_start_page: int | None,
+) -> tuple[int | None, int | None]:
     """
     Returns (start_page, end_page). Falls back to (section_start_page,
     section_start_page) if we cannot locate the chunk inside the section.
@@ -213,7 +212,7 @@ def compute_page_span(
 # ---------- skill entry point ----------
 
 
-def process_page_label(data: Dict[str, Any]) -> Dict[str, Any]:
+def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     page_text = safe_str(data.get("page_text"))
     section_content = safe_str(data.get("section_content"))
     source_file = safe_str(data.get("source_file"))
@@ -227,9 +226,18 @@ def process_page_label(data: Dict[str, Any]) -> Dict[str, Any]:
     if not label:
         label = str(start_page) if start_page is not None else ""
 
-    end_label = _extract_label(page_text[len(page_text)//2 :]) if page_text else ""
+    # Look for an end label only when the chunk actually spans multiple
+    # physical pages; otherwise reuse the start label (printed labels
+    # usually appear once per physical page, and scanning the lower half
+    # of a single-page chunk produces false negatives).
+    if page_text and end_page is not None and start_page is not None and end_page > start_page:
+        end_label = _extract_label(page_text[len(page_text) // 2 :]) or ""
+    else:
+        end_label = ""
     if not end_label:
-        end_label = str(end_page) if end_page is not None else label
+        end_label = label if start_page == end_page else (
+            str(end_page) if end_page is not None else label
+        )
 
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),

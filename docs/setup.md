@@ -1,36 +1,77 @@
-# Setup notes
+# Setup
 
-## Azure resources required
+> For the full deploy flow, see [deployment.md](deployment.md). This
+> page is a reference for the resources and settings the pipeline
+> uses — everything below is provisioned automatically by
+> `scripts/deploy.sh`.
 
-- Azure AI Search service (Basic tier or higher; Standard recommended for skillset throughput)
-- Azure Blob Storage account + container holding source PDFs
-- Azure AI Services (Cognitive Services multi-service) — required by built-in OCR / Layout skills
-- Azure Document Intelligence resource — used by the `process-document` custom skill via REST
-- Azure OpenAI service with two deployments:
-  - text-embedding-ada-002  (1536 dims)
-  - a vision-capable chat model for diagram analysis and summary (e.g. gpt-4o)
-- Azure Function App (Linux, Python 3.11, Functions v4) for the custom WebApi skills
+## Azure resources
 
-## Permissions
+All created by `infra/main.bicep`:
 
-- The Search service must be able to read from Blob Storage (connection string in datasource OR managed identity).
-- The Search service must be able to call the Function URL with the function key embedded in the skillset.
-- The Function App's identity must be able to reach the Azure OpenAI endpoint (network + key).
+- Azure AI Search (Basic for dev; Standard recommended for prod)
+- Storage account + PDF container (shared-key disabled)
+- Azure AI Services multi-service (billing for built-in Layout skill)
+- Azure Document Intelligence (prebuilt-layout)
+- Azure OpenAI:
+  - `text-embedding-ada-002` (1536 dims)
+  - `gpt-4.1` (vision-capable; covers both diagram analysis and summary)
+- Log Analytics workspace
+- Application Insights component
+- Linux consumption plan + Python 3.11 Function App with system-assigned MI
 
-## Environment variables on the Function App
+## RBAC
 
-Set these in App Settings (mirrors `local.settings.json.example`):
+Created by the same Bicep template:
 
-- AOAI_ENDPOINT
-- AOAI_API_KEY
-- AOAI_API_VERSION
-- AOAI_VISION_DEPLOYMENT
-- AOAI_CHAT_DEPLOYMENT
-- DI_ENDPOINT
-- DI_API_KEY
-- DI_API_VERSION
-- STORAGE_BLOB_SAS              (container SAS so the function can fetch source PDFs)
-- SEARCH_ENDPOINT
-- SEARCH_ADMIN_KEY              (used only for the image-hash cache lookup)
-- SEARCH_INDEX_NAME             (defaults to mm-manuals-index)
-- SKILL_VERSION                 (e.g. 2.0.0)
+| Principal | Scope | Role |
+|---|---|---|
+| Function App MI | Storage account | Storage Blob Data Owner |
+| Function App MI | Azure OpenAI | Cognitive Services OpenAI User |
+| Function App MI | Document Intelligence | Cognitive Services User |
+| Function App MI | Azure AI Search | Search Index Data Reader |
+| Search service MI | Storage account | Storage Blob Data Reader |
+| Search service MI | Azure OpenAI | Cognitive Services OpenAI User |
+| Search service MI | AI Services | Cognitive Services User |
+
+## Function App settings
+
+Set automatically by Bicep (in addition to the Functions host defaults):
+
+| Setting | Purpose |
+|---|---|
+| `AUTH_MODE=mi` | Force managed-identity auth on every outbound call |
+| `AOAI_ENDPOINT` / `AOAI_API_VERSION` | Azure OpenAI (no key needed) |
+| `AOAI_VISION_DEPLOYMENT` / `AOAI_CHAT_DEPLOYMENT` | gpt-4.1 deployment name |
+| `DI_ENDPOINT` / `DI_API_VERSION` | Document Intelligence (no key needed) |
+| `SEARCH_ENDPOINT` / `SEARCH_INDEX_NAME` | Hash-cache lookup |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Telemetry |
+| `SKILL_VERSION` | Stamped on every record (`3.0.0`) |
+
+## Local dev overrides
+
+`function_app/local.settings.json.example` shows the per-key fallback:
+
+- Set `AUTH_MODE=key`
+- Populate `AOAI_API_KEY`, `DI_API_KEY`, `SEARCH_ADMIN_KEY`,
+  `STORAGE_BLOB_SAS`
+- `func start`
+
+Leave `AUTH_MODE=mi` (unset or `mi`) to use the Azure CLI credential
+chain locally — simpler if you're already `az login`'d.
+
+## Placeholders in the search artifacts
+
+These are filled at deploy time by `scripts/deploy_search.py`:
+
+| Placeholder | Source |
+|---|---|
+| `<STORAGE_RESOURCE_ID>` | Bicep output `storageAccountId` |
+| `<STORAGE_CONTAINER_NAME>` | Bicep parameter `pdfContainerName` |
+| `<FUNCTION_APP_HOST>` | Bicep output `functionAppHost` |
+| `<FUNCTION_KEY>` | `az functionapp keys list` |
+| `<AOAI_ENDPOINT>` | Bicep output `aoaiEndpoint` |
+| `<AOAI_EMBED_DEPLOYMENT>` | Env var (defaults to `text-embedding-ada-002`) |
+| `<AI_SERVICES_SUBDOMAIN_URL>` | Bicep output `aiServicesSubdomainUrl` |
+
+`deploy_search.py` fails if any `<PLACEHOLDER>` remains unrendered.

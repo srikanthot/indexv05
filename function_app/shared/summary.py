@@ -5,16 +5,15 @@ One summary record per parent document. Concise (300-500 words).
 Used for high-recall, doc-level retrieval and as a routing signal.
 """
 
-from typing import Dict, Any, List
+from typing import Any
 
+from .aoai import chat_deployment, get_client
 from .ids import (
     SKILL_VERSION,
-    summary_chunk_id,
     parent_id_for,
     safe_str,
+    summary_chunk_id,
 )
-from .aoai import get_client, chat_deployment
-
 
 SYSTEM_PROMPT = """You are a technical-manual summarizer.
 
@@ -27,7 +26,7 @@ single dense summary (about 300-500 words) that captures:
 Do not invent content. Plain prose only, no markdown."""
 
 
-def _coerce_titles(value: Any) -> List[str]:
+def _coerce_titles(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, list):
@@ -47,7 +46,7 @@ def _coalesce_markdown(value: Any) -> str:
     return str(value)
 
 
-def process_doc_summary(data: Dict[str, Any]) -> Dict[str, Any]:
+def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
     markdown_text = _coalesce_markdown(data.get("markdown_text"))
@@ -68,10 +67,16 @@ def process_doc_summary(data: Dict[str, Any]) -> Dict[str, Any]:
             "skill_version": SKILL_VERSION,
         }
 
+    titles_block = (
+        "Top-level section titles:\n- " + "\n- ".join(titles[:40])
+        if titles else "Top-level section titles: (none detected)"
+    )
+    # gpt-4.1 has a 1M context, but we still cap at 60k chars so a pathological
+    # OCR dump cannot blow up the request or cost.
     prompt = (
         f"Source file: {source_file}\n\n"
-        f"Top-level section titles:\n- " + "\n- ".join(titles[:40]) + "\n\n"
-        f"Manual content (truncated):\n{primary_text[:18000]}"
+        f"{titles_block}\n\n"
+        f"Manual content (truncated):\n{primary_text[:60000]}"
     )
 
     try:

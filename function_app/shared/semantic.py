@@ -6,16 +6,16 @@ Builds a single, real string for chunk_for_semantic. Two modes:
   - mode='diagram' : assemble from figure_ref + category + description + ocr hint
 """
 
-from typing import Dict, Any, List
+from typing import Any
 
 from .ids import safe_str
 
 
-def _join_nonempty(parts: List[str], sep: str) -> str:
+def _join_nonempty(parts: list[str], sep: str) -> str:
     return sep.join([p for p in parts if p])
 
 
-def _build_text_string(data: Dict[str, Any]) -> str:
+def _build_text_string(data: dict[str, Any]) -> str:
     source_file = safe_str(data.get("source_file"))
     h1 = safe_str(data.get("header_1"))
     h2 = safe_str(data.get("header_2"))
@@ -35,7 +35,7 @@ def _build_text_string(data: Dict[str, Any]) -> str:
     )
 
 
-def _build_diagram_string(data: Dict[str, Any]) -> str:
+def _build_diagram_string(data: dict[str, Any]) -> str:
     source_file = safe_str(data.get("source_file"))
     description = safe_str(data.get("diagram_description"))
     category = safe_str(data.get("diagram_category"))
@@ -65,7 +65,7 @@ def _build_diagram_string(data: Dict[str, Any]) -> str:
     )
 
 
-def process_semantic_string(data: Dict[str, Any]) -> Dict[str, Any]:
+def process_semantic_string(data: dict[str, Any]) -> dict[str, Any]:
     mode = safe_str(data.get("mode"), "text").lower()
     if mode == "diagram":
         return {"chunk_for_semantic": _build_diagram_string(data)}

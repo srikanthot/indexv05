@@ -20,7 +20,8 @@ And must return:
 
 import json
 import logging
-from typing import Callable, Dict, Any
+from collections.abc import Callable
+from typing import Any
 
 import azure.functions as func
 
@@ -29,7 +30,7 @@ from .config import ConfigError
 
 def handle_skill_request(
     req: func.HttpRequest,
-    record_processor: Callable[[Dict[str, Any]], Dict[str, Any]],
+    record_processor: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> func.HttpResponse:
     try:
         body = req.get_json()

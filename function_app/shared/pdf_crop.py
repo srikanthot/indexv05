@@ -7,18 +7,14 @@ PNG at 200 DPI for the vision model.
 """
 
 import base64
-import io
-import logging
-from typing import List, Dict, Any, Tuple
 
 import fitz  # PyMuPDF
-
 
 RENDER_DPI = 200
 INCH_TO_PT = 72.0
 
 
-def _polygon_bbox_inches(polygon: List[float]) -> Tuple[float, float, float, float]:
+def _polygon_bbox_inches(polygon: list[float]) -> tuple[float, float, float, float]:
     """
     DI returns polygons as a flat list [x1,y1,x2,y2,...] in inches.
     Returns (x0, y0, x1, y1) in inches.
@@ -31,9 +27,9 @@ def _polygon_bbox_inches(polygon: List[float]) -> Tuple[float, float, float, flo
 def crop_figure_png_b64(
     pdf_bytes: bytes,
     page_number_1based: int,
-    polygon_inches: List[float],
+    polygon_inches: list[float],
     pad_inches: float = 0.05,
-) -> Tuple[str, Dict[str, float]]:
+) -> tuple[str, dict[str, float]]:
     """
     Render the cropped figure region as a base64 PNG. Returns (b64, bbox_dict).
     bbox_dict is a JSON-serializable description of the figure location:
@@ -57,6 +53,14 @@ def crop_figure_png_b64(
         x1_pt = min(page.rect.width, x1_in * INCH_TO_PT)
         y1_pt = min(page.rect.height, y1_in * INCH_TO_PT)
 
+        # Guard against inverted rectangles (DI polygon with unexpected
+        # winding) so fitz.Rect does not raise on zero/negative area.
+        if x1_pt <= x0_pt or y1_pt <= y0_pt:
+            raise ValueError(
+                f"figure rect out of page bounds after clipping "
+                f"(x:{x0_pt:.1f}-{x1_pt:.1f}, y:{y0_pt:.1f}-{y1_pt:.1f})"
+            )
+
         clip = fitz.Rect(x0_pt, y0_pt, x1_pt, y1_pt)
         zoom = RENDER_DPI / 72.0
         mat = fitz.Matrix(zoom, zoom)
@@ -64,12 +68,14 @@ def crop_figure_png_b64(
         png_bytes = pix.tobytes("png")
         b64 = base64.b64encode(png_bytes).decode("ascii")
 
+        # Report the rendered region (post-clipping) so downstream consumers
+        # can trust bbox as a description of the actual image content.
         bbox = {
             "page": page_number_1based,
-            "x_in": round(x0_in + pad_inches, 4),
-            "y_in": round(y0_in + pad_inches, 4),
-            "w_in": round((x1_in - x0_in) - 2 * pad_inches, 4),
-            "h_in": round((y1_in - y0_in) - 2 * pad_inches, 4),
+            "x_in": round(x0_pt / INCH_TO_PT, 4),
+            "y_in": round(y0_pt / INCH_TO_PT, 4),
+            "w_in": round((x1_pt - x0_pt) / INCH_TO_PT, 4),
+            "h_in": round((y1_pt - y0_pt) / INCH_TO_PT, 4),
         }
         return b64, bbox
     finally:

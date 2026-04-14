@@ -10,14 +10,13 @@ section, then resolve headers by walking up the section tree.
 """
 
 import re
-from typing import Dict, Any, List, Optional, Tuple
-
+from typing import Any
 
 PARAGRAPH_REF_RE = re.compile(r"^/paragraphs/(\d+)$")
 SECTION_REF_RE = re.compile(r"^/sections/(\d+)$")
 
 
-def _paragraph_pages(paragraphs: List[Dict[str, Any]], idx: int) -> List[int]:
+def _paragraph_pages(paragraphs: list[dict[str, Any]], idx: int) -> list[int]:
     if idx < 0 or idx >= len(paragraphs):
         return []
     para = paragraphs[idx]
@@ -29,19 +28,19 @@ def _paragraph_pages(paragraphs: List[Dict[str, Any]], idx: int) -> List[int]:
     return pages
 
 
-def _paragraph_role(paragraphs: List[Dict[str, Any]], idx: int) -> str:
+def _paragraph_role(paragraphs: list[dict[str, Any]], idx: int) -> str:
     if idx < 0 or idx >= len(paragraphs):
         return ""
     return (paragraphs[idx].get("role") or "").lower()
 
 
-def _paragraph_content(paragraphs: List[Dict[str, Any]], idx: int) -> str:
+def _paragraph_content(paragraphs: list[dict[str, Any]], idx: int) -> str:
     if idx < 0 or idx >= len(paragraphs):
         return ""
     return paragraphs[idx].get("content") or ""
 
 
-def build_section_index(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Returns a list of section descriptors. Each item:
       {
@@ -64,17 +63,17 @@ def build_section_index(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
     # First pass: walk the section tree in DFS order so we can carry
     # header_1/2/3 as we descend.
     visited = [False] * len(sections)
-    flat: List[Dict[str, Any]] = []
+    flat: list[dict[str, Any]] = []
 
-    def walk(section_idx: int, hdr_stack: List[Tuple[int, str]]):
+    def walk(section_idx: int, hdr_stack: list[tuple[int, str]]):
         if section_idx < 0 or section_idx >= len(sections) or visited[section_idx]:
             return
         visited[section_idx] = True
         section = sections[section_idx]
 
         local_stack = list(hdr_stack)
-        para_indices: List[int] = []
-        child_section_indices: List[int] = []
+        para_indices: list[int] = []
+        child_section_indices: list[int] = []
 
         for ref in section.get("elements", []) or []:
             m_p = PARAGRAPH_REF_RE.match(ref)
@@ -102,7 +101,7 @@ def build_section_index(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         h3 = _stack_at(local_stack, 3)
 
         page_set = set()
-        body_chunks: List[str] = []
+        body_chunks: list[str] = []
         for pidx in para_indices:
             for pn in _paragraph_pages(paragraphs, pidx):
                 page_set.add(pn)
@@ -131,7 +130,7 @@ def build_section_index(analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
     return flat
 
 
-def _guess_heading_level(title: str, stack: List[Tuple[int, str]]) -> int:
+def _guess_heading_level(title: str, stack: list[tuple[int, str]]) -> int:
     """
     Cheap heuristic for level when DI only tells us 'sectionHeading'.
     Numbered prefixes like '1', '1.2', '1.2.3' map to levels 1/2/3.
@@ -145,7 +144,7 @@ def _guess_heading_level(title: str, stack: List[Tuple[int, str]]) -> int:
     return 2
 
 
-def _stack_at(stack: List[Tuple[int, str]], level: int) -> str:
+def _stack_at(stack: list[tuple[int, str]], level: int) -> str:
     for lvl, txt in stack:
         if lvl == level:
             return txt
@@ -153,9 +152,9 @@ def _stack_at(stack: List[Tuple[int, str]], level: int) -> str:
 
 
 def find_section_for_page(
-    sections_index: List[Dict[str, Any]],
+    sections_index: list[dict[str, Any]],
     page_number: int,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Return the most-specific section whose page range covers page_number.
     Most-specific = smallest page span among matches; ties broken by
@@ -185,13 +184,15 @@ def extract_surrounding_text(
     if not section_content:
         return ""
     cleaned = _strip_running_artifacts(section_content)
-    if anchor:
-        idx = cleaned.find(anchor.strip())
+    anchor_clean = (anchor or "").strip()
+    if anchor_clean:
+        idx = cleaned.find(anchor_clean)
         if idx >= 0:
+            anchor_end = idx + len(anchor_clean)
             start = max(0, idx - chars)
-            end = min(len(cleaned), idx + len(anchor) + chars)
+            end = min(len(cleaned), anchor_end + chars)
             before = cleaned[start:idx].strip()
-            after = cleaned[idx + len(anchor):end].strip()
+            after = cleaned[anchor_end:end].strip()
             return f"{before} [...] {after}".strip()
     return cleaned[: 2 * chars].strip()
 

@@ -16,12 +16,12 @@ Hardening:
 import logging
 import re
 from functools import lru_cache
-from typing import Optional, Dict, Any
+from typing import Any
 
 import httpx
 
-from .config import optional_env, feature_enabled
-
+from .config import feature_enabled, optional_env
+from .credentials import SEARCH_SCOPE, bearer_token, use_managed_identity
 
 # Fields the cache reads back from a previous successful diagram record.
 # Whitelisted explicitly so this never tries to SELECT a field that has
@@ -51,7 +51,7 @@ def _odata_escape(value: str) -> str:
     return (value or "").replace("'", "''")
 
 
-def _safe_token(value: str) -> Optional[str]:
+def _safe_token(value: str) -> str | None:
     if not value:
         return None
     if SAFE_TOKEN_RE.match(value):
@@ -60,7 +60,21 @@ def _safe_token(value: str) -> Optional[str]:
 
 
 def _enabled() -> bool:
+    if not optional_env("SEARCH_ENDPOINT"):
+        return False
+    # MI path needs only the endpoint; key path needs the admin key too.
+    if use_managed_identity():
+        return True
     return feature_enabled("SEARCH_ENDPOINT", "SEARCH_ADMIN_KEY")
+
+
+def _auth_header() -> dict[str, str]:
+    if use_managed_identity():
+        return {"Authorization": f"Bearer {bearer_token(SEARCH_SCOPE)}"}
+    key = optional_env("SEARCH_ADMIN_KEY")
+    if not key:
+        return {}
+    return {"api-key": key}
 
 
 @lru_cache(maxsize=1)
@@ -70,7 +84,7 @@ def _index_url() -> str:
     return f"{endpoint}/indexes/{index_name}/docs/search?api-version=2024-05-01-preview"
 
 
-def lookup_existing_by_hash(parent_id: str, image_hash: str) -> Optional[Dict[str, Any]]:
+def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] | None:
     """
     Find a previous diagram record with the same parent + image hash that
     completed successfully. Returns the cached fields, or None.
@@ -105,10 +119,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> Optional[Dict[st
         "select": ",".join(SELECT_FIELDS),
         "top": 1,
     }
-    headers = {
-        "Content-Type": "application/json",
-        "api-key": optional_env("SEARCH_ADMIN_KEY"),
-    }
+    headers = {"Content-Type": "application/json", **_auth_header()}
 
     try:
         with httpx.Client(timeout=10.0) as client:

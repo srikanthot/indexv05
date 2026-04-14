@@ -6,18 +6,18 @@ the index-projection-ready record (chunk_id, chunk, chunk_for_semantic,
 headers, page span, table_caption, etc.).
 """
 
-from typing import Dict, Any
+from typing import Any
 
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
-    table_chunk_id,
     safe_int,
     safe_str,
+    table_chunk_id,
 )
 
 
-def _build_semantic(record: Dict[str, Any]) -> str:
+def _build_semantic(record: dict[str, Any]) -> str:
     source_file = safe_str(record.get("source_file"))
     h1 = safe_str(record.get("header_1"))
     h2 = safe_str(record.get("header_2"))
@@ -41,7 +41,7 @@ def _build_semantic(record: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def process_table(data: Dict[str, Any]) -> Dict[str, Any]:
+def process_table(data: dict[str, Any]) -> dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
     parent_id = safe_str(data.get("parent_id")) or parent_id_for(source_path, source_file)

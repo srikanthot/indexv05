@@ -4,20 +4,27 @@
     "AzureWebJobsStorage": "<AZURE_WEBJOBS_STORAGE_CONN>",
     "FUNCTIONS_WORKER_RUNTIME": "python",
 
+    "AUTH_MODE": "mi",
+    "__comment_auth__": "Set AUTH_MODE=key for local dev without Azure CLI login; production leaves this as 'mi'.",
+
     "AOAI_ENDPOINT": "<AOAI_ENDPOINT>",
-    "AOAI_API_KEY": "<AOAI_API_KEY>",
-    "AOAI_API_VERSION": "2024-08-01-preview",
+    "AOAI_API_KEY": "",
+    "AOAI_API_VERSION": "2024-12-01-preview",
     "AOAI_VISION_DEPLOYMENT": "<AOAI_VISION_DEPLOYMENT>",
     "AOAI_CHAT_DEPLOYMENT": "<AOAI_CHAT_DEPLOYMENT>",
 
     "DI_ENDPOINT": "<DI_ENDPOINT>",
-    "DI_API_KEY": "<DI_API_KEY>",
+    "DI_API_KEY": "",
     "DI_API_VERSION": "2024-11-30",
 
     "SEARCH_ENDPOINT": "<SEARCH_ENDPOINT>",
-    "SEARCH_ADMIN_KEY": "<SEARCH_ADMIN_KEY>",
+    "SEARCH_ADMIN_KEY": "",
     "SEARCH_INDEX_NAME": "mm-manuals-index",
 
-    "SKILL_VERSION": "2.0.0"
+    "STORAGE_BLOB_SAS": "",
+
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "<APP_INSIGHTS_CONN_STR>",
+
+    "SKILL_VERSION": "3.0.0"
   }
 }
