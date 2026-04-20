@@ -1,0 +1,16 @@
+# Local dev + scripts dependencies.
+#
+# Install once per machine after cloning:
+#     pip install -r requirements.txt
+#
+# This is separate from function_app/requirements.txt, which is what
+# Azure installs inside the Function App runtime. Local scripts (preanalyze,
+# deploy_search, diagnose, check_index, smoke_test) run on YOUR machine
+# and need these packages in your venv.
+#
+# preanalyze.py imports from function_app/shared/, which uses PyMuPDF for
+# PDF cropping and httpx/azure-identity for Azure calls.
+
+httpx>=0.27.0,<1.0.0
+azure-identity>=1.17.0,<2.0.0
+PyMuPDF>=1.24.0,<2.0.0
