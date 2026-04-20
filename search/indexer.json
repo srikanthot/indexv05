@@ -17,7 +17,8 @@
       "allowSkillsetToReadFileData": true,
       "imageAction": "none",
       "failOnUnsupportedContentType": false,
-      "failOnUnprocessableDocument": false
+      "failOnUnprocessableDocument": false,
+      "indexedFileNameExtensions": ".pdf"
     }
   },
   "fieldMappings": [],
