@@ -19,8 +19,6 @@ import logging
 from typing import Any
 
 from .di_client import (
-    analyze_layout,
-    fetch_blob_bytes,
     fetch_cached_analysis,
     fetch_cached_crop,
     fetch_precomputed_output,
@@ -30,7 +28,6 @@ from .ids import (
     parent_id_for,
     safe_str,
 )
-from .pdf_crop import crop_figure_png_b64
 from .sections import (
     build_section_index,
     extract_surrounding_text,
@@ -82,40 +79,25 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         precomputed["skill_version"] = SKILL_VERSION
         return precomputed
 
-    # Check for pre-analyzed DI cache first (handles large PDFs that
-    # exceed the 230s WebApi skill timeout). Run scripts/preanalyze.py
-    # before the indexer to populate the cache.
+    # Check for pre-analyzed DI cache (written by scripts/preanalyze.py).
+    # Without it, a live DI call would time out on any large PDF and tie
+    # up a skill invocation for up to 230 seconds, so we fail fast and
+    # tell the operator what to do.
     cache_data = fetch_cached_analysis(source_path)
-    has_cache = cache_data is not None
-    if has_cache:
-        logging.info("using cached DI result for %s", source_file)
-        analyze = cache_data["analyzeResult"]
-        # Crops are now stored as individual blobs and fetched per-figure
-        # below, so we don't need to download the PDF at all if the cache
-        # exists. We only fall back to fetching the PDF if a crop blob is
-        # missing for a specific figure.
-        pdf_bytes = None
-    else:
-        try:
-            pdf_bytes = fetch_blob_bytes(source_path)
-        except Exception as exc:
-            logging.exception("blob fetch failed for %s", source_path)
-            return {
-                "enriched_figures": [],
-                "enriched_tables": [],
-                "processing_status": f"blob_fetch_error:{type(exc).__name__}",
-                "skill_version": SKILL_VERSION,
-            }
-        try:
-            analyze = analyze_layout(pdf_bytes)
-        except Exception as exc:
-            logging.exception("DI analyze failed for %s", source_path)
-            return {
-                "enriched_figures": [],
-                "enriched_tables": [],
-                "processing_status": f"di_error:{type(exc).__name__}",
-                "skill_version": SKILL_VERSION,
-            }
+    if cache_data is None:
+        logging.warning(
+            "preanalyze cache missing for %s; skipping without calling live DI. "
+            "Run scripts/preanalyze.py --incremental then reset+run the indexer.",
+            source_file,
+        )
+        return {
+            "enriched_figures": [],
+            "enriched_tables": [],
+            "processing_status": "needs_preanalyze",
+            "skill_version": SKILL_VERSION,
+        }
+    logging.info("using cached DI result for %s", source_file)
+    analyze = cache_data["analyzeResult"]
 
     sections_index = build_section_index(analyze)
 
@@ -133,20 +115,19 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
             continue
         caption = _figure_caption(figure)
 
-        # Fetch pre-cropped image from individual blob, or crop from PDF
-        crop_data = fetch_cached_crop(source_path, figure_id) if has_cache else None
-        if crop_data is not None:
-            image_b64 = crop_data["image_b64"]
-            bbox = crop_data["bbox"]
-        elif pdf_bytes is not None:
-            try:
-                image_b64, bbox = crop_figure_png_b64(pdf_bytes, page, polygon)
-            except Exception as exc:
-                logging.warning("crop failed (fig %s pg %s): %s", figure_id, page, exc)
-                continue
-        else:
-            logging.warning("no crop available for fig %s (no PDF, no cached crop)", figure_id)
+        # Fetch pre-cropped image from the blob cache. The live-crop
+        # fallback was removed together with the live-DI fallback: if the
+        # DI cache exists but this specific crop does not, there's nothing
+        # to analyze and we skip the figure with a clear log.
+        crop_data = fetch_cached_crop(source_path, figure_id)
+        if crop_data is None:
+            logging.warning(
+                "crop cache missing for %s fig %s; skipping (re-run preanalyze to rebuild)",
+                source_file, figure_id,
+            )
             continue
+        image_b64 = crop_data["image_b64"]
+        bbox = crop_data["bbox"]
 
         section = find_section_for_page(sections_index, page)
         h1 = section["header_1"] if section else ""
