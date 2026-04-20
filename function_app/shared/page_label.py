@@ -99,42 +99,119 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
     return sections
 
 
-def _normalize_for_match(s: str) -> str:
-    """Collapse whitespace + strip DI marker comments for content matching."""
+def _normalize_text(s: str) -> str:
+    """Aggressive normalization for fuzzy content matching across the DI
+    markdown output vs DI raw paragraph text. Strips markdown headers,
+    list markers, HTML comments, and non-alphanumerics, then lowercases.
+    This maximises the chance two logically-equal contents compare equal
+    even when one is markdown-rendered and the other is paragraph-concat.
+    """
     if not s:
         return ""
+    # Drop HTML comments (PageBreak, PageNumber, PageFooter, etc.)
     s = re.sub(r"<!--.*?-->", " ", s, flags=re.DOTALL)
-    s = re.sub(r"\s+", " ", s).strip()
+    # Drop markdown header/list markers at line starts
+    s = re.sub(r"^\s*#{1,6}\s*", " ", s, flags=re.MULTILINE)
+    s = re.sub(r"^\s*[\-\*\+]\s+", " ", s, flags=re.MULTILINE)
+    # Collapse to alphanumerics + single spaces, lowercased
+    s = re.sub(r"[^A-Za-z0-9]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
 
-def _find_section_start_page(source_path: str, section_content: str) -> int | None:
-    """Match the chunk's section_content against the DI-cached section index
-    and return that section's page_start. Falls back to None if no section
-    matches (e.g. missing cache, or normalization mismatch)."""
-    if not section_content:
-        return None
+def _find_section_start_page(
+    source_path: str,
+    section_content: str,
+    header_1: str = "",
+    header_2: str = "",
+    header_3: str = "",
+) -> int | None:
+    """Look up this chunk's section in the DI cache and return its
+    page_start. Match strategy, in order of reliability:
+
+      1. Exact match on (header_1, header_2, header_3) tuple. Headers
+         are the same tokens the skillset uses for text projection, so
+         if they are populated they are the most reliable link between
+         a chunk and a DI section.
+      2. Exact match on (header_1, header_2) when h3 is missing.
+      3. Exact match on header_1 alone.
+      4. Fuzzy content substring match after aggressive normalization.
+
+    Returns None if no strategy matches (e.g. chunk has no headers AND
+    DI section paragraph concat diverges heavily from markdown output).
+    """
     sections = _sections_for(source_path)
     if not sections:
         return None
-    probe = _normalize_for_match(section_content)[:300]
-    if not probe:
-        return None
-    best: tuple[int, int] | None = None  # (match_len, page_start)
-    for s in sections:
-        content = _normalize_for_match(s.get("content") or "")
-        if not content:
-            continue
-        # Prefer containment either way: section_content may be a superset
-        # of DI's paragraph concat or vice-versa depending on how the
-        # Azure SplitSkill reframed the section.
-        if probe in content or content[:300] in probe:
+
+    def _first_page(matches: list[dict[str, Any]]) -> int | None:
+        for s in matches:
             ps = s.get("page_start")
             if isinstance(ps, int):
-                hit_len = min(len(content), len(probe))
-                if best is None or hit_len > best[0]:
-                    best = (hit_len, ps)
-    return best[1] if best else None
+                return ps
+        return None
+
+    h1 = (header_1 or "").strip()
+    h2 = (header_2 or "").strip()
+    h3 = (header_3 or "").strip()
+
+    if h1 or h2 or h3:
+        # Tier 1: full chain
+        tier1 = [
+            s for s in sections
+            if (s.get("header_1") or "").strip() == h1
+            and (s.get("header_2") or "").strip() == h2
+            and (s.get("header_3") or "").strip() == h3
+        ]
+        p = _first_page(tier1)
+        if p is not None:
+            return p
+        # Tier 2: h1+h2 (chunks sometimes lose h3 at the split boundary)
+        if h1 or h2:
+            tier2 = [
+                s for s in sections
+                if (s.get("header_1") or "").strip() == h1
+                and (s.get("header_2") or "").strip() == h2
+            ]
+            p = _first_page(tier2)
+            if p is not None:
+                return p
+        # Tier 3: h1 alone
+        if h1:
+            tier3 = [s for s in sections if (s.get("header_1") or "").strip() == h1]
+            p = _first_page(tier3)
+            if p is not None:
+                return p
+
+    # Tier 4: fuzzy content match.
+    probe = _normalize_text(section_content)[:400]
+    if not probe:
+        return None
+    best: tuple[int, int] | None = None  # (overlap_len, page_start)
+    for s in sections:
+        content = _normalize_text(s.get("content") or "")
+        if not content:
+            continue
+        if probe[:200] and probe[:200] in content:
+            ps = s.get("page_start")
+            if isinstance(ps, int):
+                overlap = min(len(content), len(probe))
+                if best is None or overlap > best[0]:
+                    best = (overlap, ps)
+        elif content[:200] and content[:200] in probe:
+            ps = s.get("page_start")
+            if isinstance(ps, int):
+                overlap = min(len(content), len(probe))
+                if best is None or overlap > best[0]:
+                    best = (overlap, ps)
+    if best:
+        return best[1]
+
+    logging.info(
+        "page_label: no DI-cache match for headers=(%r, %r, %r) in %s (have %d sections)",
+        h1, h2, h3, source_path, len(sections),
+    )
+    return None
 
 
 def _is_roman(s: str) -> bool:
@@ -395,15 +472,20 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     source_path = safe_str(data.get("source_path"))
     layout_ordinal = safe_int(data.get("layout_ordinal"), default=0)
     section_start_page = safe_int(data.get("physical_pdf_page"), default=None)
+    h1_in = safe_str(data.get("header_1"))
+    h2_in = safe_str(data.get("header_2"))
+    h3_in = safe_str(data.get("header_3"))
 
     # Azure Search's DocumentIntelligenceLayoutSkill does not reliably
     # expose a per-section pageNumber in its markdown_document output, so
     # the `physical_pdf_page` input arrives as None for every chunk. When
     # that happens, recover the starting physical page by fetching the
     # DI cache blob (written by preanalyze.py) and matching this chunk's
-    # section_content to the indexed DI sections.
+    # section by header chain (primary) or content fuzzy match (fallback).
     if section_start_page is None:
-        section_start_page = _find_section_start_page(source_path, section_content)
+        section_start_page = _find_section_start_page(
+            source_path, section_content, h1_in, h2_in, h3_in,
+        )
 
     start_page, end_page, pages_covered = compute_page_span(
         page_text, section_content, section_start_page

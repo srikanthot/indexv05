@@ -74,7 +74,10 @@
         { "name": "source_file", "source": "/document/metadata_storage_name" },
         { "name": "source_path", "source": "/document/metadata_storage_path" },
         { "name": "layout_ordinal", "source": "/document/markdownDocument/*/ordinal_position" },
-        { "name": "physical_pdf_page", "source": "/document/markdownDocument/*/pageNumber" }
+        { "name": "physical_pdf_page", "source": "/document/markdownDocument/*/pageNumber" },
+        { "name": "header_1", "source": "/document/markdownDocument/*/sections/h1" },
+        { "name": "header_2", "source": "/document/markdownDocument/*/sections/h2" },
+        { "name": "header_3", "source": "/document/markdownDocument/*/sections/h3" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "text_chunk_id" },
