@@ -14,10 +14,10 @@ from functools import lru_cache
 
 from .config import optional_env
 
-AOAI_SCOPE = "https://cognitiveservices.azure.com/.default"
+AOAI_SCOPE = "https://cognitiveservices.azure.us/.default"
 STORAGE_SCOPE = "https://storage.azure.com/.default"
-SEARCH_SCOPE = "https://search.azure.com/.default"
-DI_SCOPE = "https://cognitiveservices.azure.com/.default"
+SEARCH_SCOPE = "https://search.azure.us/.default"
+DI_SCOPE = "https://cognitiveservices.azure.us/.default"
 
 
 def use_managed_identity() -> bool:

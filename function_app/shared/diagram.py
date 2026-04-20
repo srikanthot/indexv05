@@ -18,10 +18,12 @@ description and skip the vision call entirely.
 import base64
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
 from .aoai import get_client, vision_deployment
+from .di_client import fetch_cached_crop, fetch_precomputed_vision
 from .ids import (
     SKILL_VERSION,
     diagram_chunk_id,
@@ -32,7 +34,15 @@ from .search_cache import lookup_existing_by_hash
 
 VALID_CATEGORIES = {
     "circuit_diagram",
+    "wiring_diagram",
+    "schematic",
     "line_diagram",
+    "block_diagram",
+    "pid_diagram",
+    "flow_diagram",
+    "control_logic",
+    "exploded_view",
+    "parts_list_diagram",
     "nameplate",
     "equipment_photo",
     "table_image",
@@ -42,16 +52,25 @@ VALID_CATEGORIES = {
 
 USEFUL_CATEGORIES = {
     "circuit_diagram",
+    "wiring_diagram",
+    "schematic",
     "line_diagram",
+    "block_diagram",
+    "pid_diagram",
+    "flow_diagram",
+    "control_logic",
+    "exploded_view",
+    "parts_list_diagram",
     "nameplate",
     "equipment_photo",
-    # table_image intentionally excluded: tables go through the table pipeline
 }
+
+MIN_CROP_BYTES = 10_000  # must match preanalyze.py triage threshold
 
 SYSTEM_PROMPT = """You are a technical-manual diagram analyst.
 
 Return STRICT JSON with these keys:
-  category:    one of [circuit_diagram, line_diagram, nameplate, equipment_photo, decorative, unknown]
+  category:    one of [circuit_diagram, wiring_diagram, schematic, line_diagram, block_diagram, pid_diagram, flow_diagram, control_logic, exploded_view, parts_list_diagram, nameplate, equipment_photo, decorative, unknown]
   is_useful:   boolean. true unless category is decorative/unknown.
   figure_ref:  e.g. "Figure 4-2", "Fig. 12", or "" if none visible.
   description: dense, retrieval-friendly description (3-8 sentences).
@@ -59,11 +78,18 @@ Return STRICT JSON with these keys:
                what the diagram is showing. For nameplates, transcribe key
                fields. If any text or value is unclear, say so explicitly.
                Do not guess.
+  ocr_text:    transcribe ALL visible text labels, part numbers, values,
+               wire tags, terminal IDs, model numbers, and callout numbers
+               found in the image. Preserve the original text exactly.
+               Separate items with " | ". If no readable text, return "".
 
 Return ONLY the JSON object. No markdown, no commentary."""
 
 
-FIGURE_REF_RE = re.compile(r"\b(Figure|Fig\.?)\s*[\-:]?\s*([A-Z0-9][\w\-\.]{0,8})", re.IGNORECASE)
+FIGURE_REF_RE = re.compile(
+    r"\b(Figure|Fig\.?)\s*[\-:]?\s*([A-Z]{0,3}[\-\.]?\d[\w\-\.]{0,8})",
+    re.IGNORECASE,
+)
 
 
 def _image_hash(image_b64: str) -> str:
@@ -90,8 +116,6 @@ def _build_user_text(data: dict[str, Any]) -> str:
         sorted(set(f"{m.group(1).title()} {m.group(2)}" for m in FIGURE_REF_RE.finditer(surrounding)))
     )
 
-    # Strip stray quotes from the surrounding text so body content cannot
-    # terminate the quoted block and leak instructions into the prompt.
     surrounding_safe = surrounding[:1500].replace('"', "'")
 
     return (
@@ -136,7 +160,7 @@ def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
             {"role": "user", "content": user_content},
         ],
         temperature=0.0,
-        max_tokens=700,
+        max_tokens=1500,
         response_format={"type": "json_object"},
     )
     return _extract_json(resp.choices[0].message.content or "{}")
@@ -177,6 +201,26 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     if not image_b64:
+        # Try fetching the crop from blob cache (pre-computed by preanalyze)
+        if source_path and figure_id:
+            crop_data = fetch_cached_crop(source_path, figure_id)
+            if crop_data:
+                image_b64 = crop_data.get("image_b64", "")
+                if not bbox:
+                    bbox = crop_data.get("bbox", {})
+                    bbox_json = json.dumps(bbox, separators=(",", ":")) if bbox else ""
+                logging.info("fetched crop from cache for %s/%s", source_file, figure_id)
+                # Recompute hash + chunk_id + bbox_json because they were
+                # originally computed on empty image_b64. Without this, the
+                # dedup-by-hash cache lookup at the bottom of the function
+                # always misses, and base_record carries stale identifiers.
+                img_hash = _image_hash(image_b64)
+                chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
+                base_record["chunk_id"] = chunk_id
+                base_record["image_hash"] = img_hash
+                base_record["figure_bbox"] = bbox_json
+
+    if not image_b64:
         return {
             **base_record,
             "has_diagram": False,
@@ -185,6 +229,60 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": "",
             "processing_status": "no_image",
         }
+
+    # ── Image triage: skip tiny crops ──
+    try:
+        raw_png = base64.b64decode(image_b64)
+        if len(raw_png) < MIN_CROP_BYTES:
+            logging.info("triage skip (tiny %d bytes) for %s/%s", len(raw_png), source_file, figure_id)
+            return {
+                **base_record,
+                "has_diagram": False,
+                "diagram_description": "",
+                "diagram_category": "decorative",
+                "figure_ref": "",
+                "processing_status": "skipped_tiny",
+            }
+    except Exception:
+        pass
+
+    # ── Fast path: pre-computed vision result from preanalyze.py ──
+    if source_path and figure_id:
+        precomputed = fetch_precomputed_vision(source_path, figure_id)
+        if precomputed:
+            p_category = (precomputed.get("category") or "unknown").strip().lower()
+            if p_category not in VALID_CATEGORIES:
+                p_category = "unknown"
+            p_description = safe_str(precomputed.get("description")).strip()
+            p_figure_ref = safe_str(precomputed.get("figure_ref")).strip()
+            p_ocr_text = safe_str(precomputed.get("ocr_text")).strip()
+            p_has_diagram = (
+                bool(precomputed.get("is_useful"))
+                and p_category in USEFUL_CATEGORIES
+                and bool(p_description)
+            )
+            if not p_figure_ref:
+                m = FIGURE_REF_RE.search(caption or surrounding or "")
+                if m:
+                    p_figure_ref = f"{m.group(1).title()} {m.group(2)}"
+            full_desc = p_description
+            if p_ocr_text:
+                full_desc = f"{p_description}\nLabels: {p_ocr_text}"
+
+            img_hash = _image_hash(image_b64)
+            chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
+            base_record["chunk_id"] = chunk_id
+            base_record["image_hash"] = img_hash
+
+            logging.info("using precomputed vision for %s/%s", source_file, figure_id)
+            return {
+                **base_record,
+                "has_diagram": p_has_diagram,
+                "diagram_description": full_desc,
+                "diagram_category": p_category,
+                "figure_ref": p_figure_ref,
+                "processing_status": "precomputed",
+            }
 
     cached = lookup_existing_by_hash(parent_id, img_hash)
     if cached:
@@ -220,16 +318,22 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         if m:
             figure_ref = f"{m.group(1).title()} {m.group(2)}"
 
+    ocr_text = safe_str(result.get("ocr_text")).strip()
+
     has_diagram = (
         bool(result.get("is_useful"))
         and category in USEFUL_CATEGORIES
         and bool(description)
     )
 
+    full_description = description
+    if ocr_text:
+        full_description = f"{description}\nLabels: {ocr_text}"
+
     return {
         **base_record,
         "has_diagram": has_diagram,
-        "diagram_description": description,
+        "diagram_description": full_description,
         "diagram_category": category,
         "figure_ref": figure_ref,
         "processing_status": "ok" if has_diagram else "skipped_decorative",

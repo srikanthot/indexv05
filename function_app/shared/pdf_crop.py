@@ -3,14 +3,14 @@ Crop figure regions from a PDF using PyMuPDF (fitz).
 
 DI's bounding polygons are returned in INCHES against the page. PyMuPDF
 operates in points (1 inch = 72 points). We render the cropped region as a
-PNG at 200 DPI for the vision model.
+PNG at 300 DPI for the vision model to capture fine labels and part numbers.
 """
 
 import base64
 
 import fitz  # PyMuPDF
 
-RENDER_DPI = 200
+RENDER_DPI = 300
 INCH_TO_PT = 72.0
 
 

@@ -155,7 +155,10 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         last = cluster[-1]
         pages_first = _table_pages(first)
         pages_last = _table_pages(last)
-        page_start = pages_first[0] if pages_first else 0
+        # PDFs are 1-indexed. Defaulting to 0 would produce invalid page
+        # filters and broken citations, so fall back to 1 when DI didn't
+        # emit bounding regions for this table.
+        page_start = pages_first[0] if pages_first else 1
         page_end = pages_last[-1] if pages_last else page_start
         caption = _table_caption(first)
         md = _grid_to_markdown(grid)

@@ -31,7 +31,7 @@ from azure.identity import DefaultAzureCredential
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SEARCH_DIR = REPO_ROOT / "search"
-API_VERSION = "2024-05-01-preview"
+API_VERSION = "2024-11-01-preview"
 
 ARTIFACT_FILES = [
     ("datasources", "datasource", SEARCH_DIR / "datasource.json"),
@@ -48,7 +48,9 @@ def load_config(path: Path) -> dict:
 
 
 def run(cmd: list[str]) -> str:
-    r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    if cmd and cmd[0] == "az":
+        cmd[0] = "az.cmd"
+    r = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=False)
     return r.stdout.strip()
 
 
@@ -138,7 +140,8 @@ def main() -> None:
         print(f"  {k} -> {shown}")
 
     print("Acquiring AAD token for Search")
-    token = DefaultAzureCredential().get_token("https://search.azure.com/.default").token
+    search_scope = "https://search.azure.us/.default"
+    token = DefaultAzureCredential().get_token(search_scope).token
 
     print(f"PUTting artifacts to {search_endpoint}")
     for collection, key, path in ARTIFACT_FILES:

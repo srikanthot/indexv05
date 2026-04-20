@@ -20,9 +20,8 @@ from .credentials import (
 
 @lru_cache(maxsize=1)
 def get_client() -> AzureOpenAI:
-    # 2024-12-01-preview is the minimum Azure OpenAI API version that
-    # supports gpt-4.1 chat + vision deployments. Older previews will
-    # 404 on the deployment name.
+    # 2024-12-01-preview is the minimum API version that supports gpt-4.1
+    # chat + vision deployments. Override via AOAI_API_VERSION app setting.
     api_version = optional_env("AOAI_API_VERSION", "2024-12-01-preview")
     endpoint = required_env("AOAI_ENDPOINT")
 

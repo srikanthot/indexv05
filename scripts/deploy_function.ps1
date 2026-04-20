@@ -14,7 +14,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Host "==> Publishing function code to $FuncApp"
 Push-Location (Join-Path $RepoRoot 'function_app')
-func azure functionapp publish $FuncApp --python
+func azure functionapp publish $FuncApp --python --verbose
 Pop-Location
 
 Write-Host "==> Applying App Settings"

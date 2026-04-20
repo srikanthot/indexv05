@@ -112,7 +112,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
         "search": "*",
         "filter": (
             f"record_type eq 'diagram' "
-            f"and parent_id eq '{_odata_escape(safe_parent)}' "
+            f"and dgm_parent_id eq '{_odata_escape(safe_parent)}' "
             f"and image_hash eq '{_odata_escape(safe_hash)}' "
             f"and processing_status eq 'ok'"
         ),

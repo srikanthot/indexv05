@@ -42,6 +42,14 @@ DASH_NUM_RE = re.compile(
 SECTION_DASH_RE = re.compile(r"\b([A-Z]{1,3}[\-\.]\d{1,4})\b")
 TOC_LIKE_RE = re.compile(r"\b(TOC|Index|Form|Fig|Table|App)[\-\s]?(\d{1,4})\b", re.IGNORECASE)
 
+# Matches figure references like "Figure 4-2", "Fig. 12", "FIGURE A-1".
+# The reference ID must contain at least one digit to avoid false positives
+# from DI word-splitting (e.g. "Fig\nure" → "Fig" + "ure").
+FIGURE_REF_RE = re.compile(
+    r"\b(Figure|Fig\.?)\s*[\-:]?\s*([A-Z]{0,3}[\-\.]?\d[\w\-\.]{0,8})",
+    re.IGNORECASE,
+)
+
 
 # ---------- DI markdown page markers ----------
 # DI emits both forms: <!-- PageNumber="3" --> and <!-- PageBreak -->
@@ -237,6 +245,16 @@ def compute_page_span(
     if we cannot locate the chunk inside the section.
     """
     if section_start_page is None:
+        # Upstream DI skill did not emit a section pageNumber. Try to
+        # recover from explicit PageNumber markers embedded in the chunk
+        # text itself so we don't leak nulls into the index for chunks
+        # that clearly know what page they came from.
+        if chunk:
+            nums_in_chunk = [int(m.group(1)) for m in PAGE_NUMBER_MARKER_RE.finditer(chunk)]
+            if nums_in_chunk:
+                lo = min(nums_in_chunk)
+                hi = max(nums_in_chunk)
+                return lo, hi, list(range(lo, hi + 1))
         return None, None, []
     if not chunk:
         return section_start_page, section_start_page, [section_start_page]
@@ -313,6 +331,16 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             str(end_page) if end_page is not None else label
         )
 
+    # Extract figure references from the text chunk so text records can be
+    # cross-referenced with their companion diagram records via figure_ref.
+    fig_refs = sorted(
+        set(
+            f"{m.group(1).title()} {m.group(2)}"
+            for m in FIGURE_REF_RE.finditer(page_text)
+        )
+    )
+    figure_ref = ", ".join(fig_refs) if fig_refs else ""
+
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
         "parent_id": parent_id_for(source_path, source_file),
@@ -322,6 +350,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_page": start_page,
         "physical_pdf_page_end": end_page,
         "physical_pdf_pages": pages_covered,
+        "figure_ref": figure_ref,
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
     }

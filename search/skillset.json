@@ -28,7 +28,6 @@
       "textSplitMode": "pages",
       "maximumPageLength": 1200,
       "pageOverlapLength": 200,
-      "unit": "characters",
       "inputs": [
         { "name": "text", "source": "/document/markdownDocument/*/content" }
       ],
@@ -44,7 +43,7 @@
       "context": "/document",
       "uri": "https://<FUNCTION_APP_HOST>/api/process-document?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
-      "timeout": "PT300S",
+      "timeout": "PT230S",
       "batchSize": 1,
       "degreeOfParallelism": 2,
       "inputs": [
@@ -86,6 +85,7 @@
         { "name": "physical_pdf_page", "targetName": "text_physical_pdf_page" },
         { "name": "physical_pdf_page_end", "targetName": "text_physical_pdf_page_end" },
         { "name": "physical_pdf_pages", "targetName": "text_physical_pdf_pages" },
+        { "name": "figure_ref", "targetName": "text_figure_ref" },
         { "name": "processing_status", "targetName": "text_processing_status" },
         { "name": "skill_version", "targetName": "text_skill_version" }
       ]
@@ -337,7 +337,7 @@
 
       {
         "targetIndexName": "<INDEX_NAME>",
-        "parentKeyFieldName": "parent_id",
+        "parentKeyFieldName": "text_parent_id",
         "sourceContext": "/document/markdownDocument/*/pages/*",
         "mappings": [
           { "name": "chunk_id", "source": "/document/markdownDocument/*/pages/*/text_chunk_id" },
@@ -354,6 +354,8 @@
           { "name": "physical_pdf_pages", "source": "/document/markdownDocument/*/pages/*/text_physical_pdf_pages" },
           { "name": "printed_page_label", "source": "/document/markdownDocument/*/pages/*/printed_page_label" },
           { "name": "printed_page_label_end", "source": "/document/markdownDocument/*/pages/*/printed_page_label_end" },
+          { "name": "figure_ref", "source": "/document/markdownDocument/*/pages/*/text_figure_ref" },
+          { "name": "parent_id", "source": "/document/markdownDocument/*/pages/*/text_parent_id" },
           { "name": "chunk", "source": "/document/markdownDocument/*/pages/*" },
           { "name": "chunk_for_semantic", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/markdownDocument/*/pages/*/text_vector" },
@@ -364,7 +366,7 @@
 
       {
         "targetIndexName": "<INDEX_NAME>",
-        "parentKeyFieldName": "parent_id",
+        "parentKeyFieldName": "dgm_parent_id",
         "sourceContext": "/document/enriched_figures/*",
         "mappings": [
           { "name": "chunk_id", "source": "/document/enriched_figures/*/dgm_chunk_id" },
@@ -385,6 +387,7 @@
           { "name": "figure_ref", "source": "/document/enriched_figures/*/dgm_figure_ref" },
           { "name": "image_hash", "source": "/document/enriched_figures/*/dgm_image_hash" },
           { "name": "surrounding_context", "source": "/document/enriched_figures/*/dgm_surrounding_context" },
+          { "name": "parent_id", "source": "/document/enriched_figures/*/dgm_parent_id" },
           { "name": "chunk", "source": "/document/enriched_figures/*/dgm_description" },
           { "name": "chunk_for_semantic", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/enriched_figures/*/dgm_text_vector" },
@@ -395,7 +398,7 @@
 
       {
         "targetIndexName": "<INDEX_NAME>",
-        "parentKeyFieldName": "parent_id",
+        "parentKeyFieldName": "tbl_parent_id",
         "sourceContext": "/document/enriched_tables/*",
         "mappings": [
           { "name": "chunk_id", "source": "/document/enriched_tables/*/tbl_chunk_id" },
@@ -412,6 +415,7 @@
           { "name": "table_row_count", "source": "/document/enriched_tables/*/tbl_row_count" },
           { "name": "table_col_count", "source": "/document/enriched_tables/*/tbl_col_count" },
           { "name": "table_caption", "source": "/document/enriched_tables/*/tbl_caption" },
+          { "name": "parent_id", "source": "/document/enriched_tables/*/tbl_parent_id" },
           { "name": "chunk", "source": "/document/enriched_tables/*/tbl_chunk" },
           { "name": "chunk_for_semantic", "source": "/document/enriched_tables/*/tbl_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/enriched_tables/*/tbl_text_vector" },
@@ -422,7 +426,7 @@
 
       {
         "targetIndexName": "<INDEX_NAME>",
-        "parentKeyFieldName": "parent_id",
+        "parentKeyFieldName": "sum_parent_id",
         "sourceContext": "/document",
         "mappings": [
           { "name": "chunk_id", "source": "/document/sum_chunk_id" },
@@ -430,6 +434,7 @@
           { "name": "source_file", "source": "/document/metadata_storage_name" },
           { "name": "source_url", "source": "/document/metadata_storage_path" },
           { "name": "source_path", "source": "/document/metadata_storage_path" },
+          { "name": "parent_id", "source": "/document/sum_parent_id" },
           { "name": "chunk", "source": "/document/sum_chunk" },
           { "name": "chunk_for_semantic", "source": "/document/sum_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/sum_text_vector" },
