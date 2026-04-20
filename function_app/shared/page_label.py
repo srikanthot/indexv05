@@ -151,17 +151,24 @@ def _find_section_start_page(
                 return ps
         return None
 
-    h1 = (header_1 or "").strip()
-    h2 = (header_2 or "").strip()
-    h3 = (header_3 or "").strip()
+    # Normalize headers for comparison: the skillset's
+    # /document/markdownDocument/*/sections/h1..h3 and build_section_index's
+    # header_1..3 both trace back to DI paragraph content but may differ in
+    # whitespace, so we compare on normalized forms.
+    def _nh(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip())
+
+    h1 = _nh(header_1)
+    h2 = _nh(header_2)
+    h3 = _nh(header_3)
 
     if h1 or h2 or h3:
         # Tier 1: full chain
         tier1 = [
             s for s in sections
-            if (s.get("header_1") or "").strip() == h1
-            and (s.get("header_2") or "").strip() == h2
-            and (s.get("header_3") or "").strip() == h3
+            if _nh(s.get("header_1") or "") == h1
+            and _nh(s.get("header_2") or "") == h2
+            and _nh(s.get("header_3") or "") == h3
         ]
         p = _first_page(tier1)
         if p is not None:
@@ -170,15 +177,15 @@ def _find_section_start_page(
         if h1 or h2:
             tier2 = [
                 s for s in sections
-                if (s.get("header_1") or "").strip() == h1
-                and (s.get("header_2") or "").strip() == h2
+                if _nh(s.get("header_1") or "") == h1
+                and _nh(s.get("header_2") or "") == h2
             ]
             p = _first_page(tier2)
             if p is not None:
                 return p
         # Tier 3: h1 alone
         if h1:
-            tier3 = [s for s in sections if (s.get("header_1") or "").strip() == h1]
+            tier3 = [s for s in sections if _nh(s.get("header_1") or "") == h1]
             p = _first_page(tier3)
             if p is not None:
                 return p
