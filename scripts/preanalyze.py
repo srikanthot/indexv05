@@ -649,6 +649,45 @@ def _pdf_has_any_crops(cfg: dict, pdf_name: str) -> bool:
         return False
 
 
+def _is_pdf_done(cfg: dict, pdf_name: str) -> bool:
+    """Strict 'fully done' check used by --incremental.
+
+    A PDF is considered done only if output.json exists AND either
+      (a) it reports at least one enriched figure (success), OR
+      (b) the underlying DI cache confirms the PDF has zero figures
+          (so zero enriched figures is legitimate, not a partial state).
+
+    This defends against the case where an earlier run wrote an empty
+    output.json because the crop phase had crashed -- without this check
+    --incremental would incorrectly skip such PDFs forever.
+    """
+    output_name = f"_dicache/{pdf_name}.output.json"
+    if not blob_exists(cfg, output_name):
+        return False
+
+    try:
+        out = json.loads(fetch_blob(cfg, output_name))
+    except Exception:
+        return False  # unreadable output.json -> re-run
+
+    enriched_count = len(out.get("enriched_figures") or [])
+    if enriched_count > 0:
+        return True
+
+    # Zero enriched figures. Verify against DI cache: if DI also reported
+    # zero figures, output.json is legitimately done. If DI had figures,
+    # this is a partial-state carryover from a crashed run.
+    di_name = f"_dicache/{pdf_name}.di.json"
+    if not blob_exists(cfg, di_name):
+        return True  # DI cache gone; trust output.json
+    try:
+        di = json.loads(fetch_blob(cfg, di_name))
+    except Exception:
+        return True  # can't verify; don't re-do good work
+    di_figure_count = len(di.get("figures") or [])
+    return di_figure_count == 0
+
+
 def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
     """Run DI analysis and crop figures. Cache results to blob.
 
@@ -1162,28 +1201,61 @@ def status_report(cfg: dict) -> None:
         if pdf in vision_count:
             vision_count[pdf] += 1
 
+    # Count crop blobs per PDF alongside vision blobs so the table flags
+    # PDFs with output.json but no crops ("partial" state from a crashed
+    # earlier run).
+    crop_count: dict[str, int] = {pdf: 0 for pdf in pdfs}
+    for blob in cache_blobs:
+        if ".crop." not in blob:
+            continue
+        stem = blob.replace("_dicache/", "", 1)
+        lower = stem.lower()
+        idx = lower.find(".pdf")
+        if idx == -1:
+            continue
+        pdf = stem[: idx + 4]
+        if pdf in crop_count:
+            crop_count[pdf] += 1
+
     name_w = max(len(p) for p in pdfs)
     name_w = max(name_w, 20)
-    header = f"{'PDF'.ljust(name_w)}  DI    Output   Vision cached"
+    header = f"{'PDF'.ljust(name_w)}  DI    Output     Crops   Vision   State"
     print(header)
     print("-" * len(header))
 
     total_done_pdfs = 0
+    total_partial = 0
     for pdf in sorted(pdfs):
         di_ok = f"_dicache/{pdf}.di.json" in cache_set
         output_ok = f"_dicache/{pdf}.output.json" in cache_set
-        v = vision_count.get(pdf, 0)
-        di_tag = "OK  " if di_ok else "--  "
-        out_tag = "OK    " if output_ok else "--    "
-        v_str = str(v) if v else "--"
-        print(f"{pdf.ljust(name_w)}  {di_tag}  {out_tag}  {v_str}")
-        if output_ok:
+        crops = crop_count.get(pdf, 0)
+        vision = vision_count.get(pdf, 0)
+
+        # Classify state: done, partial (output without crops), or missing.
+        if output_ok and crops == 0 and di_ok:
+            state = "PARTIAL"
+            total_partial += 1
+        elif output_ok:
+            state = "done"
             total_done_pdfs += 1
+        elif di_ok:
+            state = "di-only"
+        else:
+            state = "todo"
+
+        di_tag = "OK  " if di_ok else "--  "
+        out_tag = "OK      " if output_ok else "--      "
+        c_str = str(crops) if crops else "--"
+        v_str = str(vision) if vision else "--"
+        print(f"{pdf.ljust(name_w)}  {di_tag}  {out_tag}  {c_str:>5}   {v_str:>5}   {state}")
 
     remaining = len(pdfs) - total_done_pdfs
     print()
-    print(f"Summary: {total_done_pdfs}/{len(pdfs)} PDFs fully done, "
-          f"{remaining} remaining")
+    msg = f"Summary: {total_done_pdfs}/{len(pdfs)} PDFs fully done, {remaining} remaining"
+    if total_partial:
+        msg += (f"\n         {total_partial} in PARTIAL state "
+                "-- re-run `preanalyze --incremental` to heal.")
+    print(msg)
 
 
 # -- Cleanup: remove orphaned cache --
@@ -1287,8 +1359,28 @@ def main() -> None:
 
     if args.incremental:
         before = len(pdfs)
-        pdfs = [p for p in pdfs if not blob_exists(cfg, f"_dicache/{p}.output.json")]
-        print(f"Incremental: {before - len(pdfs)} already cached, {len(pdfs)} to process")
+        needs_process: list[str] = []
+        stale_count = 0
+        for p in pdfs:
+            if _is_pdf_done(cfg, p):
+                continue
+            # Not done. If a stale output.json is in the way, delete it so
+            # phase_output regenerates cleanly instead of short-circuiting
+            # on the skip-output check.
+            stale_output = f"_dicache/{p}.output.json"
+            if blob_exists(cfg, stale_output):
+                try:
+                    delete_blob(cfg, stale_output)
+                    stale_count += 1
+                    print(f"  cleared stale output.json for {p} (was partial)", flush=True)
+                except Exception as exc:
+                    print(f"  warning: could not delete stale output for {p}: {exc}", flush=True)
+            needs_process.append(p)
+        pdfs = needs_process
+        msg = f"Incremental: {before - len(pdfs)} already cached, {len(pdfs)} to process"
+        if stale_count:
+            msg += f" ({stale_count} stale output.json cleared)"
+        print(msg)
 
     if not pdfs:
         print("Nothing to process.")
