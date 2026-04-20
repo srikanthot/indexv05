@@ -3,7 +3,10 @@
   "dataSourceName": "<DATASOURCE_NAME>",
   "targetIndexName": "<INDEX_NAME>",
   "skillsetName": "<SKILLSET_NAME>",
-  "schedule": null,
+  "schedule": {
+    "interval": "PT15M",
+    "startTime": "2020-01-01T00:00:00Z"
+  },
   "parameters": {
     "batchSize": 1,
     "maxFailedItems": -1,
