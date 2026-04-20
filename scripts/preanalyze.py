@@ -331,6 +331,13 @@ def _blob_url(container: str, name: str) -> str:
 
 
 def list_pdfs(cfg: dict) -> list[str]:
+    """List PDF blobs at the container root, case-insensitive on .pdf.
+
+    Note: `az storage blob list` caps at 5000 results by default. Once
+    _dicache/ accumulates thousands of crop/vision blobs, the lexicographic
+    page can cut off lowercase-named PDFs that sort AFTER '_dicache/'.
+    `--num-results *` overrides the cap.
+    """
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
     conn_str = _get_connection_string(cfg)
@@ -338,6 +345,7 @@ def list_pdfs(cfg: dict) -> list[str]:
         "az", "storage", "blob", "list",
         "--container-name", container,
         "--connection-string", conn_str,
+        "--num-results", "*",
         "--query", "[].name",
         "-o", "json",
     ])
@@ -346,7 +354,9 @@ def list_pdfs(cfg: dict) -> list[str]:
 
 
 def list_cache_blobs(cfg: dict) -> list[str]:
-    """List all blobs in _dicache/ prefix."""
+    """List all blobs in _dicache/ prefix. Needs --num-results *: a single
+    large PDF can produce thousands of crop + vision blobs, well past the
+    5000-result default cap."""
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
     conn_str = _get_connection_string(cfg)
@@ -355,6 +365,7 @@ def list_cache_blobs(cfg: dict) -> list[str]:
         "--container-name", container,
         "--connection-string", conn_str,
         "--prefix", "_dicache/",
+        "--num-results", "*",
         "--query", "[].name",
         "-o", "json",
     ])
