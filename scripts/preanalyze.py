@@ -668,6 +668,9 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
                     polygon = poly
                     break
             if not page or not polygon or len(polygon) < 4:
+                # Log once at DI phase so ops have visibility into how many
+                # figures DI returned with malformed bounding regions.
+                print(f"    skip fig {fig_id}: page={page} polygon_len={len(polygon) if polygon else 0}", flush=True)
                 continue
 
             passes, reason = _passes_triage(polygon)
@@ -1203,6 +1206,20 @@ def main() -> None:
     ap.add_argument("--status", action="store_true",
                     help="Print per-PDF cache state (no work done)")
     args = ap.parse_args()
+
+    # Bounds check user-facing knobs. AOAI TPM quotas cap useful parallelism
+    # well below 100; concurrency above 6 rarely helps and adds thread
+    # pressure. Fail fast with a clear message instead of producing weird
+    # runtime behavior.
+    if not 1 <= args.vision_parallel <= 100:
+        raise SystemExit(
+            f"--vision-parallel must be between 1 and 100 (got {args.vision_parallel})"
+        )
+    if not 1 <= args.concurrency <= 10:
+        raise SystemExit(
+            f"--concurrency must be between 1 and 10 (got {args.concurrency})"
+        )
+
     cfg = load_config(Path(args.config))
 
     if args.cleanup:

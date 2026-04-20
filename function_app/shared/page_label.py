@@ -74,7 +74,13 @@ PAGE_BREAK_MARKER_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
 # Cached at module scope so a batch of chunks from the same PDF triggers
 # at most one blob fetch.
 
-_SECTION_INDEX_CACHE: dict[str, list[dict[str, Any]]] = {}
+from collections import OrderedDict
+
+# LRU-style bound: a Function App instance that has processed many PDFs
+# in one lifetime (e.g. after a long indexer run) would otherwise hold
+# every section index it has ever seen in memory. Cap at 20 PDFs.
+_SECTION_INDEX_CACHE: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
+_SECTION_INDEX_CACHE_MAX = 20
 
 
 def _sections_for(source_path: str) -> list[dict[str, Any]]:
@@ -82,11 +88,14 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
         return []
     cached = _SECTION_INDEX_CACHE.get(source_path)
     if cached is not None:
+        _SECTION_INDEX_CACHE.move_to_end(source_path)
         return cached
     try:
         analyze = fetch_cached_analysis(source_path)
         if not analyze:
             _SECTION_INDEX_CACHE[source_path] = []
+            if len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
+                _SECTION_INDEX_CACHE.popitem(last=False)
             return []
         result = analyze.get("analyzeResult") if isinstance(analyze, dict) else None
         result = result or analyze
@@ -96,6 +105,8 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
                         source_path, exc)
         sections = []
     _SECTION_INDEX_CACHE[source_path] = sections
+    if len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
+        _SECTION_INDEX_CACHE.popitem(last=False)
     return sections
 
 
@@ -190,21 +201,28 @@ def _find_section_start_page(
             if p is not None:
                 return p
 
-    # Tier 4: fuzzy content match.
+    # Tier 4: fuzzy content match. Capped at 100 sections to keep
+    # per-chunk work bounded on very large manuals; headers should have
+    # matched in tier 1-3 in the common case.
     probe = _normalize_text(section_content)[:400]
     if not probe:
         return None
+    probe_head = probe[:200]
     best: tuple[int, int] | None = None  # (overlap_len, page_start)
-    for s in sections:
+    for i, s in enumerate(sections):
+        if i >= 100:
+            break
         content = _normalize_text(s.get("content") or "")
         if not content:
             continue
-        if probe[:200] and probe[:200] in content:
+        if probe_head and probe_head in content:
             ps = s.get("page_start")
             if isinstance(ps, int):
                 overlap = min(len(content), len(probe))
                 if best is None or overlap > best[0]:
                     best = (overlap, ps)
+                # probe_head prefix match is strong; stop once we have one.
+                break
         elif content[:200] and content[:200] in probe:
             ps = s.get("page_start")
             if isinstance(ps, int):
