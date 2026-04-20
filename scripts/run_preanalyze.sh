@@ -65,6 +65,15 @@ echo
 
 export PYTHONUNBUFFERED=1  # force Python to flush stdout line-by-line
 
+# Preflight: verify environment before wasting hours on a bad setup.
+python scripts/preflight.py --config "$CONFIG"
+PREFLIGHT_EXIT=$?
+if [ $PREFLIGHT_EXIT -ne 0 ]; then
+    echo
+    echo "Preflight failed. Fix the issues above before running preanalyze." >&2
+    exit $PREFLIGHT_EXIT
+fi
+
 attempt=1
 while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
     echo

@@ -53,6 +53,14 @@ Write-Host ""
 
 $env:PYTHONUNBUFFERED = "1"  # force Python to flush stdout line-by-line
 
+# Preflight: verify environment before wasting hours on a bad setup.
+& python scripts/preflight.py --config $Config
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Preflight failed. Fix the issues above before running preanalyze." -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
 for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     Write-Host ""
     Write-Host "--- Pass $attempt of $MaxAttempts ---" -ForegroundColor Yellow
