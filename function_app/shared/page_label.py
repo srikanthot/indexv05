@@ -17,6 +17,7 @@ walk the marker timeline to figure out which page it starts on and which
 page it ends on.
 """
 
+import logging
 import re
 from typing import Any
 
@@ -27,6 +28,8 @@ from .ids import (
     safe_str,
     text_chunk_id,
 )
+from .di_client import fetch_cached_analysis
+from .sections import build_section_index
 
 # ---------- printed-label heuristics ----------
 
@@ -53,8 +56,85 @@ FIGURE_REF_RE = re.compile(
 
 # ---------- DI markdown page markers ----------
 # DI emits both forms: <!-- PageNumber="3" --> and <!-- PageBreak -->
-PAGE_NUMBER_MARKER_RE = re.compile(r'<!--\s*PageNumber\s*=\s*"?(\d+)"?\s*-->', re.IGNORECASE)
+# PageNumber content is the *printed* label (may be "3", "iv", "18-33"),
+# so we capture everything between the quotes as a string.
+PAGE_NUMBER_MARKER_RE = re.compile(r'<!--\s*PageNumber\s*=\s*"([^"]*)"\s*-->', re.IGNORECASE)
 PAGE_BREAK_MARKER_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
+
+
+# ---------- DI-cache fallback for section_start_page ----------
+#
+# The skillset currently wires `/document/markdownDocument/*/pageNumber` as
+# the section's starting physical page, but DocumentIntelligenceLayoutSkill
+# does not reliably expose that field. When the input arrives as None,
+# we look up the DI cache blob (written by preanalyze.py), build a section
+# index from the raw analyzeResult, and match the chunk's section_content
+# to its source section to recover page_start.
+#
+# Cached at module scope so a batch of chunks from the same PDF triggers
+# at most one blob fetch.
+
+_SECTION_INDEX_CACHE: dict[str, list[dict[str, Any]]] = {}
+
+
+def _sections_for(source_path: str) -> list[dict[str, Any]]:
+    if not source_path:
+        return []
+    cached = _SECTION_INDEX_CACHE.get(source_path)
+    if cached is not None:
+        return cached
+    try:
+        analyze = fetch_cached_analysis(source_path)
+        if not analyze:
+            _SECTION_INDEX_CACHE[source_path] = []
+            return []
+        result = analyze.get("analyzeResult") if isinstance(analyze, dict) else None
+        result = result or analyze
+        sections = build_section_index(result)
+    except Exception as exc:
+        logging.warning("page_label: failed to fetch DI cache for %s: %s",
+                        source_path, exc)
+        sections = []
+    _SECTION_INDEX_CACHE[source_path] = sections
+    return sections
+
+
+def _normalize_for_match(s: str) -> str:
+    """Collapse whitespace + strip DI marker comments for content matching."""
+    if not s:
+        return ""
+    s = re.sub(r"<!--.*?-->", " ", s, flags=re.DOTALL)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _find_section_start_page(source_path: str, section_content: str) -> int | None:
+    """Match the chunk's section_content against the DI-cached section index
+    and return that section's page_start. Falls back to None if no section
+    matches (e.g. missing cache, or normalization mismatch)."""
+    if not section_content:
+        return None
+    sections = _sections_for(source_path)
+    if not sections:
+        return None
+    probe = _normalize_for_match(section_content)[:300]
+    if not probe:
+        return None
+    best: tuple[int, int] | None = None  # (match_len, page_start)
+    for s in sections:
+        content = _normalize_for_match(s.get("content") or "")
+        if not content:
+            continue
+        # Prefer containment either way: section_content may be a superset
+        # of DI's paragraph concat or vice-versa depending on how the
+        # Azure SplitSkill reframed the section.
+        if probe in content or content[:300] in probe:
+            ps = s.get("page_start")
+            if isinstance(ps, int):
+                hit_len = min(len(content), len(probe))
+                if best is None or hit_len > best[0]:
+                    best = (hit_len, ps)
+    return best[1] if best else None
 
 
 def _is_roman(s: str) -> bool:
@@ -125,10 +205,16 @@ def _marker_timeline(section_content: str, section_start_page: int) -> list[tupl
     timeline: list[tuple[int, int]] = [(0, section_start_page)]
     current_page = section_start_page
 
-    # Combine both marker types in document order.
+    # Combine both marker types in document order. PageNumber markers
+    # carry the *printed* label (e.g. "18-33") which is not a physical
+    # page number, so we only use them to double-check integer-style
+    # labels (matches "3"). PageBreak is the reliable page advancer.
     events: list[tuple[int, str, int | None]] = []
     for m in PAGE_NUMBER_MARKER_RE.finditer(section_content or ""):
-        events.append((m.end(), "num", int(m.group(1))))
+        label = (m.group(1) or "").strip()
+        if label.isdigit():
+            events.append((m.end(), "num", int(label)))
+        # Non-numeric labels (e.g. "18-33") are informational only.
     for m in PAGE_BREAK_MARKER_RE.finditer(section_content or ""):
         events.append((m.end(), "break", None))
     events.sort(key=lambda e: e[0])
@@ -180,7 +266,7 @@ def _last_page_segment(chunk: str) -> str:
 # content sits on page N but whose tail happens to include a PageBreak
 # marker is not mis-attributed to page N+1.
 TRAILING_MARKERS_RE = re.compile(
-    r"(?:\s*<!--\s*(?:PageNumber\s*=\s*\"?\d+\"?|PageBreak)\s*-->\s*)+\Z",
+    r"(?:\s*<!--\s*(?:PageNumber\s*=\s*\"[^\"]*\"|PageBreak)\s*-->\s*)+\Z",
     re.IGNORECASE,
 )
 
@@ -245,22 +331,23 @@ def compute_page_span(
     if we cannot locate the chunk inside the section.
     """
     if section_start_page is None:
-        # Upstream DI skill did not emit a section pageNumber. Try to
-        # recover from explicit PageNumber markers embedded in the chunk
-        # text itself so we don't leak nulls into the index for chunks
-        # that clearly know what page they came from.
-        if chunk:
-            nums_in_chunk = [int(m.group(1)) for m in PAGE_NUMBER_MARKER_RE.finditer(chunk)]
-            if nums_in_chunk:
-                lo = min(nums_in_chunk)
-                hi = max(nums_in_chunk)
-                return lo, hi, list(range(lo, hi + 1))
+        # DI section pageNumber is unknown and we have no caller-supplied
+        # cache lookup at this point. Caller (process_page_label) should
+        # have already tried the DI-cache fallback; if we still got None,
+        # there is nothing reliable to return.
         return None, None, []
     if not chunk:
         return section_start_page, section_start_page, [section_start_page]
 
-    # Explicit markers inside the chunk: covers the no-section-context fallback.
-    nums_in_chunk = [int(m.group(1)) for m in PAGE_NUMBER_MARKER_RE.finditer(chunk)]
+    # Integer-style PageNumber markers inside the chunk (e.g. "3") are
+    # used as a fallback when we cannot locate the chunk in section_content.
+    # Printed labels like "18-33" are ignored here (they are surfaced as
+    # printed_page_label instead).
+    nums_in_chunk: list[int] = []
+    for m in PAGE_NUMBER_MARKER_RE.finditer(chunk):
+        lbl = (m.group(1) or "").strip()
+        if lbl.isdigit():
+            nums_in_chunk.append(int(lbl))
     breaks_in_chunk = list(PAGE_BREAK_MARKER_RE.finditer(chunk))
 
     if not section_content:
@@ -309,20 +396,45 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     layout_ordinal = safe_int(data.get("layout_ordinal"), default=0)
     section_start_page = safe_int(data.get("physical_pdf_page"), default=None)
 
+    # Azure Search's DocumentIntelligenceLayoutSkill does not reliably
+    # expose a per-section pageNumber in its markdown_document output, so
+    # the `physical_pdf_page` input arrives as None for every chunk. When
+    # that happens, recover the starting physical page by fetching the
+    # DI cache blob (written by preanalyze.py) and matching this chunk's
+    # section_content to the indexed DI sections.
+    if section_start_page is None:
+        section_start_page = _find_section_start_page(source_path, section_content)
+
     start_page, end_page, pages_covered = compute_page_span(
         page_text, section_content, section_start_page
     )
 
-    label = _extract_label(page_text)
+    # Prefer the explicit `<!-- PageNumber="..." -->` marker from DI when
+    # present in the chunk — for technical manuals it holds the printed
+    # label the reader would recognise (e.g. "18-33", "iv", "A-12").
+    label = ""
+    for m in PAGE_NUMBER_MARKER_RE.finditer(page_text or ""):
+        candidate = (m.group(1) or "").strip()
+        if candidate:
+            label = candidate
+            break
+    if not label:
+        label = _extract_label(page_text) or ""
     if not label:
         label = str(start_page) if start_page is not None else ""
 
-    # End-label extraction: for multi-page chunks, slice the chunk text
-    # at the last DI page marker and scan only that final segment. This
-    # is marker-aware and far more accurate than "scan the second half".
+    # End-label extraction: for multi-page chunks, first try the last DI
+    # PageNumber marker in the chunk (which carries the printed label).
+    # Fall back to heuristic parsing of the final segment if there is no
+    # explicit marker.
     end_label = ""
     if page_text and end_page is not None and start_page is not None and end_page > start_page:
-        end_label = _extract_label(_last_page_segment(page_text)) or ""
+        last_marker = ""
+        for m in PAGE_NUMBER_MARKER_RE.finditer(page_text):
+            cand = (m.group(1) or "").strip()
+            if cand:
+                last_marker = cand
+        end_label = last_marker or (_extract_label(_last_page_segment(page_text)) or "")
     if not end_label:
         # Single-page chunk or no marker found: reuse the start label for
         # human readability when start==end; otherwise fall back to the
