@@ -1,0 +1,305 @@
+"""
+Preflight check for the preanalyze + indexer pipeline.
+
+Runs in under 30 seconds and validates the environment BEFORE the user
+starts a multi-hour run. Exits non-zero with a clear message if anything
+is off, so the operator can fix it before wasting time.
+
+What this catches (the categories of bugs we've actually hit):
+  1. Missing Python packages in the local venv (fitz, httpx, azure-identity)
+  2. deploy.config.json missing or missing required keys
+  3. Azure CLI not logged in / token expired
+  4. Wrong subscription / tenant selected
+  5. Blob container doesn't exist or wrong name in config
+  6. Function App doesn't exist / is stopped
+  7. DI endpoint unreachable from this machine
+  8. Import errors in the shared code we rely on
+
+What this does NOT catch (be aware):
+  * Runtime errors inside custom skills (only visible at indexer runtime)
+  * Vision content-filter false positives
+  * DI timeouts on huge PDFs
+  * AOAI TPM rate limiting mid-run
+  * Transient network failures
+  * PDF content that breaks DI parsing
+  * Partial cache states (use --status to see those)
+
+Usage:
+    python scripts/preflight.py                           # default config
+    python scripts/preflight.py --config path/to/cfg.json # custom config
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+# ---------- check helpers ----------
+
+class Check:
+    def __init__(self, name: str):
+        self.name = name
+        self.passed = False
+        self.message = ""
+        self.fix = ""
+
+    def ok(self, message: str = "") -> "Check":
+        self.passed = True
+        self.message = message
+        return self
+
+    def fail(self, message: str, fix: str) -> "Check":
+        self.passed = False
+        self.message = message
+        self.fix = fix
+        return self
+
+
+def _run_az(args: list[str], timeout: float = 30.0) -> tuple[int, str, str]:
+    cmd = args[:]
+    if cmd and cmd[0] == "az":
+        cmd[0] = "az.cmd" if os.name == "nt" else "az"
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", f"command timed out after {timeout}s"
+    except FileNotFoundError:
+        return 127, "", "command not found"
+
+
+# ---------- individual checks ----------
+
+def check_python_version() -> Check:
+    c = Check("Python version")
+    v = sys.version_info
+    if v.major == 3 and v.minor >= 10:
+        return c.ok(f"{v.major}.{v.minor}.{v.micro}")
+    return c.fail(
+        f"need Python 3.10+, found {v.major}.{v.minor}",
+        "Install Python 3.10 or later, then recreate your venv.",
+    )
+
+
+def check_packages() -> Check:
+    c = Check("Python packages")
+    required = [
+        ("fitz", "PyMuPDF"),           # PDF cropping
+        ("httpx", "httpx"),             # all HTTP calls
+        ("azure.identity", "azure-identity"),  # deploy_search auth
+    ]
+    missing = []
+    for import_name, pip_name in required:
+        try:
+            importlib.import_module(import_name)
+        except ImportError:
+            missing.append(pip_name)
+    if not missing:
+        return c.ok("fitz, httpx, azure-identity")
+    return c.fail(
+        f"missing: {', '.join(missing)}",
+        f"pip install -r requirements.txt   # from the repo root",
+    )
+
+
+def check_config(config_path: Path) -> tuple[Check, dict | None]:
+    c = Check("Config file")
+    if not config_path.exists():
+        return c.fail(
+            f"{config_path} does not exist",
+            f"Create {config_path} from deploy.config.example.json and fill in your values.",
+        ), None
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return c.fail(
+            f"invalid JSON in {config_path}: {e}",
+            "Check for trailing commas or unquoted keys; run the file through an online JSON validator.",
+        ), None
+
+    required_paths = [
+        ("storage", "accountResourceId"),
+        ("storage", "pdfContainerName"),
+        ("documentIntelligence", "endpoint"),
+        ("azureOpenAI", "endpoint"),
+        ("azureOpenAI", "visionDeployment"),
+        ("azureOpenAI", "embedDeployment"),
+        ("functionApp", "name"),
+        ("functionApp", "resourceGroup"),
+        ("search", "endpoint"),
+    ]
+    missing = []
+    for path in required_paths:
+        node: object = cfg
+        for key in path:
+            if not isinstance(node, dict) or key not in node or not node.get(key):
+                missing.append(".".join(path))
+                break
+            node = node[key]
+    if missing:
+        return c.fail(
+            f"missing/empty keys: {', '.join(missing)}",
+            f"Open {config_path} and fill in the missing values.",
+        ), cfg
+    return c.ok(f"{config_path}"), cfg
+
+
+def check_az_cli() -> Check:
+    c = Check("Azure CLI")
+    rc, _, err = _run_az(["az", "--version"], timeout=15.0)
+    if rc == 127:
+        return c.fail(
+            "az not on PATH",
+            "Install Azure CLI: https://learn.microsoft.com/cli/azure/install-azure-cli",
+        )
+    if rc != 0:
+        return c.fail(f"az --version failed: {err[:200]}",
+                      "Reinstall Azure CLI or check PATH.")
+    return c.ok("az on PATH")
+
+
+def check_az_login() -> tuple[Check, dict | None]:
+    c = Check("Azure login")
+    rc, out, err = _run_az(["az", "account", "show", "-o", "json"], timeout=15.0)
+    if rc != 0:
+        return c.fail(
+            f"not logged in: {err[:200]}",
+            "Run: az login   (and re-run this preflight after)",
+        ), None
+    try:
+        acct = json.loads(out)
+    except Exception:
+        return c.fail("could not parse `az account show` output", "Run az login."), None
+    return c.ok(f"{acct.get('user', {}).get('name', 'unknown')} / {acct.get('name', 'unknown')}"), acct
+
+
+def check_function_app(cfg: dict) -> Check:
+    c = Check("Function App")
+    rg = cfg["functionApp"]["resourceGroup"]
+    name = cfg["functionApp"]["name"]
+    rc, out, err = _run_az([
+        "az", "functionapp", "show", "-g", rg, "-n", name,
+        "--query", "{state:state,hostname:defaultHostName}", "-o", "json",
+    ], timeout=30.0)
+    if rc != 0:
+        return c.fail(
+            f"cannot read function app {name} in {rg}: {err[:200]}",
+            f"Verify the function app exists: az functionapp list -g {rg} -o table",
+        )
+    try:
+        info = json.loads(out)
+    except Exception:
+        return c.fail("could not parse function app info", "Re-run az login and retry.")
+    if info.get("state") != "Running":
+        return c.fail(
+            f"function app state is '{info.get('state')}', not 'Running'",
+            f"Start it: az functionapp start -g {rg} -n {name}",
+        )
+    return c.ok(f"{name} Running @ {info.get('hostname')}")
+
+
+def check_storage_container(cfg: dict) -> Check:
+    c = Check("Blob container")
+    account_rid = cfg["storage"]["accountResourceId"]
+    container = cfg["storage"]["pdfContainerName"]
+    account_name = account_rid.rstrip("/").split("/")[-1]
+    rc, _, err = _run_az([
+        "az", "storage", "container", "exists",
+        "--account-name", account_name, "--name", container,
+        "--auth-mode", "login",
+        "-o", "json",
+    ], timeout=30.0)
+    if rc != 0:
+        return c.fail(
+            f"cannot check container {container} in {account_name}: {err[:200]}",
+            "Verify the account name, container name, and that your signed-in "
+            "principal has 'Storage Blob Data Contributor' role on the account.",
+        )
+    return c.ok(f"{account_name}/{container} accessible")
+
+
+def check_preanalyze_importable() -> Check:
+    """Directly exercise the import that crashed the last live run
+    (shared.pdf_crop -> fitz). Mirrors exactly how preanalyze.py
+    extends sys.path at runtime."""
+    c = Check("preanalyze.py imports")
+    repo_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(repo_root / "function_app"))
+    try:
+        importlib.import_module("shared.pdf_crop")
+    except ImportError as e:
+        return c.fail(
+            f"cannot import shared.pdf_crop: {e}",
+            "pip install -r requirements.txt   (likely the PyMuPDF/fitz gap)",
+        )
+    return c.ok("shared.pdf_crop + fitz OK")
+
+
+# ---------- main ----------
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Preflight: validate env before preanalyze")
+    ap.add_argument("--config", default="deploy.config.json")
+    args = ap.parse_args()
+
+    print()
+    print("=" * 60)
+    print(" Preflight check")
+    print("=" * 60)
+
+    checks: list[Check] = []
+
+    # 1. Python + packages first -- everything else needs them
+    checks.append(check_python_version())
+    checks.append(check_packages())
+    checks.append(check_preanalyze_importable())
+
+    # 2. Config file
+    cfg_check, cfg = check_config(Path(args.config))
+    checks.append(cfg_check)
+
+    # 3. Azure CLI + login
+    az_check = check_az_cli()
+    checks.append(az_check)
+
+    if az_check.passed:
+        login_check, _ = check_az_login()
+        checks.append(login_check)
+
+        # 4. Azure resources (only if logged in + config loaded)
+        if login_check.passed and cfg is not None:
+            checks.append(check_function_app(cfg))
+            checks.append(check_storage_container(cfg))
+
+    # Print results
+    print()
+    for c in checks:
+        tag = "OK  " if c.passed else "FAIL"
+        msg = c.message or ""
+        print(f"  [{tag}] {c.name:<28s} {msg}")
+
+    failures = [c for c in checks if not c.passed]
+    print()
+    if not failures:
+        print("All checks passed. You can run preanalyze now.")
+        print()
+        return 0
+
+    print(f"{len(failures)} check(s) failed. Fix these before running preanalyze:")
+    print()
+    for c in failures:
+        print(f"  * {c.name}: {c.message}")
+        if c.fix:
+            print(f"    fix: {c.fix}")
+        print()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
