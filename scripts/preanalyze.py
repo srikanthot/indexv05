@@ -626,12 +626,54 @@ def _passes_triage(polygon: list[float], image_b64: str | None = None) -> tuple[
 
 # -- Phase A: DI analysis + cropping --
 
+def _pdf_has_any_crops(cfg: dict, pdf_name: str) -> bool:
+    """Cheap probe: does the cache already hold at least one crop blob
+    for this PDF? Used to distinguish a fully-done PDF from one whose
+    DI cache was written but whose crop phase crashed (e.g. previous
+    fitz import failure). A single LIST call covers arbitrary PDF names."""
+    try:
+        _init_storage(cfg)
+        container = cfg["storage"]["pdfContainerName"]
+        conn_str = _get_connection_string(cfg)
+        raw = _run_az([
+            "az", "storage", "blob", "list",
+            "--container-name", container,
+            "--connection-string", conn_str,
+            "--prefix", f"_dicache/{pdf_name}.crop.",
+            "--num-results", "1",
+            "--query", "[].name",
+            "-o", "json",
+        ])
+        return len(json.loads(raw)) > 0
+    except Exception:
+        return False
+
+
 def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
-    """Run DI analysis and crop figures. Cache results to blob."""
+    """Run DI analysis and crop figures. Cache results to blob.
+
+    Resumable: if DI cache exists but zero crops do, re-runs only the
+    crop+upload phase using the cached DI result (no extra DI call)."""
     cache_name = "_dicache/" + pdf_name + ".di.json"
 
     if not force and blob_exists(cfg, cache_name):
-        return f"  skip-di  {pdf_name} (DI cached)"
+        if _pdf_has_any_crops(cfg, pdf_name):
+            return f"  skip-di  {pdf_name} (DI cached + crops present)"
+        # DI cache exists but crops don't -- previous run crashed between
+        # DI upload and crop upload. Resume without re-running DI.
+        print(f"  resume-crops  {pdf_name} (DI cached, crops missing)", flush=True)
+        try:
+            di_cache_bytes = fetch_blob(cfg, cache_name)
+            result = json.loads(di_cache_bytes)
+            pdf_bytes = fetch_blob(cfg, pdf_name)
+            elapsed = 0.0
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return f"  FAIL-di  {pdf_name}: resume-crops fetch failed: {type(exc).__name__}: {exc}"
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
+        from shared.pdf_crop import crop_figure_png_b64
+        return _do_crops(cfg, pdf_name, pdf_bytes, result, crop_figure_png_b64, elapsed)
 
     try:
         pdf_bytes = fetch_blob(cfg, pdf_name)
@@ -650,82 +692,87 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
         from shared.pdf_crop import crop_figure_png_b64
 
-        figures = result.get("figures", []) or []
-        skip_count = 0
-        seen_hashes: dict[str, str] = {}
-
-        # Phase 1: crop locally (CPU-bound, fast) -- build list of blobs to upload
-        pending_uploads: list[tuple[str, bytes]] = []  # (blob_name, blob_bytes)
-        for fig_idx, figure in enumerate(figures):
-            fig_id = figure.get("id") or f"fig_{fig_idx}"
-            page = None
-            polygon = None
-            for br in figure.get("boundingRegions", []) or []:
-                p = br.get("pageNumber")
-                poly = br.get("polygon")
-                if isinstance(p, int) and poly:
-                    page = p
-                    polygon = poly
-                    break
-            if not page or not polygon or len(polygon) < 4:
-                # Log once at DI phase so ops have visibility into how many
-                # figures DI returned with malformed bounding regions.
-                print(f"    skip fig {fig_id}: page={page} polygon_len={len(polygon) if polygon else 0}", flush=True)
-                continue
-
-            passes, reason = _passes_triage(polygon)
-            if not passes:
-                skip_count += 1
-                continue
-
-            try:
-                image_b64, bbox = crop_figure_png_b64(pdf_bytes, page, polygon)
-
-                passes2, reason2 = _passes_triage(polygon, image_b64)
-                if not passes2:
-                    skip_count += 1
-                    continue
-
-                raw_png = base64.b64decode(image_b64)
-                crop_hash = hashlib.sha256(raw_png).hexdigest()
-                if crop_hash in seen_hashes:
-                    skip_count += 1
-                    continue
-                seen_hashes[crop_hash] = fig_id
-
-                crop_obj = {"image_b64": image_b64, "bbox": bbox}
-                crop_bytes = json.dumps(crop_obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                pending_uploads.append((f"_dicache/{pdf_name}.crop.{fig_id}.json", crop_bytes))
-            except Exception as exc:
-                print(f"    crop error (fig {fig_id} pg {page}): {exc}", flush=True)
-                continue
-
-        # Phase 2: upload all crops in parallel (IO-bound, was the bottleneck)
-        crop_count = 0
-        if pending_uploads:
-            print(f"    uploading {len(pending_uploads)} crops (10 parallel)...", flush=True)
-
-            def _upload_one(item: tuple[str, bytes]) -> bool:
-                try:
-                    upload_blob(cfg, item[0], item[1])
-                    return True
-                except Exception as exc:
-                    print(f"    upload error ({item[0]}): {exc}", flush=True)
-                    return False
-
-            with ThreadPoolExecutor(max_workers=10) as pool:
-                futures = [pool.submit(_upload_one, item) for item in pending_uploads]
-                for f in as_completed(futures):
-                    if f.result():
-                        crop_count += 1
-                    if crop_count % 100 == 0 and crop_count > 0:
-                        print(f"    {crop_count}/{len(pending_uploads)} uploaded...", flush=True)
-
-        return f"  ok-di  {pdf_name} ({elapsed:.0f}s, {crop_count} crops, {skip_count} skipped)"
+        return _do_crops(cfg, pdf_name, pdf_bytes, result, crop_figure_png_b64, elapsed)
     except Exception as exc:
         import traceback
         traceback.print_exc()
         return f"  FAIL-di  {pdf_name}: {type(exc).__name__}: {exc}"
+
+
+def _do_crops(cfg: dict, pdf_name: str, pdf_bytes: bytes,
+              result: dict, crop_figure_png_b64, elapsed: float) -> str:
+    """Shared crop + parallel-upload body used by both the fresh-run and
+    resume-crops paths of phase_di. Safe to call when the DI cache already
+    exists; only uploads crops that are new (parallel uploader overwrites
+    by name, so it is idempotent)."""
+    figures = result.get("figures", []) or []
+    skip_count = 0
+    seen_hashes: dict[str, str] = {}
+
+    pending_uploads: list[tuple[str, bytes]] = []
+    for fig_idx, figure in enumerate(figures):
+        fig_id = figure.get("id") or f"fig_{fig_idx}"
+        page = None
+        polygon = None
+        for br in figure.get("boundingRegions", []) or []:
+            p = br.get("pageNumber")
+            poly = br.get("polygon")
+            if isinstance(p, int) and poly:
+                page = p
+                polygon = poly
+                break
+        if not page or not polygon or len(polygon) < 4:
+            print(f"    skip fig {fig_id}: page={page} polygon_len={len(polygon) if polygon else 0}", flush=True)
+            continue
+
+        passes, reason = _passes_triage(polygon)
+        if not passes:
+            skip_count += 1
+            continue
+
+        try:
+            image_b64, bbox = crop_figure_png_b64(pdf_bytes, page, polygon)
+
+            passes2, reason2 = _passes_triage(polygon, image_b64)
+            if not passes2:
+                skip_count += 1
+                continue
+
+            raw_png = base64.b64decode(image_b64)
+            crop_hash = hashlib.sha256(raw_png).hexdigest()
+            if crop_hash in seen_hashes:
+                skip_count += 1
+                continue
+            seen_hashes[crop_hash] = fig_id
+
+            crop_obj = {"image_b64": image_b64, "bbox": bbox}
+            crop_bytes = json.dumps(crop_obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            pending_uploads.append((f"_dicache/{pdf_name}.crop.{fig_id}.json", crop_bytes))
+        except Exception as exc:
+            print(f"    crop error (fig {fig_id} pg {page}): {exc}", flush=True)
+            continue
+
+    crop_count = 0
+    if pending_uploads:
+        print(f"    uploading {len(pending_uploads)} crops (10 parallel)...", flush=True)
+
+        def _upload_one(item: tuple[str, bytes]) -> bool:
+            try:
+                upload_blob(cfg, item[0], item[1])
+                return True
+            except Exception as exc:
+                print(f"    upload error ({item[0]}): {exc}", flush=True)
+                return False
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(_upload_one, item) for item in pending_uploads]
+            for f in as_completed(futures):
+                if f.result():
+                    crop_count += 1
+                if crop_count % 100 == 0 and crop_count > 0:
+                    print(f"    {crop_count}/{len(pending_uploads)} uploaded...", flush=True)
+
+    return f"  ok-di  {pdf_name} ({elapsed:.0f}s, {crop_count} crops, {skip_count} skipped)"
 
 
 # -- Phase B: Vision analysis (parallel within each PDF) --
