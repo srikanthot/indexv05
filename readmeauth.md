@@ -56,7 +56,7 @@ async function getAccessToken(): Promise<string | null> {
     // MSAL failure with no exception or no token
     if (!response || !response.accessToken) {
       console.warn("MSAL soft failure detected - clearing cache and retrying");
-      instance.getTokenCache().clear();
+      await instance.clearCache();
 
       response = await instance.acquireTokenSilent({
         ...loginRequest,
@@ -79,7 +79,7 @@ async function getAccessToken(): Promise<string | null> {
     let retryErrMessage = "";
     if (isRecoverable) {
       console.warn("MSAL cache issue detected - clearing and retrying");
-      instance.getTokenCache().clear();
+      await instance.clearCache();
 
       try {
         const res: AuthenticationResult = await instance.acquireTokenSilent({
