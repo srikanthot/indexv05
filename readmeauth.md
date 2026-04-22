@@ -1,381 +1,191 @@
-import type {
-  Conversation,
-  Message,
-  Citation,
-  FeedbackPayload,
-  HealthStatus,
-} from "./types";
-import { isEntraConfigured, getMsalInstance, loginRequest } from "./auth-config";
-import type { AuthenticationResult, PublicClientApplication } from "@azure/msal-browser";
-
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-
 /**
- * Acquire an access token from the shared MSAL singleton.
- * Returns null when Entra is not configured or token acquisition fails.
+ * Azure Entra ID (MSAL) configuration.
+ *
+ * All values are populated from NEXT_PUBLIC_ environment variables so the
+ * same codebase works for local dev (no auth), local Entra testing, and
+ * Azure App Service deployment — controlled entirely by configuration.
+ *
+ * ── Environment variables ─────────────────────────────────────────
+ *
+ *  NEXT_PUBLIC_CLIENT_ID       — App Registration client/application ID
+ *  NEXT_PUBLIC_AUTHORITY       — Entra authority URL, e.g.:
+ *                                 Public cloud:  https://login.microsoftonline.com/<tenant-id>
+ *                                 GCC High:      https://login.microsoftonline.us/<tenant-id>
+ *  NEXT_PUBLIC_REDIRECT_URI    — Post-login redirect (default: "/")
+ *  NEXT_PUBLIC_CLOUD_INSTANCE  — (Optional) Override cloud instance for sovereign clouds.
+ *                                 Defaults to "" (auto-detected from authority).
+ *  NEXT_PUBLIC_API_SCOPE       — (Optional) Backend API scope for token acquisition, e.g.:
+ *                                 "api://<client-id>/access_as_user"
+ *                                 If blank, only "User.Read" is requested.
+ *  NEXT_PUBLIC_ALLOWED_GROUP   — (Optional) Entra security group Object ID.
+ *                                 If set, only members of this group can access the app.
+ *                                 Leave blank to allow all tenant users.
+ *
+ * When NEXT_PUBLIC_CLIENT_ID and NEXT_PUBLIC_AUTHORITY are both blank,
+ * the app falls back to debug mode (X-Debug-User-Id headers).
  */
-let tokenPromise: Promise<string | null> | null = null;
 
-async function getTokenSingleton(
-  fn: () => Promise<string | null>
-): Promise<string | null> {
-  // If a token request is already in flight, return it
-  if (tokenPromise) {
-    return tokenPromise;
-  }
+import {
+  type Configuration,
+  PublicClientApplication,
+  EventType,
+  type EventMessage,
+  type AuthenticationResult,
+} from "@azure/msal-browser";
 
-  // Otherwise start a new one
-  tokenPromise = (async () => {
-    try {
-      return await fn();
-    } finally {
-      tokenPromise = null;
-    }
-  })();
-
-  return tokenPromise;
-}
-
-
-async function getAccessToken(): Promise<string | null> {
-  if (!isEntraConfigured()) return null;
-
-  const instance: PublicClientApplication | null = getMsalInstance();
-  if (!instance) return null;
-
-  const accounts = instance.getAllAccounts();
-  if (accounts.length === 0) return null;
-
+// Extract the authority host (e.g. "login.microsoftonline.us") so MSAL
+// skips public-cloud instance discovery, which times out for GCC High.
+const _authority = process.env.NEXT_PUBLIC_AUTHORITY ?? "";
+const _cloudInstance = process.env.NEXT_PUBLIC_CLOUD_INSTANCE ?? "";
+function _extractAuthorityHost(authority: string): string {
   try {
-    let response: AuthenticationResult = await instance.acquireTokenSilent({
-      ...loginRequest,
-      account: accounts[0],
-    });
-
-    // MSAL failure with no exception or no token
-    if (!response || !response.accessToken) {
-      console.warn("MSAL soft failure detected - clearing cache and retrying");
-      await instance.clearCache();
-
-      response = await instance.acquireTokenSilent({
-        ...loginRequest,
-        account: accounts[0],
-      });
-    }
-
-    return response.accessToken;
-  } catch (err) {
-    /* MSAL Fix #2 Check if the message is recoverable so we don't waste time trying to recover
-    a non-recoverable error */
-    console.warn("First attempt for acquiring token failed. Retrying.")
-    const msg = (err as any)?.message?.toLowerCase() ?? "";
-    const isRecoverable =
-      msg.includes("cache") ||
-      msg.includes("invalid_grant") ||
-      msg.includes("interaction_required");
-
-    // If it is recoverable, clear the cache and try again
-    let retryErrMessage = "";
-    if (isRecoverable) {
-      console.warn("MSAL cache issue detected - clearing and retrying");
-      await instance.clearCache();
-
-      try {
-        const res: AuthenticationResult = await instance.acquireTokenSilent({
-          ...loginRequest,
-          account: accounts[0],
-        });
-        return res.accessToken;
-      } catch (newErr) {
-        retryErrMessage = (newErr as any)?.message;
-      }
-    }
-
-    // Silent acquisition failed — user may need to re-authenticate.
-    // Don't block the request; EasyAuth headers will provide identity
-    // in production even without a Bearer token.
-    console.warn("MSAL silent token acquisition failed — request will proceed without Bearer token.", err);
-    if (retryErrMessage) {
-      console.warn("MSAL silent token acquisition retry after cache refresh failed.", retryErrMessage);
-    }
+    return new URL(authority).hostname;
+  } catch {
+    return "";
   }
-  return null;
+}
+const _knownHost = _cloudInstance || _extractAuthorityHost(_authority);
+
+export const msalConfig: Configuration = {
+  auth: {
+    clientId: process.env.NEXT_PUBLIC_CLIENT_ID ?? "",
+    authority: _authority,
+    redirectUri: process.env.NEXT_PUBLIC_REDIRECT_URI ?? "/",
+    postLogoutRedirectUri: "/",
+    knownAuthorities: _knownHost ? [_knownHost] : [],
+  },
+  cache: {
+    cacheLocation: "localStorage"
+  },
+};
+
+// ── MSAL Instance (singleton) ─────────────────────────────────────
+// Shared across AuthGate and api.ts to avoid creating multiple
+// PublicClientApplication instances that fight over sessionStorage.
+
+let _msalInstance: PublicClientApplication | null = null;
+
+export function getMsalInstance(): PublicClientApplication | null {
+  /* We can only acquire the token client side.  Ensure
+  we are not doing server side rendering */
+  if (typeof window === "undefined") return null; // MSAL fix #1
+
+  if (!_msalInstance) {
+    validateMsalCache();
+    _msalInstance = new PublicClientApplication(msalConfig);
+  }
+
+  // Set the first active account after redirect completes
+  _msalInstance?.addEventCallback((event: EventMessage) => {
+    if (
+      event.eventType === EventType.LOGIN_SUCCESS &&
+      (event.payload as AuthenticationResult)?.account
+    ) {
+      _msalInstance!.setActiveAccount(
+        (event.payload as AuthenticationResult).account
+      );
+    }
+  });
+
+  return _msalInstance;
 }
 
-function getHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  // Debug user identity for local dev without Entra auth.
-  // In production, the backend extracts identity from the Entra token
-  // forwarded by Azure App Service EasyAuth. This header is ignored
-  // when real auth is active.
-  if (!isEntraConfigured() && typeof window !== "undefined") {
-    const debugUser = localStorage.getItem("debug_user_id");
-    if (debugUser) {
-      headers["X-Debug-User-Id"] = debugUser;
+export function clearMsalCache(): void {
+  const keysToRemove = [];
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+
+    if (
+      key?.startsWith("msal.") ||
+      key?.startsWith("msal-browser.") ||
+      key?.startsWith("msal")
+    ) {
+      keysToRemove.push(key);
     }
   }
-  return headers;
+
+  keysToRemove.forEach((key) => localStorage.removeItem(key));
 }
 
+function isProbablyBase64(str: string) {
+  return /^[A-Za-z0-9+/=]+$/.test(str);
+}
+
+// Bonus MSAL fix, verify the MSAL cache is not corrupt before letting MSAL use it
 /**
- * Build headers with optional Bearer token.
- * In Entra mode, tries to acquire an access token silently.
- * Falls back to base headers if token acquisition fails.
+ * Checks JWT-like values (ID token, Access Token)
+ * Checks valid JSON
+ * Checks redirect state keys length (nonce, state, request)
+ * @returns void
  */
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  const headers = getHeaders();
-  const token = await getTokenSingleton(async () => {
-    return await getAccessToken();
-  });
-
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
-
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const authHeaders = await getAuthHeaders();
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { ...authHeaders, ...options?.headers },
-    ...options,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new ApiError(res.status, text);
-  }
-  return res.json() as Promise<T>;
-}
-
-export class ApiError extends Error {
-  constructor(
-    public status: number,
-    public body: string
-  ) {
-    super(`API ${status}: ${body}`);
-    this.name = "ApiError";
-  }
-}
-
-// ─── Health ────────────────────────────────────────────────────────
-export async function checkHealth(): Promise<HealthStatus> {
-  return request<HealthStatus>("/health");
-}
-
-// ─── Conversations ─────────────────────────────────────────────────
-export async function listConversations(
-  limit = 20
-): Promise<Conversation[]> {
-  return request<Conversation[]>(`/conversations?limit=${limit}`);
-}
-
-export async function createConversation(
-  title?: string
-): Promise<Conversation> {
-  return request<Conversation>("/conversations", {
-    method: "POST",
-    body: JSON.stringify({ title: title ?? null }),
-  });
-}
-
-export async function renameConversation(
-  threadId: string,
-  title: string
-): Promise<Conversation> {
-  return request<Conversation>(`/conversations/${threadId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ title }),
-  });
-}
-
-export async function deleteConversation(
-  threadId: string
-): Promise<{ deleted: boolean }> {
-  return request<{ deleted: boolean }>(`/conversations/${threadId}`, {
-    method: "DELETE",
-  });
-}
-
-// ─── Messages ──────────────────────────────────────────────────────
-export async function getMessages(
-  threadId: string,
-  limit = 50
-): Promise<Message[]> {
-  return request<Message[]>(
-    `/conversations/${threadId}/messages?limit=${limit}`
-  );
-}
-
-// ─── Chat (streaming) ──────────────────────────────────────────────
-export interface StreamCallbacks {
-  onToken: (token: string) => void;
-  onMeta: (meta: Record<string, string>[]) => void;
-  onCitations: (citations: Citation[]) => void;
-  onAnswerReplaced?: (finalAnswer: string) => void;
-  onDone: () => void;
-  onError: (error: Error) => void;
-}
-
-/**
- * Stream a chat response via SSE.
- * Pass an AbortSignal to cancel the stream when the user switches
- * conversations or starts a new chat mid-generation.
- */
-export async function streamChat(
-  question: string,
-  sessionId: string | null,
-  callbacks: StreamCallbacks,
-  signal?: AbortSignal
-): Promise<void> {
-  if (signal?.aborted) return;
-
-  let res: Response;
+export function validateMsalCache() {
   try {
-    const authHeaders = await getAuthHeaders();
-    res = await fetch(`${BASE_URL}/chat/stream`, {
-      method: "POST",
-      headers: authHeaders,
-      body: JSON.stringify({ question, session_id: sessionId }),
-      signal,
-    });
-  } catch (err) {
-    // AbortError is expected when caller cancels — not a real error
-    if (err instanceof DOMException && err.name === "AbortError") return;
-    callbacks.onError(
-      err instanceof Error ? err : new Error("Network error")
-    );
-    return;
-  }
+    for (const key in localStorage) {
+      if (key.includes("msal") && key.trim() !== "msal.version") {
+        const value = localStorage.getItem(key);
+        if (!value) continue;
 
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => res.statusText);
-    callbacks.onError(new ApiError(res.status, text));
-    return;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  // Track current SSE event type across chunk boundaries — event: and
-  // data: lines may arrive in different read() chunks.
-  let currentEvent = "";
-
-  // Inactivity timeout — abort if no data for 180s (catches hung connections)
-  const STREAM_TIMEOUT_MS = 180_000;
-  let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
-  let timedOut = false;
-  const resetTimer = () => {
-    if (inactivityTimer) clearTimeout(inactivityTimer);
-    inactivityTimer = setTimeout(() => {
-      timedOut = true;
-      reader.cancel();
-      callbacks.onError(new Error("Stream timed out — no data received for 3 minutes."));
-    }, STREAM_TIMEOUT_MS);
-  };
-
-  try {
-    resetTimer();
-    while (true) {
-      if (signal?.aborted) {
-        reader.cancel();
-        return;
-      }
-
-      const { value, done } = await reader.read();
-      if (done) break;
-      resetTimer();
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      // Keep incomplete last line in buffer
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("event: ")) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-
-          if (data === "[DONE]") {
-            callbacks.onDone();
-            return;
+        // 1.  Try to decode JWT-like values
+        if (value.includes(".")) {
+          const parts = value.split(".");
+          for (const p of parts) {
+            if (p && isProbablyBase64(p)) atob(p); // throws on invalid base64
           }
+        }
 
-          if (currentEvent === "answer_replaced") {
-            // Backend sends the final renumbered answer text
-            const finalAnswer = data.replace(/\\n/g, "\n");
-            callbacks.onAnswerReplaced?.(finalAnswer);
-            currentEvent = "";
-          } else if (currentEvent === "meta") {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.meta) {
-                callbacks.onMeta(parsed.meta);
-              }
-            } catch (parseErr) {
-              console.warn("Failed to parse meta JSON from SSE:", parseErr, data);
-            }
+        // 2. Validate JSON values
+        if (value.trim().startsWith("{") || value.trim().startsWith("[")) {
+          JSON.parse(value);
+        }
 
-          } else if (currentEvent === "citations") {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.citations) {
-                callbacks.onCitations(parsed.citations);
-              }
-            } catch (parseErr) {
-              console.warn("Failed to parse citation JSON from SSE:", parseErr, data);
-            }
-            currentEvent = "";
-          } else if (currentEvent === "ping") {
-            // Ignore keepalive
-            currentEvent = "";
-          } else {
-            // Content token — unescape literal \n back to newlines
-            const token = data.replace(/\\n/g, "\n");
-            callbacks.onToken(token);
-            currentEvent = "";
+        // 3. Validate known redirect state values
+        if (key.includes("request") ||
+          key.includes("state") ||
+          key.includes("nonce")) {
+          if (typeof value !== "string" || value.length < 5) {
+            throw new Error("Invalid MSAL redirect state");
           }
-        } else if (line === "") {
-          // Blank line resets event context per SSE spec
-          currentEvent = "";
         }
       }
     }
-    // Stream ended without [DONE] — still notify (unless timeout already fired)
-    if (!timedOut) callbacks.onDone();
   } catch (err) {
-    if (timedOut) return; // Timeout already called onError — don't double-fire
-    if (err instanceof DOMException && err.name === "AbortError") return;
-    callbacks.onError(
-      err instanceof Error ? err : new Error("Stream read error")
-    );
-  } finally {
-    if (inactivityTimer) clearTimeout(inactivityTimer);
+    console.warn("Corrupted MSAL cache detected - clearing: ", err);
+    clearMsalCache();
   }
 }
 
-// ─── SAS URL signing (on-demand for PDF citations) ─────────────────
-export async function getSignedPdfUrl(rawUrl: string): Promise<string> {
-  try {
-    const res = await request<{ signed_url: string }>(
-      `/sas?url=${encodeURIComponent(rawUrl)}`
-    );
-    return res.signed_url || rawUrl;
-  } catch {
-    // Fallback: try opening the raw URL directly
-    return rawUrl;
-  }
-}
+const apiScope = process.env.NEXT_PUBLIC_API_SCOPE ?? "";
 
-// ─── Feedback ──────────────────────────────────────────────────────
-export async function submitFeedback(
-  payload: FeedbackPayload
-): Promise<void> {
-  await request<{ status: string }>("/feedback", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+/**
+ * Scopes requested at interactive sign-in.
+ * Only Graph/profile scopes here — mixing API scopes from a different
+ * resource in the same request causes MSAL to return a Graph token
+ * instead of an API token.
+ */
+export const loginRequest = {
+  scopes: ["User.Read"],
+};
+
+/**
+ * Scopes requested when calling the backend API.
+ * Separate resource → separate access token with correct audience.
+ * Used by api.ts in acquireTokenSilent().
+ */
+export const apiRequest = {
+  scopes: apiScope ? [apiScope] : [],
+};
+
+/**
+ * Optional group-based access restriction.
+ * When set, AuthGate checks the user's group membership.
+ */
+export const allowedGroupId = process.env.NEXT_PUBLIC_ALLOWED_GROUP ?? "";
+
+/**
+ * Returns true if Entra ID env vars are configured.
+ * Use this to decide whether to enable real auth or fall back to debug mode.
+ */
+export function isEntraConfigured(): boolean {
+  return Boolean(msalConfig.auth.clientId && msalConfig.auth.authority);
 }
