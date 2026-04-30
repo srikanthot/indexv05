@@ -310,6 +310,8 @@ subscription (`az account set --subscription <id>`).
 | 8 | AOAI deployment: `gpt-4.1`                 | Vision + summary | ≥80K TPM |
 | 9 | Document Intelligence                      | Layout extraction | Standard (S0); region with prebuilt-layout |
 | 10 | AI Services multi-service                  | Bills the built-in Layout skill | Standard (S0) |
+
+> **Note on rows 9 + 10.** These can be **the same resource**. A multi-service `kind=CognitiveServices` account bundles Document Intelligence with the AI Services billing surface, so a single account fills both roles. This is the common layout in **GCC High** and Azure Gov, where teams typically provision one multi-service account rather than two separate resources. In `deploy.config.json`, point `documentIntelligence.endpoint` and `aiServices.subdomainUrl` at the same URL; in `scripts/assign_roles.sh`, set `DI` and `AISVC` to the same name. AOAI (row 6) is always a separate `kind=OpenAI` resource — it cannot live inside a multi-service account.
 | 11 | Function App (Linux, Python 3.11, v4)      | Hosts custom skills | Consumption (Y1); system-assigned MI |
 | 12 | Application Insights                       | Function App telemetry | Workspace-based |
 | 13 | Container Apps environment                 | Hosts automation jobs | Consumption profile |

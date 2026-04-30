@@ -23,8 +23,18 @@ $Rg      = '<your-rg>'
 $Search  = '<search-service-name>'
 $Storage = '<storage-account-name>'
 $Aoai    = '<aoai-resource-name>'
-$Di      = '<di-resource-name>'
-$AiSvc   = '<ai-services-multiservice-name>'
+
+# $Di and $AiSvc: if you have a *standalone* Document Intelligence resource
+# (kind=FormRecognizer) AND a separate Azure AI multi-service account
+# (kind=CognitiveServices), set them to those two distinct names.
+#
+# If you have only ONE multi-service Cognitive Services account that
+# bundles DI together with everything else (common in GCC High and Gov
+# Cloud), set $Di and $AiSvc to the SAME name. The script will assign
+# both roles to the same resource — Azure handles that cleanly.
+$Di      = '<di-or-multi-service-account-name>'
+$AiSvc   = '<ai-services-multi-service-account-name>'
+
 $Func    = '<function-app-name>'
 # -----------------------------------
 
