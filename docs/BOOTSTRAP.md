@@ -53,9 +53,9 @@ az account set --subscription "<your-subscription>"   # fill in: subscription na
 az resource list -g <your-rg> --query "[].{name:name, type:type}" -o table   # fill in: <your-rg>
 ```
 
-You're looking for 7 names. Five are obvious from the type column;
-the three Cognitive Services accounts need one more query to tell
-apart by `kind`:
+You're looking for up to 7 names. Five are obvious from the type column;
+the Cognitive Services accounts need one more query to tell them apart
+by `kind`:
 
 ```bash
 az cognitiveservices account list -g <your-rg> --query "[].{name:name, kind:kind}" -o table   # fill in: <your-rg>
@@ -65,11 +65,38 @@ Map the output:
 
 | `kind` value | Means this is your |
 |---|---|
-| `OpenAI` | **AOAI** |
-| `FormRecognizer` | **DI** (Document Intelligence) |
-| `CognitiveServices` | **AI Services multi-service** |
+| `OpenAI` | **AOAI** (must be a separate resource — AOAI deployments do not live in multi-service accounts) |
+| `FormRecognizer` | Standalone **Document Intelligence** |
+| `CognitiveServices` | **Azure AI multi-service** account |
 
-Write down all 7 names somewhere. You'll paste them in the next step.
+Three valid layouts you might see in your environment:
+
+| Layout | What you have | What to use for DI / AISVC |
+|---|---|---|
+| **Two separate accounts** | one `FormRecognizer` + one `CognitiveServices` | `DI` = the FormRecognizer name, `AISVC` = the CognitiveServices name |
+| **One multi-service account** (common in **GCC High**, Azure Gov, and many enterprise environments) | one `CognitiveServices` only — DI is bundled inside it | `DI` and `AISVC` are **the same name** — the multi-service account |
+| **Standalone DI only** (rare) | one `FormRecognizer` only | Provision a multi-service `CognitiveServices` account too — the built-in Layout skill needs it for billing |
+
+Write down all the names you'll need (5 to 7 depending on layout). You'll paste them in the next step.
+
+### GCC High / Gov Cloud — verify your AOAI model availability
+
+GCC High lags Azure Commercial by 12–18 months on new models.
+**Before you continue, confirm `gpt-4.1` is actually available in your
+AOAI resource:**
+
+```bash
+az cognitiveservices account list-models \
+  -n <your-aoai> -g <your-rg> \
+  --query "[?contains(name, 'gpt-4') || contains(name, 'embedding')].{name:name, version:version}" \
+  -o table   # fill in: <your-aoai>, <your-rg>
+```
+
+If `gpt-4.1` doesn't appear, use whatever vision-capable model is
+available (typically `gpt-4o` or `gpt-4-turbo` in Gov), and update
+`deploy.config.json` so `azureOpenAI.chatDeployment` and
+`azureOpenAI.visionDeployment` reference the deployment name you
+actually created.
 
 ---
 
@@ -83,8 +110,14 @@ RG="<your-rg>"                            # fill in: resource group name
 SEARCH="<search-service-name>"            # fill in: Microsoft.Search/searchServices
 STORAGE="<storage-account-name>"          # fill in: Microsoft.Storage/storageAccounts
 AOAI="<aoai-resource-name>"               # fill in: cognitiveservices kind=OpenAI
-DI="<di-resource-name>"                   # fill in: cognitiveservices kind=FormRecognizer
-AISVC="<ai-services-multiservice-name>"   # fill in: cognitiveservices kind=CognitiveServices
+
+# DI + AISVC: if you have a standalone FormRecognizer AND a separate
+# multi-service CognitiveServices account, fill in those two names.
+# If you have only ONE multi-service CognitiveServices account (common
+# in GCC High / Gov Cloud), set DI and AISVC to the SAME name.
+DI="<di-or-multi-service-account-name>"
+AISVC="<ai-services-multi-service-account-name>"
+
 FUNC="<function-app-name>"                # fill in: Microsoft.Web/sites
 # -----------------------------------
 ```

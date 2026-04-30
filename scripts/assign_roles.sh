@@ -24,8 +24,18 @@ RG="<your-rg>"
 SEARCH="<search-service-name>"
 STORAGE="<storage-account-name>"
 AOAI="<aoai-resource-name>"
-DI="<di-resource-name>"
-AISVC="<ai-services-multiservice-name>"
+
+# DI and AISVC: if you have a *standalone* Document Intelligence resource
+# (kind=FormRecognizer) AND a separate Azure AI multi-service account
+# (kind=CognitiveServices), set them to those two distinct names.
+#
+# If you have only ONE multi-service Cognitive Services account that
+# bundles DI together with everything else (common in GCC High and Gov
+# Cloud), set DI and AISVC to the SAME name. The script will assign
+# both roles to the same resource — Azure handles that cleanly.
+DI="<di-or-multi-service-account-name>"
+AISVC="<ai-services-multi-service-account-name>"
+
 FUNC="<function-app-name>"
 # -----------------------------------
 
