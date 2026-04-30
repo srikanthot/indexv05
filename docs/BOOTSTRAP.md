@@ -24,8 +24,7 @@ long preanalyze takes for your PDFs.
 git pull origin main
 ```
 
-After this, `scripts/assign_roles.sh` and `scripts/assign_roles.ps1`
-should be present.
+After this, `scripts/assign_roles.ps1` should be present.
 
 ---
 
@@ -100,43 +99,34 @@ actually created.
 
 ---
 
-## Step 4 — Edit `scripts/assign_roles.sh`
+## Step 4 — Edit `scripts/assign_roles.ps1`
 
 Open the file in your editor. The top has this block:
 
-```bash
+```powershell
 # ---------- FILL THESE IN ----------
-RG="<your-rg>"                            # fill in: resource group name
-SEARCH="<search-service-name>"            # fill in: Microsoft.Search/searchServices
-STORAGE="<storage-account-name>"          # fill in: Microsoft.Storage/storageAccounts
-AOAI="<aoai-resource-name>"               # fill in: cognitiveservices kind=OpenAI
+$Rg      = '<your-rg>'                            # resource group name
+$Search  = '<search-service-name>'                # Microsoft.Search/searchServices
+$Storage = '<storage-account-name>'               # Microsoft.Storage/storageAccounts
+$Aoai    = '<aoai-resource-name>'                 # cognitiveservices kind=OpenAI
 
-# DI + AISVC: if you have a standalone FormRecognizer AND a separate
+# $Di + $AiSvc: if you have a standalone FormRecognizer AND a separate
 # multi-service CognitiveServices account, fill in those two names.
 # If you have only ONE multi-service CognitiveServices account (common
-# in GCC High / Gov Cloud), set DI and AISVC to the SAME name.
-DI="<di-or-multi-service-account-name>"
-AISVC="<ai-services-multi-service-account-name>"
+# in GCC High / Gov Cloud), set $Di and $AiSvc to the SAME name.
+$Di      = '<di-or-multi-service-account-name>'
+$AiSvc   = '<ai-services-multi-service-account-name>'
 
-FUNC="<function-app-name>"                # fill in: Microsoft.Web/sites
+$Func    = '<function-app-name>'                  # Microsoft.Web/sites
 # -----------------------------------
 ```
 
 Replace each `<...>` with the actual name from Step 3. Don't change
 anything below the dashed line. Save the file.
 
-(PowerShell users: edit `scripts/assign_roles.ps1` instead. Same 7
-variables, same placeholders.)
-
 ---
 
 ## Step 5 — Run the role assignments
-
-```bash
-bash scripts/assign_roles.sh
-```
-
-Or PowerShell:
 
 ```powershell
 .\scripts\assign_roles.ps1
