@@ -91,6 +91,14 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     # collapses whitespace so cell contents survive in a searchable form.
     highlight = build_highlight_text(markdown)
 
+    # Printed page label: tables don't go through extract-page-label,
+    # so we don't have a real DI-extracted label. Synthesize from the
+    # physical page number so the UI never has a blank page indicator
+    # on a table citation. The is_synthetic flag is True so consumers
+    # who care can distinguish from real-extracted labels.
+    printed_label = str(page_start) if page_start is not None else ""
+    printed_label_end = str(page_end) if page_end is not None else printed_label
+
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -105,6 +113,9 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_page": page_start,
         "physical_pdf_page_end": page_end,
         "physical_pdf_pages": pages_covered,
+        "printed_page_label": printed_label,
+        "printed_page_label_end": printed_label_end,
+        "printed_page_label_is_synthetic": bool(printed_label),
         "pdf_total_pages": pdf_total_pages,
         # DI gave us the page_start/end via boundingRegions, so this is
         # always direct-from-DI for tables. Mirrors the same field on

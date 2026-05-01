@@ -164,6 +164,32 @@ check("physical_pdf_page=5", result["physical_pdf_page"] == 5)
 check("physical_pdf_page_end=6", result["physical_pdf_page_end"] == 6, str(result))
 check("physical_pdf_pages=[5,6]", result["physical_pdf_pages"] == [5, 6], str(result))
 check("processing_status=ok", result["processing_status"] == "ok")
+# This chunk crosses page 5 -> 6 and its text contains the
+# <!-- PageNumber="6" --> marker (the page-5 marker was BEFORE this
+# chunk in the section). The label extractor takes the first non-
+# empty marker found inside the chunk, so we expect "6", not "5".
+check("printed_page_label populated from DI marker (=6)",
+      result["printed_page_label"] == "6")
+check("printed_page_label_is_synthetic = False (real DI marker)",
+      result.get("printed_page_label_is_synthetic") is False)
+
+# Synthetic-fallback case: chunk text has no DI marker AND heuristic
+# can't find a label. Fall back to str(physical_pdf_page) so the field
+# is never blank for the citation UI.
+synthetic_result = process_page_label({
+    "page_text": "Just a paragraph with no markers at all. Just words.",
+    "section_content": "Just a paragraph with no markers at all. Just words.",
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/container/manual.pdf",
+    "layout_ordinal": 0,
+    "physical_pdf_page": 42,
+})
+check("synthetic: physical_pdf_page=42",
+      synthetic_result["physical_pdf_page"] == 42)
+check("synthetic: printed_page_label = str(physical_pdf_page)",
+      synthetic_result["printed_page_label"] == "42")
+check("synthetic: printed_page_label_is_synthetic = True",
+      synthetic_result.get("printed_page_label_is_synthetic") is True)
 
 # ---------- 3. printed-label heuristic ----------
 section("3. _extract_label")
@@ -592,6 +618,14 @@ check("dgm: highlight_text present",
       "highlight_text" in dgm)
 check("dgm: highlight_text = '' for no-image path",
       dgm.get("highlight_text") == "")
+# Diagram printed_page_label is always synthesised from the physical
+# page (diagrams don't run through extract-page-label).
+check("dgm: printed_page_label populated from physical page",
+      dgm.get("printed_page_label") == "12")
+check("dgm: printed_page_label_end same as start (single page)",
+      dgm.get("printed_page_label_end") == "12")
+check("dgm: printed_page_label_is_synthetic is True",
+      dgm.get("printed_page_label_is_synthetic") is True)
 
 # Table record
 tbl = process_table({
@@ -631,6 +665,14 @@ check("tbl: table_bbox empty string when no bboxes input",
           "row_count": 1, "col_count": 1, "caption": "",
           "header_1": "", "pdf_total_pages": 10, "bboxes": [],
       }).get("table_bbox") == "")
+# Table printed_page_label is synthesised from page_start (tables don't
+# go through extract-page-label).
+check("tbl: printed_page_label = str(page_start)",
+      tbl.get("printed_page_label") == "5")
+check("tbl: printed_page_label_end = str(page_end)",
+      tbl.get("printed_page_label_end") == "6")
+check("tbl: printed_page_label_is_synthetic is True",
+      tbl.get("printed_page_label_is_synthetic") is True)
 
 # Summary record
 from shared.summary import process_doc_summary

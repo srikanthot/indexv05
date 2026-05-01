@@ -651,11 +651,15 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     # Prefer the explicit `<!-- PageNumber="..." -->` marker from DI when
     # present in the chunk — for technical manuals it holds the printed
     # label the reader would recognise (e.g. "18-33", "iv", "A-12").
-    # Leave the field EMPTY when no real label can be extracted; do NOT
-    # fall back to str(start_page) — that masquerades as a printed label
-    # and makes the UI show "page 205" when no such label exists on the
-    # page (cover, copyright, full-bleed figures, etc.).
+    # If no real label can be extracted, fall back to the physical page
+    # number string. This is a UX requirement from the citation UI:
+    # the field must never be blank for the user, even when the source
+    # page literally doesn't print a label (cover, copyright, full-bleed
+    # figures). The `printed_page_label_is_synthetic` flag below tells
+    # downstream consumers when the label was real vs. synthesised so
+    # they can mark such citations as "approximate" if they want to.
     label = ""
+    label_is_synthetic = False
     for m in PAGE_NUMBER_MARKER_RE.finditer(page_text or ""):
         candidate = (m.group(1) or "").strip()
         if candidate:
@@ -663,13 +667,15 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             break
     if not label:
         label = _extract_label(page_text) or ""
-    # No synthetic fallback to the physical page — empty stays empty.
+    if not label and start_page is not None:
+        label = str(start_page)
+        label_is_synthetic = True
 
     # End-label extraction: for multi-page chunks, first try the last DI
     # PageNumber marker in the chunk (which carries the printed label).
     # Fall back to heuristic parsing of the final segment if there is no
-    # explicit marker. Like `label`, we leave end_label empty rather than
-    # synthesising it from the physical page number.
+    # explicit marker. Same fallback rule as above: synthesize from the
+    # physical page when no real label can be found.
     end_label = ""
     if page_text and end_page is not None and start_page is not None and end_page > start_page:
         last_marker = ""
@@ -678,10 +684,14 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             if cand:
                 last_marker = cand
         end_label = last_marker or (_extract_label(_last_page_segment(page_text)) or "")
-    if not end_label and start_page == end_page:
-        # Single-page chunk: end label mirrors start label (which may be
-        # empty — that's intentional).
-        end_label = label
+    if not end_label:
+        if start_page == end_page:
+            # Single-page chunk: end mirrors start.
+            end_label = label
+        elif end_page is not None:
+            # Multi-page chunk with no extracted end-label: synthesize.
+            end_label = str(end_page)
+            label_is_synthetic = True
 
     # Extract figure references from the text chunk so text records can be
     # cross-referenced with their companion diagram records via figure_ref.
@@ -706,6 +716,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "record_type": "text",
         "printed_page_label": label,
         "printed_page_label_end": end_label,
+        "printed_page_label_is_synthetic": label_is_synthetic,
         "physical_pdf_page": start_page,
         "physical_pdf_page_end": end_page,
         "physical_pdf_pages": pages_covered,

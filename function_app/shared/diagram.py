@@ -192,6 +192,11 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     # across all record types.
     physical_pdf_pages = [page_number] if isinstance(page_number, int) else []
 
+    # Printed page label: diagrams don't run through extract-page-label,
+    # so we synthesize from the physical page number. Same UX rule as
+    # text/table: never blank when we know the page.
+    printed_label = str(page_number) if isinstance(page_number, int) else ""
+
     base_record = {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -202,6 +207,9 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_page": page_number,
         "physical_pdf_page_end": page_number,
         "physical_pdf_pages": physical_pdf_pages,
+        "printed_page_label": printed_label,
+        "printed_page_label_end": printed_label,
+        "printed_page_label_is_synthetic": bool(printed_label),
         "pdf_total_pages": pdf_total_pages,
         # DI gave us the page number directly via boundingRegions, so we
         # treat this as the highest-confidence resolution path. The UI
