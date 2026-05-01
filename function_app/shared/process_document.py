@@ -99,6 +99,14 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
     logging.info("using cached DI result for %s", source_file)
     analyze = cache_data["analyzeResult"]
 
+    # Total physical page count of the source PDF, derived from DI's
+    # `pages[]` array. Embedded into every enriched figure / table dict
+    # and emitted as a top-level output so downstream skills (analyze-
+    # diagram, shape-table, build-doc-summary) can stamp it on every
+    # record without re-fetching the cache.
+    pages_array = analyze.get("pages") or []
+    pdf_total_pages = len(pages_array) if pages_array else None
+
     sections_index = build_section_index(analyze)
 
     enriched_figures: list[dict[str, Any]] = []
@@ -151,6 +159,7 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
             "source_file": source_file,
             "source_path": source_path,
             "parent_id": parent_id,
+            "pdf_total_pages": pdf_total_pages,
         })
 
     enriched_tables: list[dict[str, Any]] = []
@@ -167,12 +176,14 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
             "row_count": tbl["row_count"],
             "col_count": tbl["col_count"],
             "caption": tbl["caption"],
+            "bboxes": tbl.get("bboxes", []),
             "header_1": h1,
             "header_2": h2,
             "header_3": h3,
             "source_file": source_file,
             "source_path": source_path,
             "parent_id": parent_id,
+            "pdf_total_pages": pdf_total_pages,
         })
 
     if skipped_no_polygon:
@@ -182,6 +193,7 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "enriched_figures": enriched_figures,
         "enriched_tables": enriched_tables,
+        "pdf_total_pages": pdf_total_pages,
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
     }

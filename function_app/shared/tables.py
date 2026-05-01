@@ -115,6 +115,54 @@ def _split_oversized(markdown: str) -> list[str]:
     return out
 
 
+def _bboxes_for_cluster(cluster: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build per-page union bboxes for a merged-table cluster.
+
+    A cluster is a list of one-or-more DI tables that we treated as
+    continuations of the same logical table. Each underlying table
+    has its own boundingRegions[*] (one polygon per page it spans);
+    we union them per page so the citation UI can highlight the
+    *whole* table on each page, including continuation pages.
+
+    Returns: list of {page, x_in, y_in, w_in, h_in}, sorted by page.
+    Empty list if no usable bounding regions exist.
+    """
+    by_page: dict[int, tuple[float, float, float, float]] = {}
+    for tbl in cluster:
+        for br in tbl.get("boundingRegions", []) or []:
+            page = br.get("pageNumber")
+            polygon = br.get("polygon") or []
+            if not isinstance(page, int) or len(polygon) < 8:
+                continue
+            try:
+                xs = polygon[0::2]
+                ys = polygon[1::2]
+                x0, x1 = float(min(xs)), float(max(xs))
+                y0, y1 = float(min(ys)), float(max(ys))
+            except (TypeError, ValueError):
+                continue
+            existing = by_page.get(page)
+            if existing is None:
+                by_page[page] = (x0, y0, x1, y1)
+            else:
+                ex0, ey0, ex1, ey1 = existing
+                by_page[page] = (
+                    min(ex0, x0), min(ey0, y0),
+                    max(ex1, x1), max(ey1, y1),
+                )
+    out: list[dict[str, Any]] = []
+    for page in sorted(by_page):
+        x0, y0, x1, y1 = by_page[page]
+        out.append({
+            "page": page,
+            "x_in": round(x0, 3),
+            "y_in": round(y0, 3),
+            "w_in": round(x1 - x0, 3),
+            "h_in": round(y1 - y0, 3),
+        })
+    return out
+
+
 def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Returns a list of table record dicts:
@@ -124,6 +172,10 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         markdown: str,
         row_count, col_count: int,
         caption: str,
+        bboxes: list[{page, x_in, y_in, w_in, h_in}],  # per-page union;
+                                                       # all splits of one
+                                                       # logical table share
+                                                       # the same list.
       }
     """
     raw_tables = analyze_result.get("tables", []) or []
@@ -162,6 +214,7 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         page_end = pages_last[-1] if pages_last else page_start
         caption = _table_caption(first)
         md = _grid_to_markdown(grid)
+        cluster_bboxes = _bboxes_for_cluster(cluster)
 
         for split_idx, chunk in enumerate(_split_oversized(md)):
             # Count data rows in this split chunk (total lines minus header
@@ -175,6 +228,7 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
                 "row_count": chunk_rows,
                 "col_count": len(grid[0]) if grid else 0,
                 "caption": caption,
+                "bboxes": cluster_bboxes,
             })
 
     return out

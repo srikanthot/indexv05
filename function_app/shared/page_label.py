@@ -31,6 +31,7 @@ from .ids import (
     text_chunk_id,
 )
 from .sections import build_section_index
+from .text_utils import build_highlight_text
 
 # ---------- printed-label heuristics ----------
 
@@ -231,33 +232,12 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
     return out
 
 
-_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", re.DOTALL)
-_MD_HEADER_RE = re.compile(r"^\s*#{1,6}\s*", re.MULTILINE)
-_MD_LIST_RE = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
-_WS_RE = re.compile(r"\s+")
-
-
-def _build_highlight_text(chunk_text: str) -> str:
-    """Strip markdown / DI markers / collapse whitespace so the result is
-    a plain-text string the front-end can pass to PDF.js findController
-    or to `#search=` URL fragments for in-viewer highlighting.
-
-    Stays human-readable so it can also be shown verbatim in citation
-    snippets. Cap length conservatively to avoid bloating index docs.
-    """
-    if not chunk_text:
-        return ""
-    s = PAGE_NUMBER_MARKER_RE.sub("", chunk_text)
-    s = PAGE_BREAK_MARKER_RE.sub("", s)
-    s = _MD_HEADER_RE.sub("", s)
-    s = _MD_LIST_RE.sub("", s)
-    s = _MD_BOLD_RE.sub(r"\1", s)
-    s = _MD_ITALIC_RE.sub(r"\1", s)
-    s = _WS_RE.sub(" ", s).strip()
-    # Hard cap to keep index size bounded; chunks themselves are ~1200
-    # chars so this is rarely engaged, but it's a safety belt.
-    return s[:2000]
+# Highlight-text construction is shared with diagram / table / summary
+# skills via shared.text_utils.build_highlight_text — that helper does
+# the same markdown/DI-marker stripping plus Unicode NFC normalize,
+# soft-hyphen drop, smart-quote → ASCII, end-of-line hyphenation join,
+# and control-character stripping. Importing instead of duplicating
+# keeps the four record types' highlight contracts identical.
 
 
 def _normalize_text(s: str) -> str:
@@ -715,7 +695,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
 
     # Highlight + bbox + total-pages: new fields to support precise
     # client-side highlighting in the citation UI.
-    highlight_text = _build_highlight_text(page_text)
+    highlight_text = build_highlight_text(page_text)
     text_bbox_list = _text_bbox_for_chunk(page_text, source_path)
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
     pdf_total_pages = _pdf_total_pages_for(source_path)

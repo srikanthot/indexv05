@@ -496,6 +496,164 @@ check("optional_env returns default", optional_env("UNSET_VAR_X", "fallback") ==
 check("feature_enabled false when missing", feature_enabled("UNSET_VAR_X", "UNSET_VAR_Y") is False)
 
 
+# ---------- 14. text_utils.build_highlight_text ----------
+section("14. build_highlight_text")
+from shared.text_utils import build_highlight_text
+
+# Empty / None input
+check("None -> ''", build_highlight_text(None) == "")
+check("empty -> ''", build_highlight_text("") == "")
+check("whitespace -> ''", build_highlight_text("   \n\t  ") == "")
+
+# DI markers stripped
+md_with_markers = (
+    '<!-- PageNumber="iv" -->\n'
+    "# Heading\n"
+    "Paragraph text.\n"
+    "<!-- PageBreak -->\n"
+    "More text."
+)
+out = build_highlight_text(md_with_markers)
+check("DI PageNumber marker stripped", "PageNumber" not in out)
+check("DI PageBreak marker stripped", "PageBreak" not in out)
+check("markdown header marker '#' stripped", "#" not in out)
+check("paragraph content survives", "Paragraph text." in out)
+
+# Smart quotes -> ASCII
+smart = "He said “hello” and ‘goodbye’ — see page 5"
+out = build_highlight_text(smart)
+check("smart double quotes -> ASCII", '"hello"' in out)
+check("smart single quotes -> ASCII", "'goodbye'" in out)
+check("em dash -> ASCII hyphen", " - " in out)
+
+# End-of-line hyphen joining (lowercase next line only)
+hyph = "This is a sen-\ntence and ano-\nther one."
+out = build_highlight_text(hyph)
+check("eol hyphen joins lowercase continuation", "sentence" in out and "another" in out)
+
+# Real hyphens preserved (next char uppercase / digit)
+keep = "Use 32-bit mode and Class-A wiring per Figure 3-2."
+out = build_highlight_text(keep)
+check("32-bit hyphen preserved", "32-bit" in out)
+check("Class-A hyphen preserved", "Class-A" in out)
+check("Figure 3-2 hyphen preserved", "3-2" in out)
+
+# Soft hyphen + NBSP + zero-width chars dropped
+weird = "soft­hyphen non breaking zero​width"
+out = build_highlight_text(weird)
+check("soft hyphen dropped", "softhyphen" in out)
+check("NBSP -> space", "non breaking" in out)
+check("zero-width space dropped", "zerowidth" in out)
+
+# Unicode NFC normalization (NFD 'é' should become NFC 'é')
+nfd = "café latte"   # 'cafe' + combining acute
+out = build_highlight_text(nfd)
+check("NFD -> NFC normalizes combining marks", "café" in out)
+
+# Idempotence
+once = build_highlight_text(md_with_markers)
+twice = build_highlight_text(once)
+check("build_highlight_text is idempotent", once == twice)
+
+# Length cap
+big = "a" * 5000
+out = build_highlight_text(big)
+check("length cap at 2000", len(out) <= 2000)
+
+
+# ---------- 15. record-type field parity ----------
+# The citation UI wants the same field set on every record_type so it
+# does not need per-type special cases. Lock that contract here.
+section("15. record-type field parity")
+
+# Diagram record (process_diagram entry point — no_image fast path is
+# enough to exercise field surface without needing a real image).
+from shared.diagram import process_diagram
+dgm = process_diagram({
+    "image_b64": "",
+    "figure_id": "fig_1",
+    "page_number": 12,
+    "caption": "",
+    "header_1": "Section A",
+    "source_file": "test.pdf",
+    "source_path": "https://example/test.pdf",
+    "parent_id": "p1",
+    "pdf_total_pages": 100,
+})
+check("dgm: physical_pdf_pages is a list",
+      isinstance(dgm.get("physical_pdf_pages"), list))
+check("dgm: physical_pdf_pages = [page]",
+      dgm.get("physical_pdf_pages") == [12])
+check("dgm: pdf_total_pages plumbed",
+      dgm.get("pdf_total_pages") == 100)
+check("dgm: page_resolution_method = 'di_input'",
+      dgm.get("page_resolution_method") == "di_input")
+check("dgm: highlight_text present",
+      "highlight_text" in dgm)
+check("dgm: highlight_text = '' for no-image path",
+      dgm.get("highlight_text") == "")
+
+# Table record
+tbl = process_table({
+    "source_file": "test.pdf",
+    "source_path": "https://example/test.pdf",
+    "parent_id": "p1",
+    "table_index": "0_0",
+    "page_start": 5,
+    "page_end": 6,
+    "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+    "row_count": 1,
+    "col_count": 2,
+    "caption": "Test table",
+    "header_1": "Section A",
+    "pdf_total_pages": 100,
+    "bboxes": [
+        {"page": 5, "x_in": 1.0, "y_in": 2.0, "w_in": 3.0, "h_in": 4.0},
+        {"page": 6, "x_in": 1.0, "y_in": 2.0, "w_in": 3.0, "h_in": 1.0},
+    ],
+})
+check("tbl: physical_pdf_pages=[5,6]",
+      tbl.get("physical_pdf_pages") == [5, 6])
+check("tbl: pdf_total_pages plumbed",
+      tbl.get("pdf_total_pages") == 100)
+check("tbl: page_resolution_method = 'di_input'",
+      tbl.get("page_resolution_method") == "di_input")
+check("tbl: highlight_text present and non-empty",
+      tbl.get("highlight_text", "") != "")
+check("tbl: table_bbox is JSON string with 2 entries",
+      isinstance(tbl.get("table_bbox"), str)
+      and len(json.loads(tbl["table_bbox"])) == 2)
+check("tbl: table_bbox empty string when no bboxes input",
+      process_table({
+          "source_file": "x.pdf", "source_path": "x", "parent_id": "p",
+          "table_index": "0_0", "page_start": 1, "page_end": 1,
+          "markdown": "| a |\n|---|\n| b |",
+          "row_count": 1, "col_count": 1, "caption": "",
+          "header_1": "", "pdf_total_pages": 10, "bboxes": [],
+      }).get("table_bbox") == "")
+
+# Summary record
+from shared.summary import process_doc_summary
+sum_rec = process_doc_summary({
+    "source_file": "test.pdf",
+    "source_path": "https://example/test.pdf",
+    "markdown_text": "",          # no_content fast path
+    "section_titles": [],
+    "pdf_total_pages": 100,
+})
+check("sum: pdf_total_pages plumbed",
+      sum_rec.get("pdf_total_pages") == 100)
+check("sum: highlight_text present (empty for no_content path)",
+      sum_rec.get("highlight_text") == "")
+
+# Unified contract: every record-type carries pdf_total_pages and highlight_text
+for rec_name, rec in [("dgm", dgm), ("tbl", tbl), ("sum", sum_rec)]:
+    check(f"{rec_name}: has 'pdf_total_pages' field",
+          "pdf_total_pages" in rec)
+    check(f"{rec_name}: has 'highlight_text' field",
+          "highlight_text" in rec)
+
+
 # ---------- summary ----------
 print()
 total = passed + len(failures)

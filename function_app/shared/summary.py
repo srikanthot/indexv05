@@ -11,9 +11,11 @@ from .aoai import chat_deployment, get_client
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
+    safe_int,
     safe_str,
     summary_chunk_id,
 )
+from .text_utils import build_highlight_text
 
 SYSTEM_PROMPT = """You are a technical-manual summarizer.
 
@@ -52,6 +54,7 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     markdown_text = _coalesce_markdown(data.get("markdown_text"))
     primary_text = markdown_text.strip()
     titles = _coerce_titles(data.get("section_titles"))
+    pdf_total_pages = safe_int(data.get("pdf_total_pages"), default=None)
 
     parent_id = parent_id_for(source_path, source_file)
     chunk_id = summary_chunk_id(source_path, source_file)
@@ -63,6 +66,8 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             "record_type": "summary",
             "chunk": "",
             "chunk_for_semantic": f"Source: {source_file}\nSummary unavailable.",
+            "highlight_text": "",
+            "pdf_total_pages": pdf_total_pages,
             "processing_status": "no_content",
             "skill_version": SKILL_VERSION,
         }
@@ -107,6 +112,8 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "record_type": "summary",
         "chunk": summary_text,
         "chunk_for_semantic": semantic,
+        "highlight_text": build_highlight_text(summary_text),
+        "pdf_total_pages": pdf_total_pages,
         "processing_status": status,
         "skill_version": SKILL_VERSION,
     }

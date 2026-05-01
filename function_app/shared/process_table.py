@@ -6,6 +6,7 @@ the index-projection-ready record (chunk_id, chunk, chunk_for_semantic,
 headers, page span, table_caption, etc.).
 """
 
+import json
 from typing import Any
 
 from .ids import (
@@ -15,6 +16,7 @@ from .ids import (
     safe_str,
     table_chunk_id,
 )
+from .text_utils import build_highlight_text
 
 
 def _build_semantic(record: dict[str, Any]) -> str:
@@ -56,6 +58,16 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     h1 = safe_str(data.get("header_1"))
     h2 = safe_str(data.get("header_2"))
     h3 = safe_str(data.get("header_3"))
+    pdf_total_pages = safe_int(data.get("pdf_total_pages"), default=None)
+
+    # Per-page bboxes for the full table (cluster-level union — every
+    # split of one logical table shares the same list). Front-end uses
+    # this to draw highlight rectangles on each page the table spans.
+    bboxes_in = data.get("bboxes")
+    bboxes_list: list[dict[str, Any]] = []
+    if isinstance(bboxes_in, list):
+        bboxes_list = [b for b in bboxes_in if isinstance(b, dict)]
+    table_bbox_json = json.dumps(bboxes_list, separators=(",", ":")) if bboxes_list else ""
 
     chunk_id = table_chunk_id(source_path, source_file, table_index)
     chunk_for_semantic = _build_semantic({
@@ -73,18 +85,31 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             hi = page_start
         pages_covered = list(range(page_start, hi + 1))
 
+    # Highlight text: sanitized markdown so PDF.js / Acrobat search can
+    # match against the rendered PDF text layer. Tables are markdown
+    # pipe-tables; build_highlight_text strips markdown syntax and
+    # collapses whitespace so cell contents survive in a searchable form.
+    highlight = build_highlight_text(markdown)
+
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
         "record_type": "table",
         "chunk": markdown,
         "chunk_for_semantic": chunk_for_semantic,
+        "highlight_text": highlight,
+        "table_bbox": table_bbox_json,
         "header_1": h1,
         "header_2": h2,
         "header_3": h3,
         "physical_pdf_page": page_start,
         "physical_pdf_page_end": page_end,
         "physical_pdf_pages": pages_covered,
+        "pdf_total_pages": pdf_total_pages,
+        # DI gave us the page_start/end via boundingRegions, so this is
+        # always direct-from-DI for tables. Mirrors the same field on
+        # diagram and text records for a uniform UI signal.
+        "page_resolution_method": "di_input" if page_start is not None else "missing",
         "table_row_count": row_count,
         "table_col_count": col_count,
         "table_caption": caption,

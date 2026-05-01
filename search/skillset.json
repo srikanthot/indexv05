@@ -53,6 +53,7 @@
       "outputs": [
         { "name": "enriched_figures", "targetName": "enriched_figures" },
         { "name": "enriched_tables", "targetName": "enriched_tables" },
+        { "name": "pdf_total_pages", "targetName": "pdf_total_pages" },
         { "name": "processing_status", "targetName": "doc_processing_status" },
         { "name": "skill_version", "targetName": "doc_skill_version" }
       ]
@@ -120,7 +121,8 @@
         { "name": "surrounding_context", "source": "/document/enriched_figures/*/surrounding_context" },
         { "name": "source_file", "source": "/document/enriched_figures/*/source_file" },
         { "name": "source_path", "source": "/document/enriched_figures/*/source_path" },
-        { "name": "parent_id", "source": "/document/enriched_figures/*/parent_id" }
+        { "name": "parent_id", "source": "/document/enriched_figures/*/parent_id" },
+        { "name": "pdf_total_pages", "source": "/document/enriched_figures/*/pdf_total_pages" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "dgm_chunk_id" },
@@ -131,6 +133,10 @@
         { "name": "image_hash", "targetName": "dgm_image_hash" },
         { "name": "physical_pdf_page", "targetName": "dgm_physical_pdf_page" },
         { "name": "physical_pdf_page_end", "targetName": "dgm_physical_pdf_page_end" },
+        { "name": "physical_pdf_pages", "targetName": "dgm_physical_pdf_pages" },
+        { "name": "pdf_total_pages", "targetName": "dgm_pdf_total_pages" },
+        { "name": "page_resolution_method", "targetName": "dgm_page_resolution_method" },
+        { "name": "highlight_text", "targetName": "dgm_highlight_text" },
         { "name": "header_1", "targetName": "dgm_header_1" },
         { "name": "header_2", "targetName": "dgm_header_2" },
         { "name": "header_3", "targetName": "dgm_header_3" },
@@ -162,12 +168,14 @@
         { "name": "row_count", "source": "/document/enriched_tables/*/row_count" },
         { "name": "col_count", "source": "/document/enriched_tables/*/col_count" },
         { "name": "caption", "source": "/document/enriched_tables/*/caption" },
+        { "name": "bboxes", "source": "/document/enriched_tables/*/bboxes" },
         { "name": "header_1", "source": "/document/enriched_tables/*/header_1" },
         { "name": "header_2", "source": "/document/enriched_tables/*/header_2" },
         { "name": "header_3", "source": "/document/enriched_tables/*/header_3" },
         { "name": "source_file", "source": "/document/enriched_tables/*/source_file" },
         { "name": "source_path", "source": "/document/enriched_tables/*/source_path" },
-        { "name": "parent_id", "source": "/document/enriched_tables/*/parent_id" }
+        { "name": "parent_id", "source": "/document/enriched_tables/*/parent_id" },
+        { "name": "pdf_total_pages", "source": "/document/enriched_tables/*/pdf_total_pages" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "tbl_chunk_id" },
@@ -175,12 +183,16 @@
         { "name": "record_type", "targetName": "tbl_record_type" },
         { "name": "chunk", "targetName": "tbl_chunk" },
         { "name": "chunk_for_semantic", "targetName": "tbl_chunk_for_semantic" },
+        { "name": "highlight_text", "targetName": "tbl_highlight_text" },
+        { "name": "table_bbox", "targetName": "tbl_table_bbox" },
         { "name": "header_1", "targetName": "tbl_header_1" },
         { "name": "header_2", "targetName": "tbl_header_2" },
         { "name": "header_3", "targetName": "tbl_header_3" },
         { "name": "physical_pdf_page", "targetName": "tbl_physical_pdf_page" },
         { "name": "physical_pdf_page_end", "targetName": "tbl_physical_pdf_page_end" },
         { "name": "physical_pdf_pages", "targetName": "tbl_physical_pdf_pages" },
+        { "name": "pdf_total_pages", "targetName": "tbl_pdf_total_pages" },
+        { "name": "page_resolution_method", "targetName": "tbl_page_resolution_method" },
         { "name": "table_row_count", "targetName": "tbl_row_count" },
         { "name": "table_col_count", "targetName": "tbl_col_count" },
         { "name": "table_caption", "targetName": "tbl_caption" },
@@ -251,7 +263,8 @@
         { "name": "source_file", "source": "/document/metadata_storage_name" },
         { "name": "source_path", "source": "/document/metadata_storage_path" },
         { "name": "markdown_text", "source": "/document/markdownDocument/*/content" },
-        { "name": "section_titles", "source": "/document/markdownDocument/*/sections/h1" }
+        { "name": "section_titles", "source": "/document/markdownDocument/*/sections/h1" },
+        { "name": "pdf_total_pages", "source": "/document/pdf_total_pages" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "sum_chunk_id" },
@@ -259,6 +272,8 @@
         { "name": "record_type", "targetName": "sum_record_type" },
         { "name": "chunk", "targetName": "sum_chunk" },
         { "name": "chunk_for_semantic", "targetName": "sum_chunk_for_semantic" },
+        { "name": "highlight_text", "targetName": "sum_highlight_text" },
+        { "name": "pdf_total_pages", "targetName": "sum_pdf_total_pages" },
         { "name": "processing_status", "targetName": "sum_processing_status" },
         { "name": "skill_version", "targetName": "sum_skill_version" }
       ]
@@ -387,6 +402,10 @@
           { "name": "source_path", "source": "/document/enriched_figures/*/source_path" },
           { "name": "physical_pdf_page", "source": "/document/enriched_figures/*/dgm_physical_pdf_page" },
           { "name": "physical_pdf_page_end", "source": "/document/enriched_figures/*/dgm_physical_pdf_page_end" },
+          { "name": "physical_pdf_pages", "source": "/document/enriched_figures/*/dgm_physical_pdf_pages" },
+          { "name": "pdf_total_pages", "source": "/document/enriched_figures/*/dgm_pdf_total_pages" },
+          { "name": "page_resolution_method", "source": "/document/enriched_figures/*/dgm_page_resolution_method" },
+          { "name": "highlight_text", "source": "/document/enriched_figures/*/dgm_highlight_text" },
           { "name": "header_1", "source": "/document/enriched_figures/*/dgm_header_1" },
           { "name": "header_2", "source": "/document/enriched_figures/*/dgm_header_2" },
           { "name": "header_3", "source": "/document/enriched_figures/*/dgm_header_3" },
@@ -423,6 +442,10 @@
           { "name": "physical_pdf_page", "source": "/document/enriched_tables/*/tbl_physical_pdf_page" },
           { "name": "physical_pdf_page_end", "source": "/document/enriched_tables/*/tbl_physical_pdf_page_end" },
           { "name": "physical_pdf_pages", "source": "/document/enriched_tables/*/tbl_physical_pdf_pages" },
+          { "name": "pdf_total_pages", "source": "/document/enriched_tables/*/tbl_pdf_total_pages" },
+          { "name": "page_resolution_method", "source": "/document/enriched_tables/*/tbl_page_resolution_method" },
+          { "name": "highlight_text", "source": "/document/enriched_tables/*/tbl_highlight_text" },
+          { "name": "table_bbox", "source": "/document/enriched_tables/*/tbl_table_bbox" },
           { "name": "table_row_count", "source": "/document/enriched_tables/*/tbl_row_count" },
           { "name": "table_col_count", "source": "/document/enriched_tables/*/tbl_col_count" },
           { "name": "table_caption", "source": "/document/enriched_tables/*/tbl_caption" },
@@ -448,6 +471,8 @@
           { "name": "parent_id", "source": "/document/sum_parent_id" },
           { "name": "chunk", "source": "/document/sum_chunk" },
           { "name": "chunk_for_semantic", "source": "/document/sum_chunk_for_semantic" },
+          { "name": "highlight_text", "source": "/document/sum_highlight_text" },
+          { "name": "pdf_total_pages", "source": "/document/sum_pdf_total_pages" },
           { "name": "text_vector", "source": "/document/sum_text_vector" },
           { "name": "processing_status", "source": "/document/sum_processing_status" },
           { "name": "skill_version", "source": "/document/sum_skill_version" }

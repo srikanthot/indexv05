@@ -31,6 +31,7 @@ from .ids import (
     safe_str,
 )
 from .search_cache import lookup_existing_by_hash
+from .text_utils import build_highlight_text
 
 VALID_CATEGORIES = {
     "circuit_diagram",
@@ -178,11 +179,18 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
     parent_id = safe_str(data.get("parent_id"))
+    pdf_total_pages = safe_int(data.get("pdf_total_pages"), default=None)
     bbox = data.get("bbox") or {}
     bbox_json = json.dumps(bbox, separators=(",", ":")) if bbox else ""
 
     img_hash = _image_hash(image_b64)
     chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
+
+    # Diagrams always live on a single physical page, so physical_pdf_pages
+    # is a single-element list. Kept for parity with text/table records so
+    # the UI can use the same `physical_pdf_pages/any(...)` filter pattern
+    # across all record types.
+    physical_pdf_pages = [page_number] if isinstance(page_number, int) else []
 
     base_record = {
         "chunk_id": chunk_id,
@@ -193,12 +201,26 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "image_hash": img_hash,
         "physical_pdf_page": page_number,
         "physical_pdf_page_end": page_number,
+        "physical_pdf_pages": physical_pdf_pages,
+        "pdf_total_pages": pdf_total_pages,
+        # DI gave us the page number directly via boundingRegions, so we
+        # treat this as the highest-confidence resolution path. The UI
+        # can use `page_resolution_method == "di_input"` as a green flag
+        # for citation links across record types.
+        "page_resolution_method": "di_input" if isinstance(page_number, int) else "missing",
         "header_1": h1,
         "header_2": h2,
         "header_3": h3,
         "surrounding_context": surrounding,
         "skill_version": SKILL_VERSION,
     }
+
+    def _finalize(record: dict[str, Any]) -> dict[str, Any]:
+        """Stamp highlight_text onto the record from its description.
+        Centralized so every return path of this function emits the
+        same sanitized highlight string the citation UI consumes."""
+        record["highlight_text"] = build_highlight_text(record.get("diagram_description", ""))
+        return record
 
     if not image_b64:
         # Try fetching the crop from blob cache (pre-computed by preanalyze)
@@ -221,28 +243,28 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 base_record["figure_bbox"] = bbox_json
 
     if not image_b64:
-        return {
+        return _finalize({
             **base_record,
             "has_diagram": False,
             "diagram_description": "",
             "diagram_category": "unknown",
             "figure_ref": "",
             "processing_status": "no_image",
-        }
+        })
 
     # ── Image triage: skip tiny crops ──
     try:
         raw_png = base64.b64decode(image_b64)
         if len(raw_png) < MIN_CROP_BYTES:
             logging.info("triage skip (tiny %d bytes) for %s/%s", len(raw_png), source_file, figure_id)
-            return {
+            return _finalize({
                 **base_record,
                 "has_diagram": False,
                 "diagram_description": "",
                 "diagram_category": "decorative",
                 "figure_ref": "",
                 "processing_status": "skipped_tiny",
-            }
+            })
     except Exception:
         pass
 
@@ -275,37 +297,37 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             base_record["image_hash"] = img_hash
 
             logging.info("using precomputed vision for %s/%s", source_file, figure_id)
-            return {
+            return _finalize({
                 **base_record,
                 "has_diagram": p_has_diagram,
                 "diagram_description": full_desc,
                 "diagram_category": p_category,
                 "figure_ref": p_figure_ref,
                 "processing_status": "precomputed",
-            }
+            })
 
     cached = lookup_existing_by_hash(parent_id, img_hash)
     if cached:
-        return {
+        return _finalize({
             **base_record,
             "has_diagram": bool(cached.get("has_diagram")),
             "diagram_description": safe_str(cached.get("diagram_description")),
             "diagram_category": safe_str(cached.get("diagram_category"), "unknown"),
             "figure_ref": safe_str(cached.get("figure_ref")),
             "processing_status": "cache_hit",
-        }
+        })
 
     try:
         result = _call_vision(image_b64, _build_user_text(data))
     except Exception as exc:
-        return {
+        return _finalize({
             **base_record,
             "has_diagram": False,
             "diagram_description": "",
             "diagram_category": "unknown",
             "figure_ref": "",
             "processing_status": f"vision_error:{type(exc).__name__}",
-        }
+        })
 
     category = (result.get("category") or "unknown").strip().lower()
     if category not in VALID_CATEGORIES:
@@ -330,11 +352,11 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     if ocr_text:
         full_description = f"{description}\nLabels: {ocr_text}"
 
-    return {
+    return _finalize({
         **base_record,
         "has_diagram": has_diagram,
         "diagram_description": full_description,
         "diagram_category": category,
         "figure_ref": figure_ref,
         "processing_status": "ok" if has_diagram else "skipped_decorative",
-    }
+    })
