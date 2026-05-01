@@ -89,6 +89,10 @@
         { "name": "physical_pdf_page_end", "targetName": "text_physical_pdf_page_end" },
         { "name": "physical_pdf_pages", "targetName": "text_physical_pdf_pages" },
         { "name": "figure_ref", "targetName": "text_figure_ref" },
+        { "name": "highlight_text", "targetName": "text_highlight_text" },
+        { "name": "text_bbox", "targetName": "text_text_bbox" },
+        { "name": "pdf_total_pages", "targetName": "text_pdf_total_pages" },
+        { "name": "page_resolution_method", "targetName": "text_page_resolution_method" },
         { "name": "processing_status", "targetName": "text_processing_status" },
         { "name": "skill_version", "targetName": "text_skill_version" }
       ]
@@ -361,6 +365,10 @@
           { "name": "parent_id", "source": "/document/markdownDocument/*/pages/*/text_parent_id" },
           { "name": "chunk", "source": "/document/markdownDocument/*/pages/*" },
           { "name": "chunk_for_semantic", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" },
+          { "name": "highlight_text", "source": "/document/markdownDocument/*/pages/*/text_highlight_text" },
+          { "name": "text_bbox", "source": "/document/markdownDocument/*/pages/*/text_text_bbox" },
+          { "name": "pdf_total_pages", "source": "/document/markdownDocument/*/pages/*/text_pdf_total_pages" },
+          { "name": "page_resolution_method", "source": "/document/markdownDocument/*/pages/*/text_page_resolution_method" },
           { "name": "text_vector", "source": "/document/markdownDocument/*/pages/*/text_vector" },
           { "name": "processing_status", "source": "/document/markdownDocument/*/pages/*/text_processing_status" },
           { "name": "skill_version", "source": "/document/markdownDocument/*/pages/*/text_skill_version" }

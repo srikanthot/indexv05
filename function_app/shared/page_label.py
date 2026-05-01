@@ -17,10 +17,12 @@ walk the marker timeline to figure out which page it starts on and which
 page it ends on.
 """
 
+import json
 import logging
 import re
 from typing import Any
 
+from .di_client import fetch_cached_analysis
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
@@ -28,7 +30,6 @@ from .ids import (
     safe_str,
     text_chunk_id,
 )
-from .di_client import fetch_cached_analysis
 from .sections import build_section_index
 
 # ---------- printed-label heuristics ----------
@@ -80,7 +81,36 @@ from collections import OrderedDict
 # in one lifetime (e.g. after a long indexer run) would otherwise hold
 # every section index it has ever seen in memory. Cap at 20 PDFs.
 _SECTION_INDEX_CACHE: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
+_ANALYSIS_CACHE: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
 _SECTION_INDEX_CACHE_MAX = 20
+
+
+def _analysis_for(source_path: str) -> dict[str, Any] | None:
+    """Fetch and cache the raw DI analyzeResult for a PDF.
+
+    Returned shape is the analyzeResult itself (so callers can read
+    `paragraphs`, `pages`, `sections`, etc. uniformly without the
+    top-level `analyzeResult` wrapper).
+    """
+    if not source_path:
+        return None
+    if source_path in _ANALYSIS_CACHE:
+        _ANALYSIS_CACHE.move_to_end(source_path)
+        return _ANALYSIS_CACHE[source_path]
+    try:
+        analyze = fetch_cached_analysis(source_path)
+        result = None
+        if analyze:
+            result = analyze.get("analyzeResult") if isinstance(analyze, dict) else None
+            result = result or analyze
+    except Exception as exc:
+        logging.warning("page_label: failed to fetch DI cache for %s: %s",
+                        source_path, exc)
+        result = None
+    _ANALYSIS_CACHE[source_path] = result
+    if len(_ANALYSIS_CACHE) > _SECTION_INDEX_CACHE_MAX:
+        _ANALYSIS_CACHE.popitem(last=False)
+    return result
 
 
 def _sections_for(source_path: str) -> list[dict[str, Any]]:
@@ -90,24 +120,144 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
     if cached is not None:
         _SECTION_INDEX_CACHE.move_to_end(source_path)
         return cached
-    try:
-        analyze = fetch_cached_analysis(source_path)
-        if not analyze:
-            _SECTION_INDEX_CACHE[source_path] = []
-            if len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
-                _SECTION_INDEX_CACHE.popitem(last=False)
-            return []
-        result = analyze.get("analyzeResult") if isinstance(analyze, dict) else None
-        result = result or analyze
-        sections = build_section_index(result)
-    except Exception as exc:
-        logging.warning("page_label: failed to fetch DI cache for %s: %s",
-                        source_path, exc)
-        sections = []
+    result = _analysis_for(source_path)
+    sections: list[dict[str, Any]] = []
+    if result:
+        try:
+            sections = build_section_index(result)
+        except Exception as exc:
+            logging.warning("page_label: failed to build sections for %s: %s",
+                            source_path, exc)
+            sections = []
     _SECTION_INDEX_CACHE[source_path] = sections
     if len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
         _SECTION_INDEX_CACHE.popitem(last=False)
     return sections
+
+
+def _pdf_total_pages_for(source_path: str) -> int | None:
+    """Total physical page count of the source PDF (from DI cache).
+
+    Used by UIs to render '<page X> of <total>' citations and to
+    detect drift when our computed `physical_pdf_page` exceeds the
+    actual PDF length.
+    """
+    result = _analysis_for(source_path)
+    if not result:
+        return None
+    pages = result.get("pages") or []
+    return len(pages) if pages else None
+
+
+def _bbox_from_polygon(polygon: list[float]) -> tuple[float, float, float, float] | None:
+    """Convert DI's 8-number polygon (x1,y1,...,x4,y4 in inches) to
+    an axis-aligned (x, y, w, h) bbox. Returns None on malformed input."""
+    if not polygon or len(polygon) < 8:
+        return None
+    try:
+        xs = polygon[0::2]
+        ys = polygon[1::2]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        return (float(x0), float(y0), float(x1 - x0), float(y1 - y0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, Any]]:
+    """Find DI paragraphs whose content appears in this chunk and return
+    a per-page union bbox suitable for the front-end to render highlight
+    rectangles on the rendered PDF page.
+
+    Output shape: list of {page, x_in, y_in, w_in, h_in}, one entry per
+    distinct page the chunk touches. Empty list if we can't resolve.
+
+    Matching is fuzzy by design — DI paragraphs and the SplitSkill chunk
+    are derived from the same source but reformatted differently. We
+    require ≥10-char paragraphs and check that a 60-char prefix of the
+    paragraph appears in the chunk's normalized form.
+    """
+    if not chunk_text or not source_path:
+        return []
+    result = _analysis_for(source_path)
+    if not result:
+        return []
+    paragraphs = result.get("paragraphs") or []
+    if not paragraphs:
+        return []
+
+    chunk_norm = _normalize_text(chunk_text)
+    if not chunk_norm:
+        return []
+
+    bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    for para in paragraphs:
+        content = (para.get("content") or "").strip()
+        if not content or len(content) < 10:
+            continue
+        para_norm = _normalize_text(content)
+        if not para_norm:
+            continue
+        # Use a prefix probe so longer paragraphs that span chunk
+        # boundaries still match. 60 chars is enough to be specific
+        # without missing partial overlaps.
+        probe = para_norm[:60]
+        if probe not in chunk_norm:
+            continue
+        for region in para.get("boundingRegions") or []:
+            page = region.get("pageNumber")
+            polygon = region.get("polygon") or []
+            if not isinstance(page, int):
+                continue
+            bb = _bbox_from_polygon(polygon)
+            if bb is None:
+                continue
+            bboxes_by_page.setdefault(page, []).append(bb)
+
+    out: list[dict[str, Any]] = []
+    for page in sorted(bboxes_by_page):
+        bxs = bboxes_by_page[page]
+        x0 = min(b[0] for b in bxs)
+        y0 = min(b[1] for b in bxs)
+        x1 = max(b[0] + b[2] for b in bxs)
+        y1 = max(b[1] + b[3] for b in bxs)
+        out.append({
+            "page": page,
+            "x_in": round(x0, 3),
+            "y_in": round(y0, 3),
+            "w_in": round(x1 - x0, 3),
+            "h_in": round(y1 - y0, 3),
+        })
+    return out
+
+
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", re.DOTALL)
+_MD_HEADER_RE = re.compile(r"^\s*#{1,6}\s*", re.MULTILINE)
+_MD_LIST_RE = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
+_WS_RE = re.compile(r"\s+")
+
+
+def _build_highlight_text(chunk_text: str) -> str:
+    """Strip markdown / DI markers / collapse whitespace so the result is
+    a plain-text string the front-end can pass to PDF.js findController
+    or to `#search=` URL fragments for in-viewer highlighting.
+
+    Stays human-readable so it can also be shown verbatim in citation
+    snippets. Cap length conservatively to avoid bloating index docs.
+    """
+    if not chunk_text:
+        return ""
+    s = PAGE_NUMBER_MARKER_RE.sub("", chunk_text)
+    s = PAGE_BREAK_MARKER_RE.sub("", s)
+    s = _MD_HEADER_RE.sub("", s)
+    s = _MD_LIST_RE.sub("", s)
+    s = _MD_BOLD_RE.sub(r"\1", s)
+    s = _MD_ITALIC_RE.sub(r"\1", s)
+    s = _WS_RE.sub(" ", s).strip()
+    # Hard cap to keep index size bounded; chunks themselves are ~1200
+    # chars so this is rarely engaged, but it's a safety belt.
+    return s[:2000]
 
 
 def _normalize_text(s: str) -> str:
@@ -136,24 +286,22 @@ def _find_section_start_page(
     header_1: str = "",
     header_2: str = "",
     header_3: str = "",
-) -> int | None:
+) -> tuple[int | None, str]:
     """Look up this chunk's section in the DI cache and return its
-    page_start. Match strategy, in order of reliability:
+    page_start plus a method tag describing which strategy hit:
 
-      1. Exact match on (header_1, header_2, header_3) tuple. Headers
-         are the same tokens the skillset uses for text projection, so
-         if they are populated they are the most reliable link between
-         a chunk and a DI section.
-      2. Exact match on (header_1, header_2) when h3 is missing.
-      3. Exact match on header_1 alone.
-      4. Fuzzy content substring match after aggressive normalization.
+      - "header_match" : exact match on h1+h2+h3, h1+h2, or h1 alone
+      - "fuzzy_match"  : content substring after aggressive normalization
+      - "missing"      : nothing matched
 
-    Returns None if no strategy matches (e.g. chunk has no headers AND
-    DI section paragraph concat diverges heavily from markdown output).
+    The method tag is surfaced as the `page_resolution_method` field
+    on each text record so UIs can decide whether to render a citation
+    link with high confidence ("header_match") or de-emphasize it
+    ("fuzzy_match" / "missing").
     """
     sections = _sections_for(source_path)
     if not sections:
-        return None
+        return None, "missing"
 
     def _first_page(matches: list[dict[str, Any]]) -> int | None:
         for s in matches:
@@ -183,7 +331,7 @@ def _find_section_start_page(
         ]
         p = _first_page(tier1)
         if p is not None:
-            return p
+            return p, "header_match"
         # Tier 2: h1+h2 (chunks sometimes lose h3 at the split boundary)
         if h1 or h2:
             tier2 = [
@@ -193,20 +341,20 @@ def _find_section_start_page(
             ]
             p = _first_page(tier2)
             if p is not None:
-                return p
+                return p, "header_match"
         # Tier 3: h1 alone
         if h1:
             tier3 = [s for s in sections if _nh(s.get("header_1") or "") == h1]
             p = _first_page(tier3)
             if p is not None:
-                return p
+                return p, "header_match"
 
     # Tier 4: fuzzy content match. Capped at 100 sections to keep
     # per-chunk work bounded on very large manuals; headers should have
     # matched in tier 1-3 in the common case.
     probe = _normalize_text(section_content)[:400]
     if not probe:
-        return None
+        return None, "missing"
     probe_head = probe[:200]
     best: tuple[int, int] | None = None  # (overlap_len, page_start)
     for i, s in enumerate(sections):
@@ -230,13 +378,13 @@ def _find_section_start_page(
                 if best is None or overlap > best[0]:
                     best = (overlap, ps)
     if best:
-        return best[1]
+        return best[1], "fuzzy_match"
 
     logging.info(
         "page_label: no DI-cache match for headers=(%r, %r, %r) in %s (have %d sections)",
         h1, h2, h3, source_path, len(sections),
     )
-    return None
+    return None, "missing"
 
 
 def _is_roman(s: str) -> bool:
@@ -508,17 +656,25 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     # DI cache blob (written by preanalyze.py) and matching this chunk's
     # section by header chain (primary) or content fuzzy match (fallback).
     if section_start_page is None:
-        section_start_page = _find_section_start_page(
+        section_start_page, page_resolution_method = _find_section_start_page(
             source_path, section_content, h1_in, h2_in, h3_in,
         )
+    else:
+        page_resolution_method = "di_input"
 
     start_page, end_page, pages_covered = compute_page_span(
         page_text, section_content, section_start_page
     )
+    if start_page is None:
+        page_resolution_method = "missing"
 
     # Prefer the explicit `<!-- PageNumber="..." -->` marker from DI when
     # present in the chunk — for technical manuals it holds the printed
     # label the reader would recognise (e.g. "18-33", "iv", "A-12").
+    # Leave the field EMPTY when no real label can be extracted; do NOT
+    # fall back to str(start_page) — that masquerades as a printed label
+    # and makes the UI show "page 205" when no such label exists on the
+    # page (cover, copyright, full-bleed figures, etc.).
     label = ""
     for m in PAGE_NUMBER_MARKER_RE.finditer(page_text or ""):
         candidate = (m.group(1) or "").strip()
@@ -527,13 +683,13 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             break
     if not label:
         label = _extract_label(page_text) or ""
-    if not label:
-        label = str(start_page) if start_page is not None else ""
+    # No synthetic fallback to the physical page — empty stays empty.
 
     # End-label extraction: for multi-page chunks, first try the last DI
     # PageNumber marker in the chunk (which carries the printed label).
     # Fall back to heuristic parsing of the final segment if there is no
-    # explicit marker.
+    # explicit marker. Like `label`, we leave end_label empty rather than
+    # synthesising it from the physical page number.
     end_label = ""
     if page_text and end_page is not None and start_page is not None and end_page > start_page:
         last_marker = ""
@@ -542,13 +698,10 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             if cand:
                 last_marker = cand
         end_label = last_marker or (_extract_label(_last_page_segment(page_text)) or "")
-    if not end_label:
-        # Single-page chunk or no marker found: reuse the start label for
-        # human readability when start==end; otherwise fall back to the
-        # numeric page so the field is never empty.
-        end_label = label if start_page == end_page else (
-            str(end_page) if end_page is not None else label
-        )
+    if not end_label and start_page == end_page:
+        # Single-page chunk: end label mirrors start label (which may be
+        # empty — that's intentional).
+        end_label = label
 
     # Extract figure references from the text chunk so text records can be
     # cross-referenced with their companion diagram records via figure_ref.
@@ -560,6 +713,13 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     )
     figure_ref = ", ".join(fig_refs) if fig_refs else ""
 
+    # Highlight + bbox + total-pages: new fields to support precise
+    # client-side highlighting in the citation UI.
+    highlight_text = _build_highlight_text(page_text)
+    text_bbox_list = _text_bbox_for_chunk(page_text, source_path)
+    text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
+    pdf_total_pages = _pdf_total_pages_for(source_path)
+
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
         "parent_id": parent_id_for(source_path, source_file),
@@ -570,6 +730,10 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_page_end": end_page,
         "physical_pdf_pages": pages_covered,
         "figure_ref": figure_ref,
+        "highlight_text": highlight_text,
+        "text_bbox": text_bbox_json,
+        "pdf_total_pages": pdf_total_pages,
+        "page_resolution_method": page_resolution_method,
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
     }
