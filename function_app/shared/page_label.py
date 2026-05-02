@@ -55,6 +55,46 @@ FIGURE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches table references like "Table 18-3", "Tbl. 4", "TABLE A-1".
+# Same shape as FIGURE_REF_RE; we extract these so a chunk that says
+# "see Table 18-3 for fuse ratings" carries that anchor as a searchable
+# field, not just as inline body text. Mirrors what we do for figures.
+TABLE_REF_RE = re.compile(
+    r"\b(Table|Tbl\.?)\s*[\-:]?\s*([A-Z]{0,3}[\-\.]?\d[\w\-\.]{0,8})",
+    re.IGNORECASE,
+)
+
+
+# Heuristic for detecting Table-of-Contents / List-of-Figures style chunks:
+# lines like "Section title ............... 18-3" with dot-leaders followed
+# by a page reference. We don't want these polluting top-of-results, so we
+# stamp them with processing_status="toc_like" instead of "ok" and let the
+# UI / query layer filter on processing_status.
+TOC_LEADER_LINE_RE = re.compile(
+    r".+?(?:\s*\.\s*){3,}\s*[\dA-Z][\w\-\.]{0,8}\s*$",
+)
+
+
+def _is_toc_like(text: str) -> bool:
+    """True if the chunk reads as a TOC / list-of-figures / index page.
+
+    Conservative thresholds to avoid false positives on legitimate content
+    that happens to have a page-pointer or two:
+      - at least 5 dot-leader lines
+      - >= 60% of non-empty lines match
+    A real body chunk almost never crosses both bars; a TOC chunk almost
+    always does.
+    """
+    if not text:
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 5:
+        return False
+    matches = sum(1 for ln in lines if TOC_LEADER_LINE_RE.match(ln))
+    if matches < 5:
+        return False
+    return (matches / len(lines)) >= 0.6
+
 
 # ---------- DI markdown page markers ----------
 # DI emits both forms: <!-- PageNumber="3" --> and <!-- PageBreak -->
@@ -693,15 +733,38 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             end_label = str(end_page)
             label_is_synthetic = True
 
-    # Extract figure references from the text chunk so text records can be
-    # cross-referenced with their companion diagram records via figure_ref.
+    # Extract figure and table references from the text chunk so text
+    # records carry these anchors as filterable fields and the semantic
+    # ranker can boost on them. `figure_ref` / `table_ref` are kept as
+    # comma-joined strings for backwards compatibility; the new
+    # `figures_referenced` / `tables_referenced` collections are the
+    # filterable form (use $filter=figures_referenced/any(f: f eq '...')).
+    #
+    # The regex permits internal dots/dashes (so "Figure 18.117" and
+    # "Table A-1" both match) but a captured ID can also end on a
+    # sentence-terminating period if the reference appears at end of
+    # sentence. We strip trailing punctuation so "Table A-1." normalizes
+    # to "Table A-1".
+    def _clean_ref(s: str) -> str:
+        return s.rstrip(".-,;:")
+
     fig_refs = sorted(
         set(
-            f"{m.group(1).title()} {m.group(2)}"
+            f"{m.group(1).title()} {_clean_ref(m.group(2))}"
             for m in FIGURE_REF_RE.finditer(page_text)
+            if _clean_ref(m.group(2))
         )
     )
     figure_ref = ", ".join(fig_refs) if fig_refs else ""
+
+    tbl_refs = sorted(
+        set(
+            f"Table {_clean_ref(m.group(2))}"
+            for m in TABLE_REF_RE.finditer(page_text)
+            if _clean_ref(m.group(2))
+        )
+    )
+    table_ref = ", ".join(tbl_refs) if tbl_refs else ""
 
     # Highlight + bbox + total-pages: new fields to support precise
     # client-side highlighting in the citation UI.
@@ -709,6 +772,10 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     text_bbox_list = _text_bbox_for_chunk(page_text, source_path)
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
     pdf_total_pages = _pdf_total_pages_for(source_path)
+
+    # TOC / list-of-figures detection. UIs that want clean retrieval
+    # filter on processing_status eq 'ok' and never see TOC fragments.
+    status = "toc_like" if _is_toc_like(page_text) else "ok"
 
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
@@ -721,10 +788,13 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_page_end": end_page,
         "physical_pdf_pages": pages_covered,
         "figure_ref": figure_ref,
+        "figures_referenced": fig_refs,
+        "table_ref": table_ref,
+        "tables_referenced": tbl_refs,
         "highlight_text": highlight_text,
         "text_bbox": text_bbox_json,
         "pdf_total_pages": pdf_total_pages,
         "page_resolution_method": page_resolution_method,
-        "processing_status": "ok",
+        "processing_status": status,
         "skill_version": SKILL_VERSION,
     }

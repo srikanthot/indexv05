@@ -696,6 +696,110 @@ for rec_name, rec in [("dgm", dgm), ("tbl", tbl), ("sum", sum_rec)]:
           "highlight_text" in rec)
 
 
+# ---------- 16. cross-references + TOC detection + head-loaded refs ----------
+section("16. cross-references + TOC + head-loaded refs")
+
+# Table-ref extraction parity with figure_ref
+chunk_with_tbl = (
+    "<!-- PageNumber=\"5\" -->\n"
+    "Refer to Figure 18.117 for the wiring schematic and to Table 18-3\n"
+    "for the fuse rating values. See also Table A-1.\n"
+)
+result = process_page_label({
+    "page_text": chunk_with_tbl,
+    "section_content": chunk_with_tbl,
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/manual.pdf",
+    "layout_ordinal": 0,
+    "physical_pdf_page": 5,
+})
+check("text: figure_ref extracted",
+      "Figure 18.117" in result.get("figure_ref", ""))
+check("text: table_ref extracted (Table 18-3)",
+      "Table 18-3" in result.get("table_ref", ""))
+check("text: table_ref extracted (Table A-1)",
+      "Table A-1" in result.get("table_ref", ""))
+check("text: figures_referenced is a list",
+      isinstance(result.get("figures_referenced"), list))
+check("text: figures_referenced contains the ref",
+      "Figure 18.117" in result.get("figures_referenced", []))
+check("text: tables_referenced is a list",
+      isinstance(result.get("tables_referenced"), list))
+check("text: tables_referenced has both tables",
+      "Table 18-3" in result.get("tables_referenced", [])
+      and "Table A-1" in result.get("tables_referenced", []))
+check("text: tables_referenced is sorted/deduped",
+      result["tables_referenced"] == sorted(set(result["tables_referenced"])))
+
+# TOC detection
+toc_chunk = (
+    "1 Introduction ............................................. 1-1\n"
+    "1.1 Scope ................................................. 1-2\n"
+    "1.2 References ............................................ 1-3\n"
+    "2 Installation ............................................ 2-1\n"
+    "2.1 Pre-installation checks ............................... 2-2\n"
+    "2.2 Wiring procedure ...................................... 2-5\n"
+    "3 Operation ............................................... 3-1\n"
+    "4 Maintenance ............................................. 4-1\n"
+)
+result = process_page_label({
+    "page_text": toc_chunk,
+    "section_content": toc_chunk,
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/manual.pdf",
+    "layout_ordinal": 1,
+    "physical_pdf_page": 3,
+})
+check("toc: processing_status = 'toc_like'",
+      result.get("processing_status") == "toc_like")
+
+# Real body content stays processing_status='ok' even if it has *some*
+# page references (false-positive guard)
+body_chunk = (
+    "The K1 control relay is energized through a 24V auxiliary supply.\n"
+    "When the protection scheme detects a fault, the relay drops out and\n"
+    "isolates the affected feeder. See Section 18.4 (page 18-25) for the\n"
+    "full fault-handling sequence. Verify operation per Table 18-3.\n"
+    "The wiring is shown in Figure 18.117. Allow 30 seconds for the\n"
+    "settle time before re-energizing the line."
+)
+result = process_page_label({
+    "page_text": body_chunk,
+    "section_content": body_chunk,
+    "source_file": "manual.pdf",
+    "source_path": "https://blob/manual.pdf",
+    "layout_ordinal": 2,
+    "physical_pdf_page": 18,
+})
+check("body chunk with one page-ref: processing_status='ok'",
+      result.get("processing_status") == "ok")
+
+# build-semantic-string-text now head-loads References on a dedicated
+# line and strips running artifacts from the embedded chunk.
+sem_data = process_semantic_string({
+    "mode": "text",
+    "chunk": "Page 215\nThe K1 relay energizes through F1.\nChapter 18 — continued",
+    "header_1": "Chapter 18",
+    "header_2": "18.4 Protection",
+    "header_3": "",
+    "source_file": "manual.pdf",
+    "printed_page_label": "18-25",
+    "figure_ref": "Figure 18.117",
+    "table_ref": "Table 18-3",
+})
+sem = sem_data["chunk_for_semantic"]
+check("semantic: References line present at head",
+      "References:" in sem and sem.index("References:") < sem.index("K1 relay"))
+check("semantic: figure_ref in References line",
+      "Figure 18.117" in sem)
+check("semantic: table_ref in References line",
+      "Table 18-3" in sem)
+check("semantic: running artifact 'Page 215' stripped from chunk body",
+      "Page 215" not in sem)
+check("semantic: actual content preserved",
+      "K1 relay energizes through F1" in sem)
+
+
 # ---------- summary ----------
 print()
 total = passed + len(failures)

@@ -2,13 +2,26 @@
 build-semantic-string
 
 Builds a single, real string for chunk_for_semantic. Two modes:
-  - mode='text'    : assemble from headers + figure_ref + page label + chunk
-  - mode='diagram' : assemble from figure_ref + category + description + ocr hint
+  - mode='text'    : assemble from headers + figure_ref + table_ref +
+                     page label + (cleaned) chunk
+  - mode='diagram' : assemble from figure_ref + category + description +
+                     surrounding context
+
+The text-mode string head-loads extracted entity references (figure_ref,
+table_ref) on a dedicated `References:` line near the top, so the
+embedding model and the semantic ranker both see them as anchors, not
+just as inline tokens buried in body prose.
+
+Body chunks are run through a running-artifacts strip before embedding
+to remove repeating page-headers / page-footers like "Chapter 18 —
+continued" or "Page 215 of 600". The raw `chunk` field is preserved
+unchanged for the citation UI; only what we embed is cleaned.
 """
 
 from typing import Any
 
 from .ids import safe_str
+from .sections import _strip_running_artifacts
 
 
 def _join_nonempty(parts: list[str], sep: str) -> str:
@@ -22,6 +35,8 @@ def _build_text_string(data: dict[str, Any]) -> str:
     h3 = safe_str(data.get("header_3"))
     chunk = safe_str(data.get("chunk"))
     page_label = safe_str(data.get("printed_page_label"))
+    figure_ref = safe_str(data.get("figure_ref"))
+    table_ref = safe_str(data.get("table_ref"))
 
     header_path = _join_nonempty([h1, h2, h3], " > ")
 
@@ -29,8 +44,20 @@ def _build_text_string(data: dict[str, Any]) -> str:
     page_line = f"Page: {page_label}" if page_label else ""
     source_line = f"Source: {source_file}" if source_file else ""
 
+    # Head-load entity references so a query like "Figure 18.117" or
+    # "Table 18-3" gets a stronger vector hit on chunks that reference
+    # them, not just the figure/table records themselves.
+    ref_parts = [r for r in [figure_ref, table_ref] if r]
+    ref_line = f"References: {' | '.join(ref_parts)}" if ref_parts else ""
+
+    # Strip repeating header/footer artifacts so the embedding doesn't
+    # learn boilerplate. `chunk` (the raw markdown) is preserved as-is
+    # in the index for the citation UI; only the embedded form is
+    # cleaned.
+    cleaned_chunk = _strip_running_artifacts(chunk).strip()
+
     return _join_nonempty(
-        [source_line, header_line, page_line, chunk.strip()],
+        [source_line, header_line, page_line, ref_line, cleaned_chunk],
         "\n",
     )
 
@@ -57,7 +84,10 @@ def _build_diagram_string(data: dict[str, Any]) -> str:
     page_line = f"Page: {page}" if page else ""
     head_line = f"Diagram: {head}" if head else "Diagram"
     desc_line = description.strip()
-    context_line = f"Context: {context_text.strip()[:600]}" if context_text.strip() else ""
+    # 1000-char cap on context (was 600); matches the larger
+    # 400+400 surrounding window in process_document.py so the diagram
+    # record carries the full procedural context that grounds the figure.
+    context_line = f"Context: {context_text.strip()[:1000]}" if context_text.strip() else ""
 
     return _join_nonempty(
         [source_line, page_line, head_line, desc_line, context_line],

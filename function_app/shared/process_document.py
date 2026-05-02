@@ -141,8 +141,13 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         h1 = section["header_1"] if section else ""
         h2 = section["header_2"] if section else ""
         h3 = section["header_3"] if section else ""
+        # 400 chars before + 400 after the caption gives the diagram's
+        # vision prompt and chunk_for_semantic enough procedural context
+        # to ground the figure (typical: "after de-energizing per
+        # Section 4.1, locate the relay shown in Figure 18.117 and ..."
+        # — needs more than 200 chars to capture meaningfully).
         surrounding = (
-            extract_surrounding_text(section["content"], caption, chars=200)
+            extract_surrounding_text(section["content"], caption, chars=400)
             if section else ""
         )
 
