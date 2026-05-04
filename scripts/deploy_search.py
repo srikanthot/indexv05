@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -48,8 +49,10 @@ def load_config(path: Path) -> dict:
 
 
 def run(cmd: list[str]) -> str:
+    # az.cmd on Windows; bare 'az' everywhere else. Without this, Linux
+    # Jenkins agents fail with "az.cmd not found".
     if cmd and cmd[0] == "az":
-        cmd[0] = "az.cmd"
+        cmd[0] = "az.cmd" if os.name == "nt" else "az"
     r = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=False)
     return r.stdout.strip()
 

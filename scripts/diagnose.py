@@ -16,7 +16,11 @@ import httpx
 
 
 def az(args: list[str]) -> str:
-    cmd = ["az.cmd"] + args
+    # az.cmd on Windows, az on Linux/Mac. The same cross-platform check
+    # preanalyze.py and deploy_search.py use; required for Linux Jenkins
+    # agents.
+    az_bin = "az.cmd" if os.name == "nt" else "az"
+    cmd = [az_bin] + args
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         print(f"  az error: {r.stderr.strip()[:300]}", file=sys.stderr)

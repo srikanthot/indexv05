@@ -9,18 +9,22 @@ Hardening:
   survive any unexpected characters in parent_id or image_hash).
 - Field whitelist (`SELECT_FIELDS`) keeps the lookup robust to schema
   evolution: only fields known to exist in the current index are read.
-- Feature-gated: silently no-ops if SEARCH_ENDPOINT or SEARCH_ADMIN_KEY
-  are not configured.
+- Feature-gated: silently no-ops if SEARCH_ENDPOINT is not configured.
+- 429 retry with Retry-After honoured (capped) — Search rate limits
+  used to silently kill cache hits during peak indexing.
 """
+
+from __future__ import annotations
 
 import logging
 import re
+import time
 from functools import lru_cache
 from typing import Any
 
 import httpx
 
-from .config import feature_enabled, optional_env
+from .config import feature_enabled, optional_env, required_env
 from .credentials import SEARCH_SCOPE, bearer_token, use_managed_identity
 
 # Fields the cache reads back from a previous successful diagram record.
@@ -62,7 +66,16 @@ def _safe_token(value: str) -> str | None:
 def _enabled() -> bool:
     if not optional_env("SEARCH_ENDPOINT"):
         return False
-    # MI path needs only the endpoint; key path needs the admin key too.
+    if not optional_env("SEARCH_INDEX_NAME"):
+        # Refuse to silently target the wrong index. If the operator forgot
+        # to set SEARCH_INDEX_NAME, every cache lookup would silently miss
+        # and we'd re-pay every vision call for the lifetime of the deploy.
+        # The previous default ("mm-manuals-index") was a footgun.
+        logging.warning(
+            "search_cache disabled: SEARCH_INDEX_NAME is not set. "
+            "Wire it through your Function App App Settings."
+        )
+        return False
     if use_managed_identity():
         return True
     return feature_enabled("SEARCH_ENDPOINT", "SEARCH_ADMIN_KEY")
@@ -80,8 +93,44 @@ def _auth_header() -> dict[str, str]:
 @lru_cache(maxsize=1)
 def _index_url() -> str:
     endpoint = optional_env("SEARCH_ENDPOINT").rstrip("/")
-    index_name = optional_env("SEARCH_INDEX_NAME", "mm-manuals-index")
+    # required_env() raises if absent, but _enabled() is already gating
+    # this so we wouldn't get here with the env var unset.
+    index_name = required_env("SEARCH_INDEX_NAME")
     return f"{endpoint}/indexes/{index_name}/docs/search?api-version=2024-05-01-preview"
+
+
+def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
+                          timeout_s: float = 10.0,
+                          max_retries: int = 2) -> httpx.Response | None:
+    """POST that retries on HTTP 429 with Retry-After. Caps wait at 30s,
+    retries at 2 by default. Returns the final response, or None on
+    non-429 network errors after retries."""
+    attempt = 0
+    while True:
+        try:
+            with httpx.Client(timeout=timeout_s) as client:
+                resp = client.post(url, json=json_body, headers=headers)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            if attempt >= max_retries:
+                logging.warning("hash cache POST network error after %d retries: %s",
+                                attempt, exc)
+                return None
+            attempt += 1
+            time.sleep(min(1.0 * (2 ** attempt), 10.0))
+            continue
+        if resp.status_code != 429:
+            return resp
+        if attempt >= max_retries:
+            return resp
+        retry_after = resp.headers.get("Retry-After", "")
+        try:
+            wait_s = float(retry_after) if retry_after else 2.0 * (2 ** attempt)
+        except ValueError:
+            wait_s = 2.0 * (2 ** attempt)
+        wait_s = min(max(wait_s, 1.0), 30.0)
+        logging.info("search_cache POST 429, sleeping %.1fs", wait_s)
+        time.sleep(wait_s)
+        attempt += 1
 
 
 def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] | None:
@@ -92,7 +141,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
     Returns None (not raises) on:
       - feature disabled (env vars not set)
       - empty/invalid inputs
-      - any HTTP or parsing failure (logged)
+      - any HTTP or parsing failure (logged at warning)
     """
     if not _enabled():
         return None
@@ -121,17 +170,18 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
     }
     headers = {"Content-Type": "application/json", **_auth_header()}
 
+    resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=10.0)
+    if resp is None:
+        return None
+    if resp.status_code != 200:
+        logging.warning(
+            "hash cache lookup failed: %s %s",
+            resp.status_code, resp.text[:200],
+        )
+        return None
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(_index_url(), json=body, headers=headers)
-            if resp.status_code != 200:
-                logging.warning(
-                    "hash cache lookup failed: %s %s",
-                    resp.status_code, resp.text[:200],
-                )
-                return None
-            hits = resp.json().get("value", [])
-            return hits[0] if hits else None
+        hits = resp.json().get("value", [])
+        return hits[0] if hits else None
     except Exception as exc:
-        logging.warning("hash cache lookup error: %s", exc)
+        logging.warning("hash cache parse error: %s", exc)
         return None

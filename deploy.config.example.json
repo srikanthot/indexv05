@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to deploy.config.json and fill in the identifiers for your existing Azure resources. Every deploy script reads from this single file.",
+  "_comment": "Copy to deploy.config.json and fill in identifiers for your existing Azure resources. Every script reads from this single file. NEVER commit deploy.config.json -- it is per-environment and is in .gitignore.",
 
   "functionApp": {
     "name": "",
@@ -7,12 +7,12 @@
   },
 
   "search": {
-    "endpoint": "https://<your-search>.search.windows.net",
+    "endpoint": "https://<your-search>.search.azure.us",
     "artifactPrefix": "mm-manuals"
   },
 
   "azureOpenAI": {
-    "endpoint": "https://<your-aoai>.openai.azure.com",
+    "endpoint": "https://<your-aoai>.openai.azure.us",
     "apiVersion": "2024-12-01-preview",
     "chatDeployment": "gpt-4.1",
     "visionDeployment": "gpt-4.1",
@@ -20,17 +20,23 @@
   },
 
   "documentIntelligence": {
-    "endpoint": "https://<your-di>.cognitiveservices.azure.com",
+    "endpoint": "https://<your-di>.cognitiveservices.azure.us",
     "apiVersion": "2024-11-30"
   },
 
   "aiServices": {
-    "subdomainUrl": "https://<your-ai-services>.cognitiveservices.azure.com"
+    "subdomainUrl": "https://<your-ai-services>.cognitiveservices.azure.us"
   },
 
   "storage": {
     "accountResourceId": "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>",
     "pdfContainerName": "manuals"
+  },
+
+  "cosmos": {
+    "_comment": "Optional. If set, scripts persist run history + per-PDF state here so the Power BI dashboard can show progress. Leave blank to disable.",
+    "endpoint": "https://<your-cosmos>.documents.azure.us:443/",
+    "database": "indexing"
   },
 
   "appInsights": {

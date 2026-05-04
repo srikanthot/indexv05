@@ -402,7 +402,11 @@
           { "name": "page_resolution_method", "source": "/document/markdownDocument/*/pages/*/text_page_resolution_method" },
           { "name": "text_vector", "source": "/document/markdownDocument/*/pages/*/text_vector" },
           { "name": "processing_status", "source": "/document/markdownDocument/*/pages/*/text_processing_status" },
-          { "name": "skill_version", "source": "/document/markdownDocument/*/pages/*/text_skill_version" }
+          { "name": "skill_version", "source": "/document/markdownDocument/*/pages/*/text_skill_version" },
+          { "name": "operationalarea", "source": "/document/operationalarea" },
+          { "name": "functionalarea",  "source": "/document/functionalarea" },
+          { "name": "doctype",         "source": "/document/doctype" },
+          { "name": "filetype",        "source": "/document/filetype" }
         ]
       },
 
@@ -441,7 +445,11 @@
           { "name": "chunk_for_semantic", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/enriched_figures/*/dgm_text_vector" },
           { "name": "processing_status", "source": "/document/enriched_figures/*/dgm_processing_status" },
-          { "name": "skill_version", "source": "/document/enriched_figures/*/dgm_skill_version" }
+          { "name": "skill_version", "source": "/document/enriched_figures/*/dgm_skill_version" },
+          { "name": "operationalarea", "source": "/document/operationalarea" },
+          { "name": "functionalarea",  "source": "/document/functionalarea" },
+          { "name": "doctype",         "source": "/document/doctype" },
+          { "name": "filetype",        "source": "/document/filetype" }
         ]
       },
 
@@ -476,7 +484,11 @@
           { "name": "chunk_for_semantic", "source": "/document/enriched_tables/*/tbl_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/enriched_tables/*/tbl_text_vector" },
           { "name": "processing_status", "source": "/document/enriched_tables/*/tbl_processing_status" },
-          { "name": "skill_version", "source": "/document/enriched_tables/*/tbl_skill_version" }
+          { "name": "skill_version", "source": "/document/enriched_tables/*/tbl_skill_version" },
+          { "name": "operationalarea", "source": "/document/operationalarea" },
+          { "name": "functionalarea",  "source": "/document/functionalarea" },
+          { "name": "doctype",         "source": "/document/doctype" },
+          { "name": "filetype",        "source": "/document/filetype" }
         ]
       },
 
@@ -497,7 +509,11 @@
           { "name": "pdf_total_pages", "source": "/document/sum_pdf_total_pages" },
           { "name": "text_vector", "source": "/document/sum_text_vector" },
           { "name": "processing_status", "source": "/document/sum_processing_status" },
-          { "name": "skill_version", "source": "/document/sum_skill_version" }
+          { "name": "skill_version", "source": "/document/sum_skill_version" },
+          { "name": "operationalarea", "source": "/document/operationalarea" },
+          { "name": "functionalarea",  "source": "/document/functionalarea" },
+          { "name": "doctype",         "source": "/document/doctype" },
+          { "name": "filetype",        "source": "/document/filetype" }
         ]
       }
     ],

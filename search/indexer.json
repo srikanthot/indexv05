@@ -9,8 +9,8 @@
   },
   "parameters": {
     "batchSize": 1,
-    "maxFailedItems": -1,
-    "maxFailedItemsPerBatch": -1,
+    "maxFailedItems": 10,
+    "maxFailedItemsPerBatch": 10,
     "configuration": {
       "dataToExtract": "contentAndMetadata",
       "parsingMode": "default",
@@ -18,9 +18,26 @@
       "imageAction": "none",
       "failOnUnsupportedContentType": false,
       "failOnUnprocessableDocument": false,
-      "indexedFileNameExtensions": ".pdf"
+      "indexedFileNameExtensions": ".pdf,.docx,.pptx,.xlsx"
     }
   },
-  "fieldMappings": [],
+  "fieldMappings": [
+    {
+      "sourceFieldName": "metadata_operationalarea",
+      "targetFieldName": "operationalarea"
+    },
+    {
+      "sourceFieldName": "metadata_functionalarea",
+      "targetFieldName": "functionalarea"
+    },
+    {
+      "sourceFieldName": "metadata_doctype",
+      "targetFieldName": "doctype"
+    },
+    {
+      "sourceFieldName": "metadata_storage_file_extension",
+      "targetFieldName": "filetype"
+    }
+  ],
   "outputFieldMappings": []
 }

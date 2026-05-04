@@ -125,7 +125,9 @@ def main() -> None:
     index_name = f"{prefix}-index"
     indexer_name = f"{prefix}-indexer"
 
-    token = aad_token("https://search.azure.com/.default")
+    # Azure Government scope. The other scripts in this repo all use this;
+    # smoke_test.py was the lone holdout on the commercial scope.
+    token = aad_token("https://search.azure.us/.default")
 
     if not args.skip_run:
         print(f"Triggering indexer {indexer_name}")
