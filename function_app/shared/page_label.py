@@ -20,6 +20,8 @@ page it ends on.
 import json
 import logging
 import re
+import threading
+from collections import OrderedDict
 from typing import Any
 
 from .di_client import fetch_cached_analysis
@@ -116,14 +118,20 @@ PAGE_BREAK_MARKER_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
 # Cached at module scope so a batch of chunks from the same PDF triggers
 # at most one blob fetch.
 
-from collections import OrderedDict
-
 # LRU-style bound: a Function App instance that has processed many PDFs
 # in one lifetime (e.g. after a long indexer run) would otherwise hold
 # every section index it has ever seen in memory. Cap at 20 PDFs.
+#
+# Both caches are guarded by `_CACHE_LOCK` because Azure Functions can
+# process multiple requests concurrently in the same worker process,
+# and OrderedDict's move_to_end / popitem are not thread-safe. Without
+# the lock, two concurrent skill calls hitting the same fresh PDF could
+# corrupt the dict (one popitem mid-write of the other) and produce
+# wrong section data on subsequent lookups for that worker.
 _SECTION_INDEX_CACHE: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
 _ANALYSIS_CACHE: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
 _SECTION_INDEX_CACHE_MAX = 20
+_CACHE_LOCK = threading.Lock()
 
 
 def _analysis_for(source_path: str) -> dict[str, Any] | None:
@@ -135,9 +143,12 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
     """
     if not source_path:
         return None
-    if source_path in _ANALYSIS_CACHE:
-        _ANALYSIS_CACHE.move_to_end(source_path)
-        return _ANALYSIS_CACHE[source_path]
+    # Short critical section: dict lookup + move_to_end. The actual blob
+    # fetch happens outside the lock so we don't hold it across I/O.
+    with _CACHE_LOCK:
+        if source_path in _ANALYSIS_CACHE:
+            _ANALYSIS_CACHE.move_to_end(source_path)
+            return _ANALYSIS_CACHE[source_path]
     try:
         analyze = fetch_cached_analysis(source_path)
         result = None
@@ -148,19 +159,24 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
         logging.warning("page_label: failed to fetch DI cache for %s: %s",
                         source_path, exc)
         result = None
-    _ANALYSIS_CACHE[source_path] = result
-    if len(_ANALYSIS_CACHE) > _SECTION_INDEX_CACHE_MAX:
-        _ANALYSIS_CACHE.popitem(last=False)
+    with _CACHE_LOCK:
+        _ANALYSIS_CACHE[source_path] = result
+        # Evict oldest while over capacity. While loop in case multiple
+        # concurrent insertions all overshot before we grabbed the lock.
+        while len(_ANALYSIS_CACHE) > _SECTION_INDEX_CACHE_MAX:
+            _ANALYSIS_CACHE.popitem(last=False)
     return result
 
 
 def _sections_for(source_path: str) -> list[dict[str, Any]]:
     if not source_path:
         return []
-    cached = _SECTION_INDEX_CACHE.get(source_path)
-    if cached is not None:
-        _SECTION_INDEX_CACHE.move_to_end(source_path)
-        return cached
+    with _CACHE_LOCK:
+        cached = _SECTION_INDEX_CACHE.get(source_path)
+        if cached is not None:
+            _SECTION_INDEX_CACHE.move_to_end(source_path)
+            return cached
+    # Heavy work outside the lock.
     result = _analysis_for(source_path)
     sections: list[dict[str, Any]] = []
     if result:
@@ -170,9 +186,10 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
             logging.warning("page_label: failed to build sections for %s: %s",
                             source_path, exc)
             sections = []
-    _SECTION_INDEX_CACHE[source_path] = sections
-    if len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
-        _SECTION_INDEX_CACHE.popitem(last=False)
+    with _CACHE_LOCK:
+        _SECTION_INDEX_CACHE[source_path] = sections
+        while len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
+            _SECTION_INDEX_CACHE.popitem(last=False)
     return sections
 
 

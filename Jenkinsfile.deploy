@@ -1,0 +1,185 @@
+/*
+ * Jenkinsfile.deploy - one-time / on-push deployment of:
+ *   - Function App code (deploy_function.sh)
+ *   - Search artifacts (deploy_search.py)
+ *   - Smoke test gate
+ *
+ * Triggered by: git push to main, with a manual approval before each
+ * environment promotion.
+ *
+ * Required Jenkins agent setup:
+ *   - Linux agent (Ubuntu 22.04 recommended) with python3.11+, az CLI,
+ *     and either System-Assigned Managed Identity OR a Service Principal
+ *     in env (AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET).
+ *   - The agent identity must hold these roles in the target subscription:
+ *       Storage Blob Data Contributor    on the storage account
+ *       Search Service Contributor       on the search service
+ *       Search Index Data Contributor    on the search service
+ *       Cognitive Services User          on AOAI + DI accounts
+ *       Contributor                      on the Function App resource group
+ *       Cosmos DB Built-in Data Contributor  on the cosmos account
+ *
+ * Required Jenkins credential bindings (file credentials):
+ *   - deploy-config-dev   -> deploy.config.json for dev environment
+ *   - deploy-config-prod  -> deploy.config.json for prod environment
+ */
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'TARGET_ENV',
+            choices: ['dev', 'prod'],
+            description: 'Target environment'
+        )
+        booleanParam(
+            name: 'SKIP_SMOKE',
+            defaultValue: false,
+            description: 'Skip post-deploy smoke test (only for emergency rollouts)'
+        )
+    }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    environment {
+        // Azure Government cloud. Don't change without auditing every
+        // script's hardcoded scopes.
+        AZURE_CLOUD = 'AzureUSGovernment'
+        PYTHONUNBUFFERED = '1'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'git rev-parse --short HEAD > .git_sha'
+            }
+        }
+
+        stage('Bootstrap') {
+            steps {
+                sh '''
+                    set -e
+                    python3 -m venv .venv
+                    . .venv/bin/activate
+                    pip install --quiet -r requirements.txt
+                    az cloud set --name "$AZURE_CLOUD"
+                    az login --identity --output none || true
+                '''
+            }
+        }
+
+        stage('Tests') {
+            steps {
+                sh '''
+                    set -e
+                    . .venv/bin/activate
+                    python tests/test_unit.py
+                    python tests/test_filename_spaces.py
+                '''
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                sh '''
+                    set -e
+                    . .venv/bin/activate
+                    pip install --quiet ruff
+                    ruff check function_app tests scripts
+                '''
+            }
+        }
+
+        stage('Load config') {
+            steps {
+                script {
+                    def credId = params.TARGET_ENV == 'prod' ? 'deploy-config-prod' : 'deploy-config-dev'
+                    withCredentials([file(credentialsId: credId, variable: 'CFG_FILE')]) {
+                        sh 'cp "$CFG_FILE" deploy.config.json'
+                    }
+                }
+            }
+        }
+
+        stage('Approve prod deploy') {
+            when { expression { params.TARGET_ENV == 'prod' } }
+            steps {
+                input(
+                    message: "Promote to PROD?",
+                    submitterParameter: 'APPROVER'
+                )
+            }
+        }
+
+        stage('Assign RBAC roles') {
+            // Idempotent. Discovers MI principal IDs (Function App + Search
+            // service) from the resources Bicep already created, then
+            // assigns every role from docs/SETUP.md. Existing assignments
+            // are skipped silently. RBAC propagation can take 5+ minutes,
+            // so we sleep before the next stage.
+            steps {
+                sh '''
+                    set -e
+                    . .venv/bin/activate
+                    python scripts/assign_roles.py \
+                        --config deploy.config.json \
+                        --skip-deploy-principal \
+                        --wait-for-propagation 300
+                '''
+            }
+        }
+
+        stage('Deploy Function App') {
+            steps {
+                sh '''
+                    set -e
+                    . .venv/bin/activate
+                    chmod +x scripts/deploy_function.sh
+                    scripts/deploy_function.sh deploy.config.json
+                '''
+            }
+        }
+
+        stage('Deploy Search artifacts') {
+            steps {
+                sh '''
+                    set -e
+                    . .venv/bin/activate
+                    python scripts/deploy_search.py --config deploy.config.json
+                '''
+            }
+        }
+
+        stage('Smoke test') {
+            when { expression { !params.SKIP_SMOKE } }
+            steps {
+                sh '''
+                    set -e
+                    . .venv/bin/activate
+                    python scripts/smoke_test.py --config deploy.config.json --skip-run
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Deploy to ${params.TARGET_ENV} succeeded."
+        }
+        failure {
+            echo "Deploy to ${params.TARGET_ENV} FAILED. Check stage logs."
+        }
+        cleanup {
+            // Don't leave the deploy.config.json file (which contains
+            // environment-specific identifiers) on the agent disk.
+            sh 'rm -f deploy.config.json || true'
+        }
+    }
+}

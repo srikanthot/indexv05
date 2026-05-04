@@ -58,9 +58,10 @@
     { "name": "skill_version", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "image_hash", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
 
-    { "name": "operationalarea", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "stored": true, "sortable": false, "facetable": false, "key": false, "synonymMaps": [] },
-    { "name": "functionalarea", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "stored": true, "sortable": false, "facetable": false, "key": false, "synonymMaps": [] },
-    { "name": "doctype", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "stored": true, "sortable": false, "facetable": false, "key": false, "synonymMaps": [] }
+    { "name": "operationalarea", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "functionalarea",  "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "doctype",         "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "filetype",        "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true }
   ],
 
   "similarity": { "@odata.type": "#Microsoft.Azure.Search.BM25Similarity" },

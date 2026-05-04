@@ -39,7 +39,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 # ---------- check helpers ----------
 
 class Check:
@@ -49,12 +48,12 @@ class Check:
         self.message = ""
         self.fix = ""
 
-    def ok(self, message: str = "") -> "Check":
+    def ok(self, message: str = "") -> Check:
         self.passed = True
         self.message = message
         return self
 
-    def fail(self, message: str, fix: str) -> "Check":
+    def fail(self, message: str, fix: str) -> Check:
         self.passed = False
         self.message = message
         self.fix = fix
@@ -104,7 +103,7 @@ def check_packages() -> Check:
         return c.ok("fitz, httpx, azure-identity")
     return c.fail(
         f"missing: {', '.join(missing)}",
-        f"pip install -r requirements.txt   # from the repo root",
+        "pip install -r requirements.txt   # from the repo root",
     )
 
 
@@ -224,6 +223,111 @@ def check_storage_container(cfg: dict) -> Check:
     return c.ok(f"{account_name}/{container} accessible")
 
 
+def check_storage_soft_delete(cfg: dict) -> Check:
+    """Verify blob soft-delete is enabled on the storage account.
+    Reconcile + accidental-delete recovery rely on it. Without it,
+    deleting a PDF is irreversible."""
+    c = Check("Blob soft-delete enabled")
+    account_rid = cfg["storage"]["accountResourceId"]
+    account_name = account_rid.rstrip("/").split("/")[-1]
+    rc, out, err = _run_az([
+        "az", "storage", "account", "blob-service-properties", "show",
+        "--account-name", account_name,
+        "--query", "deleteRetentionPolicy",
+        "-o", "json",
+    ], timeout=30.0)
+    if rc != 0:
+        return c.fail(
+            f"cannot read blob-service-properties: {err[:200]}",
+            "Need 'Storage Account Contributor' role to read this property.",
+        )
+    try:
+        prop = json.loads(out) if out.strip() else {}
+    except Exception:
+        prop = {}
+    if prop.get("enabled"):
+        return c.ok(f"retention {prop.get('days', '?')} days")
+    return c.fail(
+        "blob soft-delete is OFF",
+        f"Enable: az storage account blob-service-properties update "
+        f"--account-name {account_name} --enable-delete-retention true "
+        f"--delete-retention-days 7",
+    )
+
+
+def check_cosmos(cfg: dict) -> Check:
+    """Cosmos is optional. If the cosmos block is in the config, verify
+    the endpoint and the agent identity has data-plane access. If it's
+    omitted, dashboard features won't work but the pipeline still runs."""
+    c = Check("Cosmos DB")
+    cosmos_cfg = cfg.get("cosmos") or {}
+    endpoint = cosmos_cfg.get("endpoint", "").strip()
+    database = cosmos_cfg.get("database", "").strip()
+    if not endpoint or not database:
+        return c.ok("not configured (dashboard features disabled)")
+
+    # Try a metadata-plane read first (cheap, doesn't need data role).
+    account_name = endpoint.split("//")[-1].split(".")[0] if "//" in endpoint else ""
+    if not account_name:
+        return c.fail(
+            f"cosmos.endpoint looks malformed: {endpoint}",
+            "Use form: https://<account>.documents.azure.us:443/",
+        )
+    rc, out, err = _run_az([
+        "az", "cosmosdb", "database", "exists",
+        "--name", account_name, "--db-name", database,
+    ], timeout=30.0)
+    if rc != 0:
+        return c.fail(
+            f"cannot reach cosmos database {database} in {account_name}: {err[:200]}",
+            "Verify cosmos.endpoint and cosmos.database in deploy.config.json. "
+            "Agent identity needs at minimum reader to pass this check.",
+        )
+    return c.ok(f"{account_name}/{database}")
+
+
+def check_pipeline_lock_module() -> Check:
+    """Verify pipeline_lock can be imported (catches a deploy that
+    forgot to copy the file)."""
+    c = Check("pipeline_lock module")
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        importlib.import_module("pipeline_lock")
+    except ImportError as e:
+        return c.fail(
+            f"cannot import pipeline_lock: {e}",
+            "Verify scripts/pipeline_lock.py exists in the repo.",
+        )
+    return c.ok("imports cleanly")
+
+
+def check_libreoffice() -> Check:
+    """Optional: LibreOffice is required for native PPTX/DOCX/XLSX
+    figure extraction. If missing, preanalyze still works for PDFs and
+    falls back to text+tables for non-PDFs."""
+    c = Check("LibreOffice (optional)")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from convert import is_available
+    except ImportError as e:
+        return c.fail(
+            f"cannot import scripts/convert.py: {e}",
+            "Verify scripts/convert.py exists.",
+        )
+    if is_available():
+        return c.ok("present (DOCX/PPTX/XLSX figure extraction enabled)")
+    return c.fail(
+        "not on PATH",
+        "Optional. Without LibreOffice, non-PDF files (.docx/.pptx/.xlsx) "
+        "are still indexed for text + tables, but their figures are not "
+        "analyzed. To enable figure extraction for those formats: "
+        "Linux: `sudo apt-get install -y libreoffice` or "
+        "`sudo dnf install libreoffice`. "
+        "Windows: download from libreoffice.org and ensure soffice.exe "
+        "is on PATH or in C:\\Program Files\\LibreOffice\\program\\.",
+    )
+
+
 def check_preanalyze_importable() -> Check:
     """Directly exercise the import that crashed the last live run
     (shared.pdf_crop -> fitz). Mirrors exactly how preanalyze.py
@@ -276,6 +380,12 @@ def main() -> int:
         if login_check.passed and cfg is not None:
             checks.append(check_function_app(cfg))
             checks.append(check_storage_container(cfg))
+            checks.append(check_storage_soft_delete(cfg))
+            checks.append(check_cosmos(cfg))
+
+    # 5. New-code dependencies
+    checks.append(check_pipeline_lock_module())
+    checks.append(check_libreoffice())
 
     # Print results
     print()

@@ -1,295 +1,299 @@
-# Azure AI Search — Multimodal Manual Indexing
+# Multimodal Manuals Indexing Pipeline
 
-Production indexing pipeline for diagram-heavy technical manuals on
-Azure AI Search. One multimodal index holds **text**, **diagram**,
-**table**, and **summary** records as peers, all embedded with
-Azure OpenAI Ada-002 and queryable with a built-in vectorizer.
+Production indexing pipeline that turns technical PDF manuals into a
+multimodal Azure AI Search index queryable by an AI assistant. Each
+manual produces four record types as peers in a single index:
 
-Custom logic runs as Python Azure Functions exposed through Custom
-WebApi skills. Diagram analysis and document summaries use **gpt-4.1**.
+| record_type | content                                              |
+|-------------|------------------------------------------------------|
+| `text`      | A chunk of body text with section headers and pages  |
+| `table`     | One table as markdown                                |
+| `diagram`   | One figure with a GPT-4 Vision description + OCR     |
+| `summary`   | One per-document summary                             |
 
-**Scope:** this repository owns only the indexing application layer —
-function code, search artifacts, deployment scripts, tests. It does
-**not** provision Azure resources. The Azure resources (Storage, Search
-service, Azure OpenAI, Document Intelligence, AI Services multi-service
-account, Function App, App Insights) are expected to already exist and
-are referenced from [`deploy.config.json`](deploy.config.example.json).
+All four record types are embedded with `text-embedding-ada-002` and
+returned with citation metadata (manual, page, headers, bbox).
 
-## Architecture
+This repository contains the **application layer** only: function code,
+search artifacts, deploy + operational scripts, tests, docs. Azure
+infrastructure (Storage, Search, AOAI, DI, Function App, Cosmos DB,
+Application Insights) is provisioned out-of-band.
+
+> **Cloud:** Azure Government (`*.azure.us`). The codebase hardcodes
+> Government cloud scopes; do not deploy to commercial Azure without
+> auditing every script's authentication scope.
+
+---
+
+## Architecture (one screen)
 
 ```
-Blob (PDFs)
-   |
-   v
-Data Source -> Indexer -> Skillset -> Index
-                            |
-                            +-- DocumentIntelligenceLayoutSkill (markdown text path)
-                            +-- SplitSkill (1200 / 200)
-                            +-- WebApi: process-document   -> Function -> DI direct -> figures + tables
-                            +-- WebApi: extract-page-label -> Function
-                            +-- WebApi: analyze-diagram    -> Function (per figure, hash-cached, gpt-4.1 vision)
-                            +-- WebApi: shape-table        -> Function (per table)
-                            +-- WebApi: build-semantic-string -> Function (text + diagram modes)
-                            +-- WebApi: build-doc-summary  -> Function (gpt-4.1)
-                            +-- AOAI Embedding x4 (text / figures / tables / summary)
+                                                ┌──────────────────┐
+              upload PDFs                       │  Power BI        │
+                  ▼                             │  dashboard       │
+    ┌──────────────────────┐                    └────────▲─────────┘
+    │ Azure Blob Storage   │                             │
+    │   <container>/       │                             │
+    │   <container>/_dicache/                            │
+    └────────┬─────────────┘                             │
+             │                                           │ reads
+             │ 1) preanalyze (offline, slow)             │
+             │    DI + GPT-4 Vision + crops              │
+             ▼                                           │
+    ┌──────────────────────┐                             │
+    │  _dicache/*.json     │                             │
+    │  (cache for indexer) │                             │
+    └────────┬─────────────┘                             │
+             │ 2) indexer reads cache (fast)             │
+             ▼                                           │
+    ┌──────────────────────┐                             │
+    │ Azure AI Search      │  ──── status ──┐            │
+    │ Indexer + Skillset   │                │            │
+    └────────┬─────────────┘                │            │
+             │                              │            │
+             ▼                              ▼            │
+    ┌──────────────────────┐      ┌──────────────────────┴───┐
+    │ Search Index         │      │ Cosmos DB                │
+    │ (4 record types)     │      │  - run history           │
+    │                      │      │  - per-PDF state         │
+    └──────────────────────┘      └──────────────────────────┘
+             ▲
+             │ search queries
+        AI assistant / users
 ```
 
-Four peer record types are projected into the index:
+Two stages on purpose: pre-analyze can take 5–60 minutes per large PDF.
+The Azure Search WebApi-skill timeout is 230 seconds. Doing slow work
+offline and caching the result keeps the indexer fast and reliable.
 
-| record_type | sourceContext                          | chunk_id prefix |
-|-------------|----------------------------------------|-----------------|
-| text        | /document/markdownDocument/*/pages/*   | `txt_`          |
-| diagram     | /document/enriched_figures/*           | `dgm_`          |
-| table       | /document/enriched_tables/*            | `tbl_`          |
-| summary     | /document                              | `sum_`          |
+---
 
-Text and table records carry `physical_pdf_pages: Collection(Edm.Int32)`
-— the full sorted list of every page the chunk covers, for citation
-and page-highlight UIs.
+## Prerequisites
+
+Provisioned by the infrastructure team (Bicep / Terraform / portal):
+
+- **Azure AI Search** — Standard tier or higher. System-assigned MI on.
+- **Azure Storage** account with the source-PDF container.
+  **Blob soft-delete must be enabled** (Data protection blade) so the
+  indexer's deletion-detection policy works and accidental deletes are
+  recoverable.
+- **Azure OpenAI** with deployments named per `deploy.config.json`:
+  - `text-embedding-ada-002` (1536 dims)
+  - `gpt-4.1` for chat + vision
+- **Azure Document Intelligence** (prebuilt-layout).
+- **Azure AI Services** multi-service account (billing for the Layout skill).
+- **Azure Function App** — Linux, Python 3.11, Functions v4. MI on.
+- **Application Insights** — connection string written to function app settings.
+- **Cosmos DB** account with database `indexing` (containers are
+  auto-created on first run).
+
+Required role assignments are listed in [docs/SETUP.md §3](docs/SETUP.md#3-rbac).
+
+Local prerequisites for running scripts manually:
+
+- Python 3.11+
+- Azure CLI (`az`) authenticated to the target subscription
+- `pip install -r requirements.txt`
+
+---
 
 ## Repository layout
 
 ```
-function_app/                   Python Functions app (the WebApi skills)
-  function_app.py
-  host.json
-  requirements.txt
-  local.settings.json.example
-  shared/
-    skill_io.py                 WebApi envelope + error translation
-    credentials.py              Managed identity helper (lazy)
-    config.py                   Typed env-var access with ConfigError
-    aoai.py                     Azure OpenAI client (MI-first)
-    di_client.py                Document Intelligence REST + blob fetch (MI-first)
-    search_cache.py             Image-hash cache lookup (MI-first)
-    ids.py                      Stable chunk_id helpers
-    page_label.py               Printed page label + physical page span
-    sections.py                 DI section index + surrounding-text extractor
-    pdf_crop.py                 PyMuPDF figure cropping
-    tables.py                   DI tables -> markdown (merge + split)
-    process_document.py         Orchestrates DI + crop + sections + tables
-    process_table.py            Per-table shaper
-    semantic.py                 chunk_for_semantic builder (text + diagram)
-    diagram.py                  Per-figure vision analysis (hash-cached)
-    summary.py                  Per-document summary
-
-search/                         Azure AI Search REST bodies (templated)
-  datasource.json
-  index.json
-  skillset.json
-  indexer.json
-
-scripts/
-  deploy_function.sh / .ps1     Publish function code + apply App Settings
-  deploy_search.py              Render + PUT search artifacts via AAD
-  smoke_test.py                 Post-deploy validation
-
-tests/
-  test_unit.py                  Unit checks (79 assertions)
-  test_e2e_simulator.py         Full handler-side end-to-end simulation
-
-docs/
-  validation.md                 Manual + automated validation checklist
-
-deploy.config.example.json      Template — copy to deploy.config.json
-.github/workflows/ci.yml        Tests + lint on every PR
-ruff.toml
-README.md
+.
+├── function_app/              Azure Function App (custom skills)
+│   ├── function_app.py        Entry point + HTTP routing
+│   ├── host.json
+│   ├── requirements.txt
+│   └── shared/                Skill implementations + utilities
+│
+├── scripts/                   Operational tooling (runs from Jenkins or laptop)
+│   ├── preanalyze.py          Stage 1: DI + Vision, populates _dicache/
+│   ├── reconcile.py           Detect added / edited / deleted PDFs
+│   ├── run_pipeline.py        End-to-end orchestrator (the one Jenkins runs)
+│   ├── check_index.py         Coverage + diagnostics, --write-status to Cosmos
+│   ├── cosmos_writer.py       Helper used by other scripts
+│   ├── deploy_search.py       Deploy index/skillset/datasource/indexer
+│   ├── deploy_function.sh     Deploy function app code (Linux)
+│   ├── deploy_function.ps1    Deploy function app code (Windows)
+│   ├── smoke_test.py          Post-deploy validation gate
+│   ├── reset_indexer.sh       Reset + run indexer (bash)
+│   ├── reset_indexer.ps1      Reset + run indexer (PowerShell)
+│   ├── diagnose.py            One-shot health probe (function app + indexer)
+│   ├── preflight.py           Pre-deploy environment validation
+│   └── assign_roles.ps1       One-time RBAC bootstrapper
+│
+├── search/                    Azure AI Search artifact templates
+│   ├── datasource.json
+│   ├── index.json
+│   ├── skillset.json
+│   └── indexer.json
+│
+├── tests/                     Pure-Python (no Azure deps)
+│   ├── test_unit.py
+│   ├── test_e2e_simulator.py
+│   └── test_filename_spaces.py
+│
+├── docs/                      All documentation, in 3 mega-docs:
+│   ├── SETUP.md                  ARCHITECTURE + BOOTSTRAP + RBAC + JENKINS
+│   │                             + DASHBOARD_SPEC + SEARCH_INDEX_GUIDE
+│   ├── RUNBOOK.md                Daily operations + preanalyze guide +
+│   │                             validation + content capture + incidents
+│   └── SCENARIOS.md              511 scenarios (general + preanalyze + indexer)
+│
+├── Jenkinsfile.deploy         CI pipeline (push to main)
+├── Jenkinsfile.run            CI pipeline (nightly cron + manual)
+├── .github/workflows/ci.yml   PR gate: pytest + ruff
+├── deploy.config.example.json Template; copy to deploy.config.json
+├── requirements.txt
+├── ruff.toml
+└── README.md
 ```
 
-## Prerequisites
+---
 
-These Azure resources must exist before you deploy. The repo does not
-create them:
-
-- **Azure AI Search** (Basic or higher; Standard recommended for prod).
-  System-assigned managed identity enabled.
-- **Azure Storage** account + a container for source PDFs. Shared-key
-  auth can be disabled.
-- **Azure OpenAI** with two deployments:
-  - `text-embedding-ada-002` (1536 dims)
-  - `gpt-4.1` (vision-capable; used for both diagrams and summaries)
-- **Azure Document Intelligence** (prebuilt-layout).
-- **Azure AI Services** multi-service account (billing for the built-in
-  Layout skill — referenced by `AIServicesByIdentity`).
-- **Azure Function App** — Linux, Python 3.11, Functions v4, with
-  system-assigned managed identity enabled.
-- **Application Insights** component (recommended).
-
-### Required role assignments
-
-All auth is AAD / managed identity. Create these once:
-
-| Principal | Scope | Role |
-|---|---|---|
-| Function App MI | Storage account | Storage Blob Data Reader |
-| Function App MI | Azure OpenAI | Cognitive Services OpenAI User |
-| Function App MI | Document Intelligence | Cognitive Services User |
-| Function App MI | Search service | Search Index Data Reader |
-| Search service MI | Storage account | Storage Blob Data Reader |
-| Search service MI | Azure OpenAI | Cognitive Services OpenAI User |
-| Search service MI | AI Services account | Cognitive Services User |
-| Deploying principal | Search service | Search Service Contributor + Search Index Data Contributor |
-
-The deploying principal also needs `Contributor` on the Function App's
-resource group (to set App Settings and fetch the function key).
-
-## Deploy
-
-Single flow, same every time. No portal clicks.
-
-### 1. Configure
+## First-time deployment
 
 ```bash
+# 1. Configure
 cp deploy.config.example.json deploy.config.json
-# Fill in the resource identifiers for your environment
-```
+# Fill in identifiers for your environment. Never commit this file.
 
-Every script reads from this file. It is the only thing that changes
-between environments.
-
-### 2. Deploy the Function App code
-
-```bash
+# 2. Authenticate
+az cloud set --name AzureUSGovernment
 az login
-scripts/deploy_function.sh deploy.config.json
-# Windows:
-# .\scripts\deploy_function.ps1 -Config .\deploy.config.json
-```
 
-This publishes the function package and applies the required App
-Settings (`AUTH_MODE=mi`, `AOAI_*`, `DI_*`, `SEARCH_*`,
-`SKILL_VERSION`, App Insights connection string).
+# 3. Deploy function app code (Linux)
+./scripts/deploy_function.sh deploy.config.json
 
-### 3. Create / update the Search objects
-
-```bash
+# 4. Deploy search artifacts (index, skillset, datasource, indexer)
 python scripts/deploy_search.py --config deploy.config.json
-```
 
-Renders every `<PLACEHOLDER>` in `search/*.json` from the config +
-live-fetched function key, then `PUT`s the four artifacts (datasource,
-index, skillset, indexer) using AAD. The script is idempotent and fails
-loud if any placeholder is left unrendered.
-
-### 4. Run the indexer + validate
-
-```bash
-python scripts/deploy_search.py --config deploy.config.json --run-indexer
+# 5. Validate
 python scripts/smoke_test.py --config deploy.config.json
 ```
 
-The smoke test triggers the indexer, waits for `status=success`, then
-asserts record counts, required fields, and that `physical_pdf_pages`
-covers the declared start + end on text/table records. Non-zero exit
-on any failure, so CI can gate on it.
+In production, steps 3–5 are run by `Jenkinsfile.deploy` on every push
+to `main`. See [docs/SETUP.md §4](docs/SETUP.md#4-jenkins).
 
-## Configuration reference
+---
 
-Everything the scripts need is in `deploy.config.json`:
+## Steady-state operations
 
-| Key | Purpose |
-|---|---|
-| `functionApp.name` / `resourceGroup` | Target Function App |
-| `search.endpoint` | `https://<svc>.search.windows.net` |
-| `search.artifactPrefix` | Prefix for `*-ds`, `*-index`, `*-skillset`, `*-indexer` (defaults to `mm-manuals`) |
-| `azureOpenAI.endpoint` / `apiVersion` | AOAI endpoint (use `2024-12-01-preview` or newer for gpt-4.1) |
-| `azureOpenAI.chatDeployment` / `visionDeployment` / `embedDeployment` | Deployment names |
-| `documentIntelligence.endpoint` / `apiVersion` | DI resource |
-| `aiServices.subdomainUrl` | AI Services multi-service endpoint used by the built-in Layout skill |
-| `storage.accountResourceId` | Full ARM ID (`/subscriptions/…/storageAccounts/<name>`) — used for the `ResourceId=…` datasource connection string |
-| `storage.pdfContainerName` | Container with source PDFs |
-| `appInsights.connectionString` | Wired into the Function App for telemetry |
-| `skillVersion` | Stamped on every record; bump to invalidate the image-hash cache |
+One command runs the full operational loop:
 
-The function key embedded in the skillset is fetched live by
-`deploy_search.py` — it never sits in the config file.
+```bash
+python scripts/run_pipeline.py --config deploy.config.json
+```
 
-## Local development
+It:
 
-Tests run with no Azure credentials:
+1. **Reconciles** — detects added/edited/deleted PDFs, purges stale
+   index records and cache for any deleted/edited PDF, leaves the rest
+   alone.
+2. **Pre-analyzes** any PDF without a complete cache (DI + Vision).
+3. **Waits** for the indexer to settle (the indexer runs on a 15-min
+   schedule and picks up new caches automatically; `run_pipeline.py`
+   just polls until it's idle).
+4. **Reports coverage** — counts of done / partial / not-started PDFs.
+5. **Persists** a run record + per-PDF state to Cosmos DB so the
+   dashboard reflects current state.
+
+Run nightly via `Jenkinsfile.run`; can also be triggered on-demand
+from the Jenkins UI.
+
+---
+
+## Adding, editing, and deleting PDFs
+
+| Action | What to do | What happens |
+|--------|------------|--------------|
+| **Add** a PDF | Upload to the blob container | Next pipeline run picks it up automatically |
+| **Edit** a PDF | Re-upload (overwrite) | Reconcile purges old chunks; preanalyze regenerates cache; indexer reindexes the new content |
+| **Delete** a PDF | Delete from the blob container | Reconcile purges chunks + cache + Cosmos state |
+
+**Only PDFs are processed.** PowerPoint, Word, and Excel files in the
+container are silently skipped. Convert to PDF before upload.
+
+**Filenames may contain spaces and most punctuation** — they are
+URL-encoded automatically. Do not pre-encode.
+
+---
+
+## Operational status
+
+Three sources of truth, in increasing reliability:
+
+1. **Azure portal indexer page** — useful for inspecting individual run
+   errors. The "Docs succeeded" column resets every run and is **not**
+   a coverage measure. Don't use it to answer "how many manuals are
+   indexed?".
+
+2. **`scripts/check_index.py --coverage`** — queries the live index,
+   prints per-PDF state. Source of truth on the command line.
+
+3. **Power BI dashboard** — reads the Cosmos DB containers
+   `indexing_run_history` and `indexing_pdf_state`. Single canonical
+   view for managers and operators.
+   See [docs/SETUP.md §5](docs/SETUP.md#5-dashboard-spec).
+
+---
+
+## When something breaks
+
+See [docs/RUNBOOK.md §5](docs/RUNBOOK.md#5-incident-response) for the top
+failure modes and recovery steps. Quick links:
+
+- Indexer timing out / 0 docs succeeded → preanalyze cache missing for
+  some PDF. Run `preanalyze.py --status` then `--incremental`.
+- PDFs stuck in PARTIAL → re-run `reconcile.py --dry-run` to diagnose,
+  then `run_pipeline.py`.
+- Edits not reflecting in search → reconcile.py finds and purges stale
+  chunks; run the pipeline.
+
+For deeper architecture and configuration reference, see
+[docs/SETUP.md §1](docs/SETUP.md#1-architecture) and
+[docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+---
+
+## Tests + CI
 
 ```bash
 python tests/test_unit.py
 python tests/test_e2e_simulator.py
+python tests/test_filename_spaces.py
+ruff check function_app tests scripts
 ```
 
-To run the function locally against real Azure services, copy
-`function_app/local.settings.json.example` to
-`function_app/local.settings.json`, fill in endpoints, and
-`func start`. `AUTH_MODE=mi` uses your `az login` credential chain;
-set `AUTH_MODE=key` and populate the `*_API_KEY` fields only if you
-must run without AAD.
+GitHub Actions runs all four on every PR + push to `main`. Required
+checks should be enforced in branch protection.
 
-## Validation
+The Jenkins deploy pipeline runs the same gate plus `smoke_test.py`
+post-deploy.
 
-See [`docs/validation.md`](docs/validation.md) for the full checklist.
-The mechanical checks are automated by `scripts/smoke_test.py`; the
-retrieval-quality checks are manual spot-checks against the deployed
-index.
+---
 
-## Operations
+## Security model
 
-### Re-index a single file
+- All inter-service auth is **AAD / managed identity** (`AUTH_MODE=mi`,
+  the default).
+- The single embedded credential is the Function App key, present in
+  the deployed skillset only. Rotated by re-running `deploy_search.py`
+  after `az functionapp keys set`.
+- API keys (`AUTH_MODE=key`) remain supported for local development
+  only.
+- Per-environment `deploy.config.json` is excluded from git; it is
+  delivered to Jenkins via secret file credentials.
+- See [docs/SETUP.md §3](docs/SETUP.md#3-rbac) for the full role matrix.
 
-Indexer change detection is high-water-mark on
-`metadata_storage_last_modified`. Rewriting the blob (same content, new
-timestamp) forces a re-pickup.
-
-### Full re-index
-
-```bash
-az rest --method post \
-  --url "https://<search>.search.windows.net/indexers/<prefix>-indexer/reset?api-version=2024-05-01-preview"
-python scripts/deploy_search.py --config deploy.config.json --run-indexer
-```
-
-### Rotate the function key
-
-```bash
-az functionapp keys set -g <rg> -n <func> \
-  --key-type functionKeys --key-name default
-python scripts/deploy_search.py --config deploy.config.json
-```
-
-The skillset is re-PUT with the new key; no code change needed.
-
-### Bump `skillVersion`
-
-Edit `deploy.config.json`, re-run `scripts/deploy_function.sh`. Any
-record re-processed from that point stamps the new version; older
-records keep the old one until touched.
-
-## Security
-
-- All outbound service calls (Azure OpenAI, Document Intelligence,
-  Storage, Search) use AAD bearer tokens from the Function App's
-  managed identity by default (`AUTH_MODE=mi`).
-- Search artifacts use identity-based auth: datasource uses
-  `ResourceId=…` (no keys), embedding skill / vectorizer omit `apiKey`
-  so they use the Search service MI, and the `cognitiveServices` block
-  uses `AIServicesByIdentity`.
-- The one remaining secret is the function key embedded in the
-  skillset. Rotate by re-running `scripts/deploy_search.py`.
-- API keys remain supported for local dev only via `AUTH_MODE=key`.
-
-## CI
-
-`.github/workflows/ci.yml` runs on every PR and every push to `main`:
-
-- `python tests/test_unit.py`
-- `python tests/test_e2e_simulator.py`
-- `ruff check function_app tests scripts`
-
-Enforce these as required checks in GitHub branch protection so broken
-builds cannot merge.
+---
 
 ## Licensing note
 
-PyMuPDF (used for figure cropping in `shared/pdf_crop.py`) is licensed
-under **AGPL-3.0**. For a closed-source internal Azure Function App
-this is generally fine — the AGPL network clause is triggered by
-distributing modified source, not by running the library behind a
-function endpoint. If you plan to ship this pipeline as part of a
-public-facing SaaS or redistribute it, review PyMuPDF's license terms
-(or swap to a permissively-licensed PDF library such as `pypdfium2`).
+PyMuPDF (used for figure cropping in `function_app/shared/pdf_crop.py`
+and `scripts/preanalyze.py`) is licensed under **AGPL-3.0**. For an
+internal Azure Function App this is normally fine; the AGPL network
+clause is triggered by distribution of modified source, not by running
+the library behind a function endpoint. Review with legal before
+shipping any externally-distributable build.

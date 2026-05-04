@@ -46,12 +46,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
-import threading
+from urllib.parse import quote
 
 import httpx
 
@@ -91,6 +91,54 @@ USEFUL_CATEGORIES = {
     "block_diagram", "pid_diagram", "flow_diagram", "control_logic",
     "exploded_view", "parts_list_diagram", "nameplate", "equipment_photo",
 }
+
+# Minimum vision description length in characters. Below this, we treat
+# the response as degenerate (truncated / hallucinated) and retry once.
+# 30 is enough to capture short useful descriptions like "Wiring diagram
+# showing breaker B1, B2, B3 connections to busbar TB-1." but rejects
+# fragments like "Diagram." or "(unclear)".
+_VISION_MIN_DESCRIPTION_CHARS = 30
+
+
+def _validate_and_retry_if_degenerate(
+    cfg: dict,
+    image_b64: str,
+    user_text: str,
+    vision_result: dict,
+    fig_id: str,
+) -> dict:
+    """If the vision result is structurally fine but the description is
+    suspiciously short (and the figure is supposed to be useful), retry
+    once with a stricter instruction. Accepts whatever comes back on
+    retry — we don't loop indefinitely."""
+    if not isinstance(vision_result, dict):
+        return vision_result
+    category = (vision_result.get("category") or "").strip().lower()
+    description = (vision_result.get("description") or "").strip()
+    is_useful = bool(vision_result.get("is_useful"))
+
+    if not is_useful or category in ("decorative", "unknown"):
+        return vision_result  # legitimately short is OK
+    if len(description) >= _VISION_MIN_DESCRIPTION_CHARS:
+        return vision_result
+
+    print(f"    vision degenerate ({fig_id}, len={len(description)}); retrying once",
+          flush=True)
+    stricter = (
+        user_text
+        + "\n\nIMPORTANT: your previous description was too short. "
+          "Provide a 3-8 sentence dense description naming components, "
+          "labels, connections, and the diagram's purpose."
+    )
+    try:
+        retry_result = _call_vision_api(cfg, image_b64, stricter, max_retries=1)
+        if isinstance(retry_result, dict):
+            new_desc = (retry_result.get("description") or "").strip()
+            if len(new_desc) >= _VISION_MIN_DESCRIPTION_CHARS:
+                return retry_result
+    except Exception as exc:
+        print(f"    vision retry failed ({fig_id}): {exc}", flush=True)
+    return vision_result  # accept the degenerate one rather than blocking
 
 # -- Image triage thresholds (v3 -- more aggressive) --
 MIN_WIDTH_IN = 1.0
@@ -305,6 +353,10 @@ def _storage_auth_header(method: str, container: str, blob_name: str,
             if k.lower().startswith("x-ms-"):
                 canon_headers_dict[k.lower()] = v
     canon_headers = "\n".join(f"{k}:{v}" for k, v in sorted(canon_headers_dict.items()))
+    # Canonical resource uses the URL-DECODED blob name. The URL itself
+    # is built with quote() in _blob_url() so spaces and special chars
+    # become %20 etc on the wire, which Azure decodes back to literal
+    # before signing. Keeping this side raw keeps signature in sync.
     canon_resource = f"/{_storage_account_name}/{container}/{blob_name}"
 
     string_to_sign = (
@@ -327,11 +379,32 @@ def _storage_auth_header(method: str, container: str, blob_name: str,
 
 
 def _blob_url(container: str, name: str) -> str:
-    return f"https://{_storage_account_name}.blob.{_storage_endpoint_suffix}/{container}/{name}"
+    # quote(safe="/") preserves slashes for nested paths (e.g. "_dicache/foo.pdf")
+    # while percent-encoding spaces and other URL-unsafe characters in the
+    # blob name. Without this, blob names containing spaces (a real-world
+    # case in customer-supplied PDFs) generate URLs that httpx may pass
+    # through unencoded, producing an HTTP 403 from Azure Storage that
+    # masquerades as a permissions error.
+    encoded = quote(name, safe="/")
+    return f"https://{_storage_account_name}.blob.{_storage_endpoint_suffix}/{container}/{encoded}"
+
+
+# Supported file extensions (lowercase). DI's prebuilt-layout natively
+# handles all four; PyMuPDF cropping only works on .pdf, so non-PDF files
+# get text + tables only (no figure crops or vision).
+SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".pptx", ".xlsx")
+
+
+def _is_pdf(name: str) -> bool:
+    return name.lower().endswith(".pdf")
 
 
 def list_pdfs(cfg: dict) -> list[str]:
-    """List PDF blobs at the container root, case-insensitive on .pdf.
+    """List supported document blobs at the container root.
+
+    Despite the name (kept for backwards-compat with check_index.py and
+    reconcile.py) this lists all SUPPORTED_EXTENSIONS, not only PDFs.
+    Cache blobs under _dicache/ are excluded.
 
     Note: `az storage blob list` caps at 5000 results by default. Once
     _dicache/ accumulates thousands of crop/vision blobs, the lexicographic
@@ -350,7 +423,11 @@ def list_pdfs(cfg: dict) -> list[str]:
         "-o", "json",
     ])
     all_names = json.loads(raw)
-    return [n for n in all_names if n.lower().endswith(".pdf")]
+    return [
+        n for n in all_names
+        if n.lower().endswith(SUPPORTED_EXTENSIONS)
+        and not n.startswith("_dicache/")
+    ]
 
 
 def list_cache_blobs(cfg: dict) -> list[str]:
@@ -496,9 +573,9 @@ def _generate_blob_sas(cfg: dict, blob_name: str, expiry_minutes: int = 60) -> s
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
     conn_str = _get_connection_string(cfg)
-    expiry = (datetime.now(UTC).__add__(
-        __import__("datetime").timedelta(minutes=expiry_minutes)
-    )).strftime("%Y-%m-%dT%H:%M:%SZ")
+    expiry = (datetime.now(UTC) + timedelta(minutes=expiry_minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     raw = _run_az([
         "az", "storage", "blob", "generate-sas",
         "--container-name", container,
@@ -703,12 +780,23 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
     """Run DI analysis and crop figures. Cache results to blob.
 
     Resumable: if DI cache exists but zero crops do, re-runs only the
-    crop+upload phase using the cached DI result (no extra DI call)."""
+    crop+upload phase using the cached DI result (no extra DI call).
+
+    Non-PDF inputs (.docx/.pptx/.xlsx) skip the cropping step entirely:
+    DI extracts text + tables, but PyMuPDF cannot render figures from
+    those formats. The output.json carries empty enriched_figures and
+    full enriched_tables, so the indexer still produces text and table
+    records for them.
+    """
     cache_name = "_dicache/" + pdf_name + ".di.json"
+    is_pdf = _is_pdf(pdf_name)
 
     if not force and blob_exists(cfg, cache_name):
         if _pdf_has_any_crops(cfg, pdf_name):
             return f"  skip-di  {pdf_name} (DI cached + crops present)"
+        if not is_pdf:
+            # Non-PDF: no crops expected, ever. Treat as done.
+            return f"  skip-di  {pdf_name} (non-PDF, DI cached, no crops needed)"
         # DI cache exists but crops don't -- previous run crashed between
         # DI upload and crop upload. Resume without re-running DI.
         print(f"  resume-crops  {pdf_name} (DI cached, crops missing)", flush=True)
@@ -726,9 +814,56 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
         return _do_crops(cfg, pdf_name, pdf_bytes, result, crop_figure_png_b64, elapsed)
 
     try:
-        pdf_bytes = fetch_blob(cfg, pdf_name)
-        size_mb = len(pdf_bytes) / (1024 * 1024)
-        print(f"  DI analyzing {pdf_name} ({size_mb:.1f} MB) ...", flush=True)
+        original_bytes = fetch_blob(cfg, pdf_name)
+        size_mb = len(original_bytes) / (1024 * 1024)
+
+        # If the file isn't a PDF, try to convert it via LibreOffice so
+        # the rest of the pipeline (DI submission, PyMuPDF cropping,
+        # vision) works uniformly. If LibreOffice isn't available, fall
+        # back to PDF-only processing (DI on the native file, no figure
+        # crops).
+        pdf_bytes = original_bytes
+        converted = False
+        if not is_pdf:
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from convert import (
+                    ConversionError,
+                    ConverterNotAvailable,
+                    convert_to_pdf,
+                )
+                t_conv = time.time()
+                pdf_bytes = convert_to_pdf(pdf_name, original_bytes)
+                conv_elapsed = time.time() - t_conv
+                converted = True
+                conv_mb = len(pdf_bytes) / (1024 * 1024)
+                print(
+                    f"  converted {pdf_name} -> PDF ({conv_elapsed:.0f}s, "
+                    f"{size_mb:.1f}MB -> {conv_mb:.1f}MB)",
+                    flush=True,
+                )
+            except ConverterNotAvailable as exc:
+                print(
+                    f"  warn: skipping conversion for {pdf_name} -- "
+                    f"LibreOffice not installed. Indexing text + tables only. "
+                    f"({exc})",
+                    flush=True,
+                )
+                # pdf_bytes still points at the original (DI handles natively)
+            except ConversionError as exc:
+                # Non-fatal: fall back to native DI on the original file.
+                # We still get text + tables; just no figure crops.
+                print(
+                    f"  warn: conversion failed for {pdf_name} -- "
+                    f"falling back to text+tables only. ({exc})",
+                    flush=True,
+                )
+
+        kind = "PDF" if is_pdf else (
+            f"converted from {Path(pdf_name).suffix}" if converted
+            else f"native non-PDF ({Path(pdf_name).suffix})"
+        )
+        print(f"  DI analyzing {pdf_name} ({size_mb:.1f} MB, {kind}) ...", flush=True)
         t0 = time.time()
 
         result = analyze_di(cfg, pdf_bytes, pdf_name=pdf_name)
@@ -738,7 +873,13 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
         di_mb = len(di_bytes) / (1024 * 1024)
         print(f"    DI done ({elapsed:.0f}s, {di_mb:.1f} MB)", flush=True)
 
-        # Import shared modules for cropping
+        # Cropping needs PyMuPDF, which only reads PDFs. PDFs get cropped
+        # natively. Non-PDFs that were converted get cropped from the
+        # converted bytes. Non-PDFs that we couldn't convert (LibreOffice
+        # missing or failed) skip cropping.
+        if not is_pdf and not converted:
+            return f"  ok-di  {pdf_name} ({elapsed:.0f}s, no conversion -- text + tables only)"
+
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
         from shared.pdf_crop import crop_figure_png_b64
 
@@ -754,7 +895,26 @@ def _do_crops(cfg: dict, pdf_name: str, pdf_bytes: bytes,
     """Shared crop + parallel-upload body used by both the fresh-run and
     resume-crops paths of phase_di. Safe to call when the DI cache already
     exists; only uploads crops that are new (parallel uploader overwrites
-    by name, so it is idempotent)."""
+    by name, so it is idempotent).
+
+    Fails loud (FAIL-di) on encrypted or corrupt PDFs — silent skip
+    would produce an output.json with zero figures and the operator
+    would never know why a 200-page manual indexed with no diagrams.
+    """
+    # Pre-flight check: open the PDF once to surface
+    # CorruptPdfError / EncryptedPdfError early. PyMuPDF caches the doc
+    # internally per-call so this is essentially free.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
+    from shared.pdf_crop import CorruptPdfError, EncryptedPdfError, _open_pdf
+    try:
+        _open_pdf(pdf_bytes).close()
+    except EncryptedPdfError as exc:
+        return (f"  FAIL-di  {pdf_name}: PDF is password-protected. "
+                f"Remove protection upstream and re-upload. ({exc})")
+    except CorruptPdfError as exc:
+        return (f"  FAIL-di  {pdf_name}: PDF is corrupted / unreadable. "
+                f"Inspect the source file. ({exc})")
+
     figures = result.get("figures", []) or []
     skip_count = 0
     seen_hashes: dict[str, str] = {}
@@ -871,6 +1031,14 @@ def _vision_one_figure(cfg: dict, pdf_name: str, fig_data: dict, force: bool) ->
     try:
         user_text = _build_vision_user_text(fig_data)
         vision_result = _call_vision_api(cfg, image_b64, user_text)
+        # Defensive accuracy gate: a vision response with a useful category
+        # but a description shorter than 30 chars is almost always a
+        # truncation or hallucination. Retry once with the same prompt;
+        # if the second attempt is also degenerate, accept it as-is so
+        # we don't loop forever.
+        vision_result = _validate_and_retry_if_degenerate(
+            cfg, image_b64, user_text, vision_result, fig_id,
+        )
     except Exception as exc:
         # The vision call itself failed (API error, JSON parse, etc.).
         # Record the error so we can retry sparingly and stop retrying
@@ -1070,6 +1238,12 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
 
             crop_blob = f"_dicache/{pdf_name}.crop.{fig_id}.json"
             if not blob_exists(cfg, crop_blob):
+                # Mirror the warning that the function-app side emits in the
+                # same case (process_document.py): silently dropping a
+                # figure here would leave a gap between DI's expected
+                # figure list and what gets indexed, and the operator
+                # would have no clue why.
+                print(f"    warn: crop missing for {pdf_name} fig {fig_id} -- skipping", flush=True)
                 continue
 
             cap = figure.get("caption") or {}
@@ -1180,7 +1354,11 @@ def status_report(cfg: dict) -> None:
     """Print a table showing DI / vision / output cache state for every PDF.
 
     Fast by design: one LIST call for PDFs, one LIST call for cache blobs,
-    then pure in-memory string matching. No per-blob downloads.
+    then pure in-memory string matching. PDFs that initially look PARTIAL
+    (output.json exists but no crops) are verified against the DI cache —
+    if DI itself reported zero figures (legitimately, e.g. a 1-page form
+    with no diagrams), they are reclassified as DONE. This avoids the
+    long-standing bug where figureless documents looked stuck.
     """
     print("Listing PDFs...")
     pdfs = list_pdfs(cfg)
@@ -1234,8 +1412,34 @@ def status_report(cfg: dict) -> None:
     print(header)
     print("-" * len(header))
 
+    # When a PDF looks PARTIAL (output.json + DI cache present but zero
+    # crops), download just its DI cache to check whether DI itself reported
+    # zero figures. If it did, the PDF is actually DONE. This adds at most
+    # one blob fetch per ambiguous PDF -- negligible for a healthy index.
+    di_figure_count_cache: dict[str, int | None] = {}
+
+    def _di_figure_count(pdf_name: str) -> int | None:
+        if pdf_name in di_figure_count_cache:
+            return di_figure_count_cache[pdf_name]
+        di_blob = f"_dicache/{pdf_name}.di.json"
+        if di_blob not in cache_set:
+            di_figure_count_cache[pdf_name] = None
+            return None
+        try:
+            data = json.loads(fetch_blob(cfg, di_blob))
+            # DI cache may be wrapped in {"analyzeResult": {...}} or be the
+            # bare analyzeResult.
+            inner = data.get("analyzeResult") if isinstance(data, dict) else None
+            inner = inner or data
+            n = len(inner.get("figures") or []) if isinstance(inner, dict) else 0
+        except Exception:
+            n = None
+        di_figure_count_cache[pdf_name] = n
+        return n
+
     total_done_pdfs = 0
     total_partial = 0
+    total_legit_zero_figs = 0
     for pdf in sorted(pdfs):
         di_ok = f"_dicache/{pdf}.di.json" in cache_set
         output_ok = f"_dicache/{pdf}.output.json" in cache_set
@@ -1243,9 +1447,22 @@ def status_report(cfg: dict) -> None:
         vision = vision_count.get(pdf, 0)
 
         # Classify state: done, partial (output without crops), or missing.
+        # Two paths to "done": output.json with crops, OR output.json with
+        # zero crops AND DI itself reported zero figures (legit no-figure PDF).
         if output_ok and crops == 0 and di_ok:
-            state = "PARTIAL"
-            total_partial += 1
+            di_figs = _di_figure_count(pdf)
+            if di_figs == 0:
+                state = "done"  # legitimately no figures
+                total_done_pdfs += 1
+                total_legit_zero_figs += 1
+            elif di_figs is None:
+                # Couldn't read DI cache -- fall back to old behavior
+                state = "PARTIAL"
+                total_partial += 1
+            else:
+                # DI had figures but we didn't crop them = real partial
+                state = "PARTIAL"
+                total_partial += 1
         elif output_ok:
             state = "done"
             total_done_pdfs += 1
@@ -1263,6 +1480,10 @@ def status_report(cfg: dict) -> None:
     remaining = len(pdfs) - total_done_pdfs
     print()
     msg = f"Summary: {total_done_pdfs}/{len(pdfs)} PDFs fully done, {remaining} remaining"
+    if total_legit_zero_figs:
+        msg += (f"\n         {total_legit_zero_figs} of those have legitimately "
+                "zero figures (1-2 page forms, table-only docs, etc.) -- they "
+                "are correctly classified as done.")
     if total_partial:
         msg += (f"\n         {total_partial} in PARTIAL state "
                 "-- re-run `preanalyze --incremental` to heal.")
@@ -1326,7 +1547,10 @@ def main() -> None:
     ap.add_argument("--config", default="deploy.config.json")
     ap.add_argument("--force", action="store_true", help="Re-analyze even if cache exists")
     ap.add_argument("--concurrency", type=int, default=1, help="Parallel PDFs (default 1)")
-    ap.add_argument("--vision-parallel", type=int, default=20, help="Parallel vision calls per PDF (default 20)")
+    ap.add_argument("--vision-parallel", type=int, default=30,
+                    help="Parallel vision calls per PDF (default 30). "
+                         "Raise to 50-80 if your AOAI deployment has high TPM. "
+                         "Lower to 5-10 if you see persistent 429s.")
     ap.add_argument("--phase", choices=["di", "vision", "output", "all"], default="all",
                     help="Run a specific phase (default: all)")
     ap.add_argument("--incremental", action="store_true",
@@ -1335,6 +1559,11 @@ def main() -> None:
                     help="Delete orphaned cache blobs for deleted PDFs")
     ap.add_argument("--status", action="store_true",
                     help="Print per-PDF cache state (no work done)")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="Skip the pipeline lock. Use only when you are CERTAIN "
+                         "no other preanalyze/reconcile is running. Required "
+                         "with --status / --cleanup since those are read/audit "
+                         "operations.")
     args = ap.parse_args()
 
     # Bounds check user-facing knobs. AOAI TPM quotas cap useful parallelism
@@ -1360,6 +1589,38 @@ def main() -> None:
         status_report(cfg)
         return
 
+    # Acquire pipeline lock for write operations. --status and --cleanup
+    # above are read/audit-only and don't need it. Skipped when --no-lock
+    # is passed (use only when you've verified nothing else is running).
+    lock_id = None
+    lock_name = "preanalyze"
+    if not args.no_lock:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from pipeline_lock import LockHeldError, acquire_lock, release_lock
+            lock_id = acquire_lock(cfg, lock_name)
+            print(f"  acquired pipeline lock '{lock_name}' (id={lock_id[:8]}...)", flush=True)
+        except LockHeldError as exc:
+            raise SystemExit(f"\nABORT: {exc}") from exc
+        except Exception as exc:
+            # Storage init failed or similar; surface clearly but don't fail
+            # silently — operator should know lock isn't protecting them.
+            print(f"  warning: could not acquire pipeline lock: {exc}", flush=True)
+            print("  proceeding without lock; pass --no-lock to silence this", flush=True)
+
+    try:
+        _run_preanalyze_main(cfg, args)
+    finally:
+        if lock_id is not None:
+            try:
+                release_lock(cfg, lock_name, lock_id)
+                print(f"  released pipeline lock '{lock_name}'", flush=True)
+            except Exception as exc:
+                print(f"  warning: lock release failed: {exc}", flush=True)
+
+
+def _run_preanalyze_main(cfg: dict, args) -> None:
+    """The original main() body, factored out so the lock can wrap it."""
     print(f"Container: {cfg['storage']['pdfContainerName']}")
     print(f"DI endpoint: {cfg['documentIntelligence']['endpoint']}")
     print(f"Phase: {args.phase}  Force: {args.force}  Concurrency: {args.concurrency}  Vision parallel: {args.vision_parallel}\n")
@@ -1443,6 +1704,43 @@ def main() -> None:
         for r in results:
             if "FAIL" in r:
                 print(f"  {r.strip()}")
+
+    # Persist a run record to Cosmos so dashboards can show "last
+    # preanalyze: 47/56 done, 0 errors". Best-effort; a Cosmos failure
+    # never fails the actual preanalyze work.
+    _try_write_run_record(cfg, args, ok=ok, skipped=skip, failed=fail,
+                            results=results)
+
+
+def _try_write_run_record(cfg: dict, args, ok: int, skipped: int, failed: int,
+                            results: list[str]) -> None:
+    """Best-effort Cosmos write at end of preanalyze. Imports lazily so a
+    missing azure-cosmos dep doesn't break the script."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import cosmos_writer  # noqa: WPS433 — local import is intentional
+    except Exception:
+        return
+    try:
+        errors = []
+        for r in results:
+            if "FAIL" in r:
+                # Lines look like "  FAIL-di  manual.pdf: RuntimeError: ..."
+                errors.append(r.strip()[:300])
+        cosmos_writer.write_run_record(cfg, {
+            "run_type": "preanalyze",
+            "phase": getattr(args, "phase", "all"),
+            "force": bool(getattr(args, "force", False)),
+            "incremental": bool(getattr(args, "incremental", False)),
+            "pdfs_processed": ok,
+            "pdfs_skipped": skipped,
+            "pdfs_failed": failed,
+            "errors": errors,
+        })
+    except Exception as exc:
+        # Lazy import succeeded but the write failed (network / config /
+        # auth). Do NOT fail the run.
+        print(f"  warn: cosmos run_history write failed: {exc}", flush=True)
 
 
 if __name__ == "__main__":

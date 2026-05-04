@@ -1,4 +1,23 @@
-# Indexing Repo — Operator & Infrastructure Runbook
+# Runbook — daily operations, validation, content capture, incident response
+
+Single document covering everything operational. If you're setting up
+the pipeline for the first time, see [SETUP.md](SETUP.md). If you're
+debugging an edge case, see [SCENARIOS.md](SCENARIOS.md) (511
+scenarios).
+
+## Table of contents
+
+1. [Daily operations](#1-daily-operations) — running the pipeline, monitoring
+2. [Preanalyze runbook](#2-preanalyze-runbook) — team-facing operational guide for the offline script
+3. [Validation](#3-validation) — local + cloud checks
+4. [Content capture](#4-content-capture) — what gets extracted from each file type
+5. [Incident response](#5-incident-response) — top failure modes + recovery
+
+---
+
+
+# 1. Daily operations
+
 
 The single source of truth for deploying, operating, and reasoning
 about the Azure AI Search multimodal indexing pipeline that powers
@@ -1562,15 +1581,921 @@ python scripts/deploy_search.py --config deploy.config.json
 ## 24. Related docs
 
 - [README.md](../README.md) — top-level project readme
-- [docs/ARCHITECTURE.md](ARCHITECTURE.md) — design rationale (deeper
+- [SETUP.md §1](SETUP.md#1-architecture) — design rationale (deeper
   on preanalyze trade-offs)
-- [docs/SEARCH_INDEX_GUIDE.md](SEARCH_INDEX_GUIDE.md) — index
+- [SETUP.md §6](SETUP.md#6-search-index-reference) — index
   concepts & schema reference for non-search engineers
-- [docs/validation.md](validation.md) — manual validation checklist
-- [scripts/PREANALYZE_README.md](../scripts/PREANALYZE_README.md) —
+- [RUNBOOK.md §3](RUNBOOK.md#3-validation) — manual validation checklist
+- [RUNBOOK.md §2](RUNBOOK.md#2-preanalyze-runbook) —
   team-facing preanalyze runbook
 - [search/index.json](../search/index.json) /
   [skillset.json](../search/skillset.json) /
   [indexer.json](../search/indexer.json) /
   [datasource.json](../search/datasource.json) — actual search
   artifact bodies
+
+---
+
+# 2. Preanalyze runbook
+
+
+Processes every PDF in the configured blob container through Document
+Intelligence and GPT-4 Vision, caches all results in blob storage, and
+assembles a per-PDF `output.json` the indexer consumes. Safe to re-run.
+
+## Setup (once per machine)
+
+```powershell
+# From the repo root, with the Python venv active (the one that has httpx etc. installed)
+az login                                # must be signed in; the scripts use az CLI for keys
+```
+
+Your `deploy.config.json` must be present in the repo root with the usual
+keys (`storage`, `azureOpenAI`, `documentIntelligence`, `functionApp`).
+
+## Daily use
+
+### Run everything (one command)
+
+```powershell
+./scripts/run_preanalyze.ps1
+```
+
+Defaults: 40 parallel vision calls per PDF, 2 PDFs at a time, 3 sweep
+passes (for error retry). Tune with flags:
+
+```powershell
+./scripts/run_preanalyze.ps1 -VisionParallel 48 -Concurrency 3
+```
+
+### Check status (no work done)
+
+```powershell
+python scripts/preanalyze.py --config deploy.config.json --status
+```
+
+Prints a table:
+
+```
+PDF                   DI   Output   Vision (ok/err)
+ED-ED-OTC.pdf         OK   OK       644/12
+ED-ED-UGC.pdf         OK   OK       1454/20
+ED-EM-SSM.pdf         OK   OK       478/23
+new-manual.pdf        --   --       --
+partial-manual.pdf    OK   --       320/5
+
+Summary: 3/5 PDFs fully done, 2 remaining, 60 errored figures across all PDFs
+```
+
+- `OK` under Output = fully done, will be skipped on the next run.
+- `--` = not cached yet.
+- Vision `ok/err` = successful calls / cached errors (permanent or out-of-retries).
+
+### Remove cache for deleted PDFs
+
+```powershell
+python scripts/preanalyze.py --config deploy.config.json --cleanup
+```
+
+### Force re-analyze everything (rare)
+
+```powershell
+python scripts/preanalyze.py --config deploy.config.json --force --vision-parallel 40
+```
+
+## How it works (cache layout)
+
+For each PDF `foo.pdf`, three types of blobs live under `_dicache/`:
+
+| Blob | Purpose | When written |
+|---|---|---|
+| `_dicache/foo.pdf.di.json` | Document Intelligence output | After DI analyze succeeds |
+| `_dicache/foo.pdf.crop.<fig>.json` | Cropped figure image (base64) | After cropping each figure |
+| `_dicache/foo.pdf.vision.<fig>.json` | Vision API result per figure | After each vision call |
+| `_dicache/foo.pdf.output.json` | Final assembled output for indexer | After all phases succeed |
+
+`output.json` is the **done marker**. If it's present, the PDF is fully
+processed. `--incremental` (used by the wrapper) filters on this.
+
+## Resumability
+
+If you `Ctrl+C` or the script dies mid-run:
+
+- Completed DI analyses are safe (cached before any crop work starts).
+- Completed figure crops are safe.
+- Completed per-figure vision calls are safe.
+- Just re-run `run_preanalyze.ps1`. It skips every figure that already
+  has a cached result. No duplicate vision-API calls, no wasted tokens.
+
+## Error handling
+
+- **Vision JSON parse errors** — usually caused by model output being cut
+  off. `max_tokens` is set to 1500 which covers almost all diagrams. The
+  remaining ones retry up to 3 times across runs, then stop.
+- **Content-filter blocks** (`ResponsibleAIPolicyViolation`) — marked
+  permanent immediately. Never retried. Figure is recorded with no
+  vision description but isn't considered a failure.
+- **Transient blob/network errors** — every blob HEAD/GET/PUT retries 3
+  times with backoff before failing.
+- **PDF-level failure** — printed at the end under "Failed PDFs". Just
+  re-run to retry that PDF.
+
+## Performance
+
+Rough throughput with defaults (`-VisionParallel 40 -Concurrency 2`):
+
+- **First run of a new PDF**: dominated by vision calls. Roughly one
+  minute per 300 figures on average. A 1500-figure PDF takes ~5 minutes.
+- **Re-run of an already-done PDF**: instant (seconds). The vision phase
+  short-circuits when `output.json` exists.
+- **10 PDFs, ~500 figures each, fresh**: expect ~30-60 minutes with
+  defaults; faster if AOAI quota allows higher `-VisionParallel`.
+
+Bottlenecks, in order:
+
+1. AOAI throughput (TPM quota on the vision deployment).
+2. Document Intelligence submission time for very large PDFs.
+3. Blob storage round trips (minor).
+
+If vision calls throttle (429s), reduce `-VisionParallel`. If they're
+bored, raise it.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| "Nothing to process." but PDFs exist in blob | PDFs don't end in `.pdf`/`.PDF` | Rename the blobs (filter matches any case) |
+| Same PDF keeps failing | See the FAIL line; usually DI timeout on huge PDFs | Re-run; DI has server-side retry + long polling |
+| `vision error (... permanent)` lines | Content filter blocks | Expected; ignore |
+| `vision error (... attempt N/3)` lines | Transient; will stop after 3 sweeps | Normal |
+| `Found N PDFs` where N is smaller than expected | Some blobs are in a subfolder, or have an unexpected extension | Check with `az storage blob list` |
+
+## Files to copy when handing off
+
+1. `scripts/preanalyze.py` — the main script
+2. `scripts/run_preanalyze.ps1` — the one-command wrapper
+3. `scripts/PREANALYZE_README.md` — this document
+4. `function_app/shared/` — the script imports helpers from here
+5. `deploy.config.json` — your environment's config (do NOT commit secrets)
+
+---
+
+# 3. Validation
+
+
+Two layers: **local** (no Azure required) and **cloud** (against a
+deployed environment).
+
+## Local
+
+```bash
+python tests/test_unit.py             # deterministic unit checks
+python tests/test_e2e_simulator.py    # full handler simulation
+ruff check function_app tests scripts
+```
+
+- `test_unit.py`: page-span parsing, section index walking, table
+  extraction with multi-page merge, semantic-string assembly,
+  chunk-id uniqueness, OData escaping, config error handling.
+- `test_e2e_simulator.py`: drives every handler through the exact JSON
+  envelope Azure AI Search sends and validates each record type
+  against the index schema.
+
+## Cloud — automated
+
+```bash
+python scripts/smoke_test.py --config deploy.config.json
+```
+
+Runs the indexer, waits for completion, then asserts:
+
+1. Indexer `status == success`, `itemsProcessed > 0`.
+2. Every `record_type` (text, diagram, table, summary) has ≥ 1 record.
+3. Required fields are populated on a sample of each record type.
+4. `physical_pdf_pages` on text/table records covers both the declared
+   start and end.
+
+Non-zero exit on any failure.
+
+## Cloud — manual spot-checks
+
+Worth eyeballing the first time you bring up an environment or after
+changing the skillset.
+
+### 1. Multi-figure page → multiple diagram records
+Pick a PDF page with 2+ figures:
+
+```
+$filter=record_type eq 'diagram' and physical_pdf_page eq <page>
+```
+
+Should return one record per figure, not one collapsed record.
+
+### 2. Diagram → section linking
+For 5 random diagram records, confirm `header_1/2/3` match the
+chapter/section the figure visually belongs to.
+
+### 3. `surrounding_context` populated
+For 5 random diagram records, confirm it contains real body prose —
+not just headers, not empty.
+
+### 4. Table records are structured
+For a known spec table:
+
+```
+$filter=record_type eq 'table' and contains(table_caption, '<caption>')
+```
+
+`chunk` should be a real markdown grid (`|` separators, `---` row), not
+a vision description.
+
+### 5. Multi-page table merge
+For a multi-page table, one record should cover both pages:
+
+```
+physical_pdf_page lt physical_pdf_page_end
+```
+
+`chunk` contains data rows from all covered pages, with the
+continuation-page header deduplicated.
+
+### 6. Multi-page text chunks
+For text records crossing a page boundary:
+
+```
+$filter=record_type eq 'text' and physical_pdf_page lt physical_pdf_page_end
+```
+
+- `physical_pdf_pages` is the full sorted list of every page covered
+  (citation UIs use this to highlight every grounded page).
+- `printed_page_label_end` matches the printed label on the final
+  physical page the chunk covers.
+
+### 7. Hash-cache hits on re-index
+Reset + re-run the indexer:
+
+```
+$filter=record_type eq 'diagram' and processing_status eq 'cache_hit'
+```
+
+Second run should produce cache_hit records — no new vision calls.
+
+### 8. Vectorizer query (no client embedding)
+
+```
+POST /indexes/<INDEX_NAME>/docs/search?api-version=2024-05-01-preview
+{
+  "vectorQueries": [{
+    "kind": "text",
+    "text": "wiring diagram for control relay",
+    "fields": "text_vector",
+    "k": 5
+  }]
+}
+```
+
+Returns results without the caller embedding the query.
+
+### 9. `chunk_id` uniqueness
+No collisions. Prefixes: `txt_`, `dgm_`, `tbl_`, `sum_`.
+
+---
+
+# 4. Content capture
+
+
+Plain-language reference for content owners and operators: what the
+pipeline extracts, what it doesn't, and what it would take to add the
+missing pieces. Read this before asking why a query "didn't find"
+something.
+
+---
+
+## Captured today (out of the box)
+
+| Content | Captured | How |
+|---|---|---|
+| Body text | ✅ | DI markdown → SplitSkill → text records |
+| Section headers (h1/h2/h3) | ✅ | DI section walk → stamped on every chunk |
+| Tables (with cells, captions, multi-page merge) | ✅ | DI tables → markdown → table records |
+| Figures + diagram descriptions | ✅ (PDF only) | DI figures → PyMuPDF crop → GPT-4 Vision → diagram records |
+| Figure references in body text (`Figure 4-2`) | ✅ | Regex on body → `figure_ref` field |
+| Table references in body text (`Table 18-3`) | ✅ | Regex on body → `table_ref` field |
+| Equation references (`Equation 4-2`, `Eq. 18.3`) | ✅ | Head-loaded into `chunk_for_semantic` |
+| Section references (`Section 4.2`, `§ 4.2.1`) | ✅ | Head-loaded into `chunk_for_semantic` |
+| Safety callouts (WARNING / DANGER / CAUTION / NOTE) | ✅ | Head-loaded into `chunk_for_semantic` |
+| Page labels (printed, e.g. "4-12") + physical PDF pages | ✅ | DI markdown markers + section walk |
+| Document summary | ✅ | GPT-4.1 over the full markdown |
+| Per-document taxonomy (operationalarea / functionalarea / doctype) | ✅ if blob metadata is set | See below |
+| File type (`.pdf`/`.pptx`/`.docx`/`.xlsx`) | ✅ | `filetype` field, auto-populated |
+
+## Captured for non-PDF formats
+
+The indexer accepts `.pdf`, `.docx`, `.pptx`, and `.xlsx`. For the three
+non-PDF formats, **preanalyze auto-converts them to PDF using LibreOffice
+headless** (if installed on the agent), then runs the full pipeline.
+This means slide diagrams in PPTX, embedded images in DOCX, and embedded
+charts in XLSX all get cropped + Vision-analyzed just like PDF figures.
+
+| Aspect | With LibreOffice on agent | Without LibreOffice |
+|---|---|---|
+| Text content + section structure | ✅ Same as PDF | ✅ Same |
+| Tables | ✅ Same as PDF | ✅ Same |
+| **Figure / diagram extraction** | ✅ via LibreOffice → PDF → PyMuPDF crop → Vision | ❌ Not captured; records carry empty `enriched_figures` |
+| Document summary | ✅ Same as PDF | ✅ Same |
+| Page numbers | ✅ Slides → PDF pages 1:1 for PPTX; sheets paginate for XLSX | ✅ from DI markers |
+
+To enable conversion (recommended): install LibreOffice on the Jenkins
+agent. `preflight.py` reports whether it's present.
+
+```bash
+# Linux (Ubuntu/Debian)
+sudo apt-get install -y libreoffice
+
+# Linux (RHEL/Fedora)
+sudo dnf install -y libreoffice
+
+# macOS
+brew install --cask libreoffice
+
+# Windows
+# download from libreoffice.org; ensure soffice.exe is on PATH
+```
+
+If LibreOffice is missing, preanalyze prints a one-line warning and
+falls back to text+tables-only for non-PDF files. PDFs are unaffected.
+
+**Conversion fidelity:** good but not pixel-perfect.
+- PowerPoint animations are flattened (irrelevant for retrieval).
+- Embedded fonts may be substituted.
+- Slide-to-page mapping is 1:1 for PPTX.
+- XLSX may produce multi-page output for wide sheets — page numbers
+  reflect the PDF, not Excel sheet/cell coordinates.
+
+**Conversion cost:** 5-30 seconds per file, run once and cached.
+Negligible vs DI which is minutes per file.
+
+---
+
+## How to populate the taxonomy fields
+
+The three classification fields are read from blob user-metadata. They
+can be set with the Azure CLI when you upload (or on existing blobs):
+
+```bash
+# Set on an existing blob
+az storage blob metadata update \
+    --account-name <your-storage> \
+    --container-name <your-container> \
+    --name "GAS_Procedure.pdf" \
+    --metadata operationalarea="Gas Distribution" \
+                functionalarea="Operations" \
+                doctype="Procedure"
+
+# Or set during upload
+az storage blob upload \
+    --account-name <your-storage> \
+    --container-name <your-container> \
+    --name "GAS_Procedure.pdf" \
+    --file ./GAS_Procedure.pdf \
+    --metadata operationalarea="Gas Distribution" \
+                functionalarea="Operations" \
+                doctype="Procedure"
+```
+
+The indexer auto-extracts blob user metadata as `metadata_<key>` fields.
+Field mappings in [indexer.json](../search/indexer.json) route these to
+the document-level fields, and the skillset projects them onto every
+record (text, table, diagram, summary) so a query can filter by any of
+them:
+
+```
+$filter=operationalarea eq 'Gas Distribution' and doctype eq 'Procedure'
+```
+
+If the metadata isn't set on a blob, the fields are simply empty — no
+error, no indexer failure. Existing records can be retro-tagged by
+setting metadata then re-running the pipeline (`reconcile` will detect
+the metadata change as an edit and re-index).
+
+> Tip: keep a CSV of filename → taxonomy and a small script that sets
+> metadata in bulk. The PSEG-style filename prefix (e.g. `GD-AS-ATM`)
+> can be parsed mechanically; the script writes `operationalarea=Gas
+> Distribution` for everything starting with `GD-`, etc.
+
+---
+
+## Not captured — and what it would take
+
+### PDF annotations (highlights, sticky notes, comments)
+
+**What they are:** When a reviewer opens a PDF in Acrobat and adds a
+yellow highlight, a sticky-note comment, or a strikethrough, those
+become *annotation objects* attached to the PDF — they're stored
+separately from the page content stream. Document Intelligence does
+**not** read them. PyMuPDF does (via `page.annots()`), but our pipeline
+ignores them.
+
+**Why ignore by default:** Annotations are typically internal review
+markup ("LGTM", "fix this paragraph"). They're not authoritative
+manual content and putting them in search results would confuse end
+users.
+
+**To capture them:** Add an annotation-extraction step in
+`preanalyze.py` that uses `page.annots()` to read each annotation's
+content + location and writes them as a separate record type
+(`record_type: "annotation"`). About 50 lines + a new index field.
+**Don't do this unless you have a specific reason** — most teams find
+annotations are noise.
+
+### Hyperlinks (clickable links inside the PDF)
+
+**What they are:** A link from "see Section 4.2 on page 78" to the
+actual page 78 of the same PDF, or a `mailto:` / `https://` link to an
+external resource. PDFs store hyperlinks as link annotations
+(`/Link` annotations) with a target URI or page reference.
+
+**What we capture today:** Nothing as a dedicated field. The link's
+*display text* is captured because it's part of the body text, but the
+target URL is not.
+
+**To capture them:** Two options:
+
+1. **Cross-reference targets** (link points to another page in the
+   same PDF) — usually redundant; we already extract `figure_ref` and
+   `Section X.Y` references mechanically, so a search for "Section
+   4.2" finds the right chunk regardless of clickability.
+2. **External URLs** (link to another document) — could be useful for
+   navigation. Add a `links_referenced` `Collection(Edm.String)` field
+   to the schema, populate via PyMuPDF `page.get_links()` in
+   preanalyze. About 30 lines.
+
+**Recommendation:** Skip unless you have an explicit need to navigate
+between manuals via a UI feature. The vector search + `figure_ref` /
+`table_ref` / `Section X.Y` cross-refs we already extract cover the
+common in-document navigation case.
+
+### Equations as math objects
+
+**What they are:** Equations like:
+
+> *V* = *I* · *R* + Σ *Vᵢ*
+
+PDFs render these in three different ways:
+
+1. **Inline text with special characters** — DI captures it as text but
+   subscripts/superscripts may be lost. Result: searchable as "V = I R"
+   but the relationships and units may be muddled.
+2. **A bitmap image** of a LaTeX-rendered formula — DI sees this as a
+   figure. Vision describes it ("equation showing voltage equals
+   current times resistance") but the formal expression is not
+   recovered.
+3. **MathML embedded** in the PDF — extremely rare in technical manuals;
+   DI doesn't parse it.
+
+**What we capture today:** Equations of type 1 land in body text, of
+type 2 in `diagram_description` (vision narrates them). Neither is a
+structured equation object.
+
+**To capture them as math:** State of the art uses
+[MathPix OCR](https://mathpix.com/) or the
+[Marker](https://github.com/VikParuchuri/marker) library, which
+recognise equation regions and emit LaTeX. Both are external
+dependencies (paid API or 1+GB model). Integrating either would mean
+adding a `latex` or `equation_text` field and a new
+equation-recognition skill in preanalyze.
+
+**Recommendation:** Defer. The equations users actually search for
+("Equation 4-2") are referenced by number in body text — and our
+`Equation X-Y` extraction catches those. The equation *content* itself
+is rarely the search target.
+
+### Other things technical manuals might have
+
+| Content | Captured? | Notes |
+|---|---|---|
+| Figure / table cross-references | ✅ | Already extracted |
+| Step-numbered procedures ("Step 3:") | ⚠️ in body text | Sequence preserved; no per-step record |
+| Acronyms + glossary entries | ⚠️ in body text | No dedicated extraction |
+| Part numbers / model numbers | ⚠️ in body text + vision OCR | Vision pulls them from nameplates; body text retains them inline |
+| Cross-document references ("see PSEG-GD-2024-01") | ⚠️ in body text | No automatic linking |
+| Footnotes | ⚠️ may merge with body | DI's `role: "footnote"` not specially handled |
+| Index / TOC entries | ⚠️ marked `processing_status="toc_like"` | Filterable so you can exclude from results |
+| Multiple languages in same manual | ⚠️ no language detection field | All chunks indexed identically |
+| Tables of contents | ⚠️ filtered as `toc_like` | UIs should `$filter=processing_status eq 'ok'` |
+
+---
+
+## When to ask "should we capture X?"
+
+Three questions:
+
+1. **Will users search for it?** If a user is going to type the part
+   number into the assistant, we need to make it findable. If it's
+   internal review markup nobody asks about, skip.
+2. **Is it already covered by existing fields?** Vector search on
+   `chunk_for_semantic` plus the head-loaded `References:` and
+   `Callouts:` lines covers most retrieval needs without dedicated
+   fields.
+3. **Does adding a field require a reset?** Yes — schema changes mean
+   re-deploying the index, which means re-paying embeddings for every
+   chunk. For an incremental cost, maybe — for a "would be nice" cost,
+   no.
+
+The fields in this document are the ones we judged worth the cost.
+Re-evaluate periodically as the AI assistant evolves.
+
+---
+
+# 5. Incident response
+
+
+Top failure modes for the indexing pipeline and the recovery steps for
+each. Read this before opening a war room.
+
+For deeper architecture context, see [SETUP.md §1](SETUP.md#1-architecture).
+For the operational runbook (steady-state procedures), see [RUNBOOK.md](RUNBOOK.md).
+
+---
+
+## 1. Indexer is timing out / 0 docs succeeded
+
+**Symptom:** Azure portal shows indexer runs with status `Timed out`,
+`itemsProcessed: 0` or `1`, durations of 1–4 hours. Index document
+count stops growing.
+
+**Cause:** Pre-analyze cache is missing for one or more PDFs. The
+`process-document` skill falls back to live Document Intelligence,
+which exceeds the 230-second WebApi-skill timeout for any non-trivial
+PDF.
+
+**Diagnose:**
+
+```bash
+python scripts/preanalyze.py --config deploy.config.json --status
+```
+
+Any PDF showing `todo`, `di-only`, or `PARTIAL` is a candidate.
+
+**Fix:**
+
+```bash
+python scripts/preanalyze.py --config deploy.config.json --incremental
+```
+
+This populates the missing cache. The indexer will succeed on the next
+15-min tick automatically — **do not press Reset**.
+
+---
+
+## 2. PDF was edited, but search returns old content
+
+**Symptom:** A user re-uploaded a manual; search results still show
+text from the previous version.
+
+**Cause:** The indexer reprocessed the PDF and produced new chunks
+(with new chunk_id hashes), but the old chunks weren't deleted — they
+linger in the index forever.
+
+**Fix:**
+
+```bash
+python scripts/run_pipeline.py --config deploy.config.json
+```
+
+`reconcile.py` (the first step) detects the edit by comparing blob
+`last_modified` against Cosmos `pdf_state.last_indexed_at`, purges
+stale chunks + cache, then preanalyze regenerates everything from the
+new content.
+
+If `--max-purges` aborts the run, raise the cap:
+
+```bash
+python scripts/run_pipeline.py --config deploy.config.json --max-purges 10
+```
+
+---
+
+## 3. PDF was deleted, but still appears in search
+
+**Symptom:** Manual was deleted from the blob container; search still
+returns chunks attributed to it.
+
+**Cause:** Same class as #2, but for the delete case. Azure's native
+soft-delete-detection only fires when the blob path matches an index
+document key, which is content-derived in our schema and won't match
+in many cases.
+
+**Fix:** Same — run `run_pipeline.py`. Reconcile detects deletions and
+purges. If the storage account has soft-delete disabled, enable it
+first (Storage → Data protection → Blob soft delete → 7+ days). Soft
+delete also protects against accidental deletion in the future.
+
+---
+
+## 4. Pre-analyze fails with `blob HEAD unexpected 403`
+
+**Symptom:** preanalyze.py logs `RuntimeError: blob HEAD unexpected 403`
+for some PDFs but not others.
+
+**Cause (historical):** Filename URL-encoding bug in the SharedKey
+signing path. Fixed in the codebase; this should no longer occur.
+
+**If you still see it:**
+
+1. Check that the failing filenames don't contain unusual characters
+   not in the test coverage. Run
+   `python tests/test_filename_spaces.py` to confirm the fix is
+   present.
+2. Verify the agent's storage role assignment
+   (`Storage Blob Data Contributor`).
+3. Check the storage account firewall — if it's IP-restricted, the
+   Jenkins agent's IP must be allow-listed.
+
+---
+
+## 5. Vision call returning content-filter errors
+
+**Symptom:** preanalyze.py logs `vision API content_filter` repeatedly
+on a particular PDF.
+
+**Cause:** Azure OpenAI's responsible-AI policy flagged a figure or
+its surrounding context as harmful.
+
+**Fix:** The vision retry logic caches permanent (content_filter)
+errors and stops retrying. The figure is dropped from the index with
+`processing_status="vision_error:..."`. To recover:
+
+1. Inspect the offending figure manually — confirm it's a false
+   positive.
+2. If valid: open a support ticket with Azure to request a content
+   filter review for your subscription, or reduce the surrounding
+   context window in the prompt.
+3. If invalid (the figure really shouldn't be in the index): leave
+   it — the rest of the manual indexes fine.
+
+---
+
+## 6. AOAI / Search returning 429 throttling
+
+**Symptom:** `vision API rate limited`, `search_cache POST 429`, or
+`hash cache lookup error: 429`.
+
+**Cause:** Tenant-level quota exceeded; usually from running multiple
+preanalyze jobs in parallel or a giant batch.
+
+**Fix:** The retry logic in `preanalyze.py`, `di_client.py`, and
+`search_cache.py` honors `Retry-After` (capped at 30s for the
+function app, 120s for vision). If 429s persist:
+
+1. Lower `--vision-parallel` from 20 (default) to 5.
+2. Raise the AOAI tokens-per-minute quota with Microsoft.
+3. Check that no other team is hammering the same AOAI deployment.
+
+---
+
+## 7. Cosmos DB writes failing
+
+**Symptom:** Pipeline runs succeed, but the dashboard shows stale
+data. Logs include
+`cosmos run_history upsert failed: ...` or
+`cosmos pdf_state bulk: container open failed: ...`.
+
+**Cause:** Either the agent identity is missing the
+`Cosmos DB Built-in Data Contributor` role, or the configured
+endpoint/database are wrong, or the Cosmos account is in a different
+network than the agent.
+
+**Fix:**
+
+```bash
+# Verify the role is assigned
+az role assignment list --assignee <agent-identity-id> \
+    --scope <cosmos-account-resource-id>
+
+# Verify the endpoint resolves from the agent
+curl -I https://<your-cosmos>.documents.azure.us:443/
+```
+
+Cosmos write failures **do not** fail the pipeline run — the underlying
+indexing succeeded; only the dashboard is stale. The next run will
+overwrite the missing rows.
+
+---
+
+## 8. Search index out of sync with reality
+
+**Nuclear option, last resort.** Use only when reconcile + run_pipeline
+have not recovered the state.
+
+**Symptom:** `--coverage` reports counts that disagree with what's in
+blob storage, even after several pipeline runs. Orphaned PDFs persist.
+
+**Fix:**
+
+```bash
+# 1. Drop everything
+az search index delete --service-name <search> --name <prefix>-index --yes
+
+# 2. Re-deploy the index schema
+python scripts/deploy_search.py --config deploy.config.json
+
+# 3. Reset the indexer so it reprocesses every blob
+./scripts/reset_indexer.sh --config deploy.config.json
+
+# 4. Watch progress
+python scripts/check_index.py --config deploy.config.json --coverage
+```
+
+**Cost impact:** This re-pays embeddings for every chunk
+(~$5 for ~100K chunks). DI + Vision are NOT re-paid because the
+preanalyze cache survives. Only do this if absolutely necessary.
+
+---
+
+## 9. Function App stops responding
+
+**Symptom:** All skill calls in the indexer fail with
+`Could not execute skill ... TimeoutException`. App Insights shows no
+function invocations.
+
+**Diagnose:**
+
+```bash
+python scripts/diagnose.py --config deploy.config.json
+```
+
+**Common fixes:**
+
+- Function App is stopped — `az functionapp start -g <rg> -n <func>`
+- App Settings missing — re-run `scripts/deploy_function.sh`
+- App Service Plan is out of memory / CPU — scale up the plan
+- Recent code change broke startup — `az functionapp log tail` to see
+  the import error, then revert + redeploy
+
+---
+
+## 10. PDF is corrupted / unreadable
+
+**Symptom:** preanalyze logs `FAIL-di <name>: PDF is corrupted /
+unreadable. Inspect the source file.`
+
+**Cause:** PyMuPDF could not open the file. Either the upload was
+truncated, or the source file itself is malformed.
+
+**Fix:**
+
+1. Download the blob: `az storage blob download --container-name <c> --name <name> --file /tmp/check.pdf`
+2. Try opening it in Acrobat / a browser. If it doesn't open there
+   either, the source is bad → ask the content owner for a fresh copy.
+3. If it opens fine elsewhere but PyMuPDF rejects it: try re-saving
+   from Acrobat (File → Save As) which sometimes rewrites the PDF
+   structure.
+4. Re-upload, then re-run the pipeline. `reconcile` will detect the
+   edit and re-process.
+
+The pipeline does NOT silently produce an empty record for a corrupt
+PDF — it fails loud so this gets noticed.
+
+---
+
+## 11. PDF is password-protected
+
+**Symptom:** preanalyze logs `FAIL-di <name>: PDF is password-protected.`
+
+**Cause:** The PDF has a user password (preventing open) or owner
+password (preventing extraction). DI may also reject it.
+
+**Fix:** We deliberately do not store passwords in the pipeline.
+Remove protection upstream:
+
+```bash
+# Using qpdf (fast, lossless)
+qpdf --decrypt --password=<password> input.pdf output.pdf
+
+# Or open in Acrobat → Tools → Protect → Encrypt → Remove Security
+```
+
+Re-upload the unprotected version. Re-run the pipeline.
+
+---
+
+## 12. PPTX/DOCX/XLSX file processed but no figures show up in the index
+
+**Symptom:** A PowerPoint file shows in `--coverage` as `done` but the
+diagram count for it is zero. Users can't find the slide images.
+
+**Cause:** **By design.** PyMuPDF only renders PDFs. For PPTX/DOCX/XLSX
+we extract text + tables but skip figure cropping. The `diagram_count`
+will be 0 for any non-PDF.
+
+**Fix (if you need diagram extraction for a PowerPoint):** Convert the
+PPTX to PDF before upload. Each slide becomes a PDF page; figures on
+slides become extractable figures. PowerPoint's File → Save As → PDF
+handles this in one step.
+
+---
+
+## 13. Cosmos DB writes time out during heavy preanalyze runs
+
+**Symptom:** Pipeline run completes but the dashboard is missing rows;
+logs show `cosmos pdf_state upsert for ... failed: ServiceRequestTimeoutError`.
+
+**Cause:** Cosmos throughput too low for the burst of writes during
+auto-heal or a full re-process.
+
+**Fix:** Increase shared throughput on the database:
+
+```bash
+az cosmosdb sql database throughput update \
+    --account-name <cosmos> \
+    --resource-group <rg> \
+    --name indexing \
+    --throughput 800
+```
+
+Cosmos writes are best-effort — pipeline doesn't fail when they do.
+Next pipeline run will refresh missing rows.
+
+---
+
+## 14. Indexer says "0 documents succeeded" but coverage shows new chunks
+
+**Symptom:** Azure portal indexer page reports zero items processed in
+the last run, but `check_index.py --coverage` shows the chunk count is
+higher than yesterday.
+
+**Cause:** This is normal. The "Docs succeeded" column reflects the
+*current run only*. If the last run was a no-op (nothing changed,
+schedule fired anyway), it'll show 0 even though the index already has
+historical content.
+
+**Fix:** None. Trust `--coverage`, ignore the indexer page's per-run
+counter for cumulative state.
+
+---
+
+## 15. Auto-heal looping on the same PDF
+
+**Symptom:** `--auto-heal` runs but the same PDF keeps showing up as
+"partial" pass after pass. Eventually the pipeline times out.
+
+**Cause:** The PDF has a structural problem the pipeline can't recover
+from automatically. Common cases:
+
+- DI returns 0 figures despite the PDF clearly having figures
+  (DI scanning issue)
+- The vision model rejects the figure due to content filter
+- The crop step picks an empty region
+
+**Fix:** Auto-heal is bounded by `--heal-passes` (default 2). After
+that, the PDF stays in `partial` state. Investigate manually:
+
+```bash
+python scripts/preanalyze.py --config deploy.config.json --status
+# inspect the specific PDF's _dicache/<name>.* blobs
+# check di_client.py debug logs for that PDF
+```
+
+---
+
+## 16. Indexer hits 24-hour run limit
+
+**Symptom:** Indexer status shows `transientFailure` after exactly 24h,
+some items processed, some skipped.
+
+**Cause:** Azure Search caps a single indexer run at 24 hours on
+standard tiers. With our 15-min schedule the indexer simply restarts
+on the next interval and continues from the high-water mark.
+
+**Fix:** None — this is by design. Watch coverage growth over a few
+runs to confirm it's making progress. If it stalls (no chunk-count
+growth across multiple runs), see #1 and #2 above.
+
+---
+
+## When to escalate
+
+Open a support case with Microsoft when:
+
+- AOAI returns 5xx errors consistently for >30 minutes (likely a
+  regional outage)
+- Document Intelligence returns 5xx errors consistently
+- Azure Search service status page shows incidents in your region
+- A Cosmos DB account becomes unavailable
+
+Otherwise, the failure is in our code or config and the steps above
+should resolve it.
+
+---
+
+## Sanity check
+
+After any incident, run:
+
+```bash
+python scripts/check_index.py --config deploy.config.json --coverage
+```
+
+If the numbers match the blob container, you're back in a known good
+state.

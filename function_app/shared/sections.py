@@ -197,16 +197,48 @@ def extract_surrounding_text(
     return cleaned[: 2 * chars].strip()
 
 
+_RUNNING_ARTIFACT_PATTERNS = [
+    # "Page 215", "Page 215 of 600"
+    re.compile(r"page\s+\d+(\s+of\s+\d+)?", re.IGNORECASE),
+    # bare page-number footers ("215", "iv")
+    re.compile(r"\d{1,4}"),
+    re.compile(r"[ivxlcdm]{1,6}", re.IGNORECASE),
+    # revision / version footers commonly stamped on every page of a
+    # technical manual: "Rev. 3.2", "Revision 4", "Version 1.0",
+    # "Issue 2.1 -- March 2024". These pollute embeddings if not stripped.
+    re.compile(r"(rev|revision|version|issue|ver)\.?\s*\d+(\.\d+)*([\s\-–—].*)?", re.IGNORECASE),
+    # standalone copyright lines appearing in headers/footers
+    re.compile(r"(copyright|\(c\)|©)\s.*", re.IGNORECASE),
+    # "Confidential", "Proprietary", "For Internal Use Only" stamps
+    re.compile(r"(confidential|proprietary|internal\s+use\s+only|do\s+not\s+distribute)\.?", re.IGNORECASE),
+    # document numbers in headers/footers: "GD-AS-ATM-001", "DOC-12345"
+    re.compile(r"[A-Z]{2,5}-[A-Z0-9]{2,5}(-[A-Z0-9]{1,5}){0,3}"),
+    # date footers: "March 2024", "2024-03-15", "03/15/2024"
+    re.compile(r"(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?)\s+\d{4}", re.IGNORECASE),
+    re.compile(r"\d{4}[\-/]\d{1,2}[\-/]\d{1,2}"),
+    re.compile(r"\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4}"),
+]
+
+
 def _strip_running_artifacts(text: str) -> str:
+    """Strip lines that look like repeating page headers/footers.
+
+    Designed for technical manuals: revision stamps, document IDs,
+    copyright lines, page numbers, and date footers all repeat on
+    every page and otherwise pollute the embedding vector by adding
+    noise tokens to every chunk.
+
+    Conservative by design: only strips lines that match a pattern
+    end-to-end (fullmatch). A line that has artifact text inline with
+    real content survives.
+    """
     lines = [ln for ln in text.splitlines()]
     out = []
     for ln in lines:
         s = ln.strip()
         if not s:
             continue
-        if re.fullmatch(r"page\s+\d+(\s+of\s+\d+)?", s, re.IGNORECASE):
-            continue
-        if re.fullmatch(r"\d{1,4}", s):
+        if any(p.fullmatch(s) for p in _RUNNING_ARTIFACT_PATTERNS):
             continue
         out.append(s)
     return "\n".join(out)

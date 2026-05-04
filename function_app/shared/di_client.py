@@ -12,10 +12,13 @@ Azure Search WebApi skill timeout constraint for large PDFs. Run
 scripts/preanalyze.py before the indexer to populate the cache.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import time
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -90,10 +93,130 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
         raise TimeoutError("DI analyze timed out")
 
 
+def _split_blob_url(blob_url: str) -> tuple[str, str] | None:
+    """
+    Split an https blob URL into (base, decoded_filename), preserving
+    proper URL encoding for the cache lookups built off it. Returns None
+    if the URL has no path segment.
+
+    blob_url comes in from the indexer as `metadata_storage_path`, which
+    Azure Search emits already URL-encoded. We rebuild cache URLs by
+    swapping the filename for `_dicache/<filename>.<suffix>`, so we need
+    to be careful to keep the encoded form on the wire while operating
+    on the decoded form internally.
+    """
+    parts = urlsplit(blob_url)
+    if not parts.path:
+        return None
+    last_slash = parts.path.rfind("/")
+    if last_slash < 0:
+        return None
+    # The path is URL-encoded; we leave it that way for `base` so the
+    # rebuilt URL stays valid, and we don't actually use the decoded
+    # filename for reconstruction — quote() handles that on the way out.
+    base_path = parts.path[: last_slash + 1]
+    base = urlunsplit((parts.scheme, parts.netloc, base_path, "", ""))
+    # Strip trailing slash so callers can append "<dir>/<name>" cleanly.
+    if base.endswith("/"):
+        base = base[:-1]
+    encoded_filename = parts.path[last_slash + 1 :]
+    return base, encoded_filename
+
+
+def _build_cache_url(blob_url: str, suffix: str) -> str | None:
+    """
+    Build a `<base>/_dicache/<filename>.<suffix>` URL with proper URL
+    encoding on the filename. Returns None if blob_url is malformed.
+
+    Critical: the input blob_url's filename is already URL-encoded
+    (Azure Search emits it that way), so we use it as-is in the cache
+    URL. We never decode-then-reencode here because that risks double-
+    encoding for filenames that legitimately contain '%' characters.
+    """
+    parts = _split_blob_url(blob_url)
+    if not parts:
+        return None
+    base, encoded_filename = parts
+    return f"{base}/_dicache/{encoded_filename}.{suffix}"
+
+
+def _build_cache_url_with_id(blob_url: str, prefix: str, id_value: str) -> str | None:
+    """
+    Build `<base>/_dicache/<filename>.<prefix>.<id>.json` for per-figure
+    cache blobs (crops, vision results). Encodes id_value defensively.
+    """
+    parts = _split_blob_url(blob_url)
+    if not parts:
+        return None
+    base, encoded_filename = parts
+    safe_id = quote(id_value or "", safe="")
+    return f"{base}/_dicache/{encoded_filename}.{prefix}.{safe_id}.json"
+
+
+def _storage_auth_headers() -> dict[str, str]:
+    """Auth headers for blob fetches. MI path uses bearer; otherwise
+    relies on a SAS token appended to the URL by callers."""
+    if use_managed_identity():
+        return {
+            "Authorization": f"Bearer {bearer_token(STORAGE_SCOPE)}",
+            "x-ms-version": "2023-11-03",
+        }
+    return {}
+
+
+def _apply_sas_if_needed(url: str) -> str:
+    """If MI is disabled and STORAGE_BLOB_SAS is set, append it. Idempotent."""
+    if use_managed_identity():
+        return url
+    sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
+    if sas and "?" not in url:
+        return f"{url}?{sas}"
+    return url
+
+
+def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
+                         max_retries: int = 2) -> httpx.Response | None:
+    """
+    GET helper that retries on HTTP 429 (rate-limited). On other transient
+    errors (timeout, connection reset) we let the caller decide; this helper
+    is used by cache lookups where None on miss is normal.
+
+    Returns the Response on terminal status (any 2xx, 404, 4xx other than
+    429), or None if all retries exhausted.
+    """
+    attempt = 0
+    while True:
+        try:
+            with httpx.Client(timeout=timeout_s) as client:
+                resp = client.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            if attempt >= max_retries:
+                logging.warning("blob GET network error after %d retries: %s", attempt, exc)
+                return None
+            attempt += 1
+            time.sleep(min(1.0 * (2 ** attempt), 10.0))
+            continue
+
+        if resp.status_code != 429:
+            return resp
+        if attempt >= max_retries:
+            logging.warning("blob GET 429 after %d retries: %s", max_retries, url)
+            return resp
+        retry_after = resp.headers.get("Retry-After", "")
+        try:
+            wait_s = float(retry_after) if retry_after else 2.0 * (2 ** attempt)
+        except ValueError:
+            wait_s = 2.0 * (2 ** attempt)
+        wait_s = min(max(wait_s, 1.0), 30.0)
+        logging.info("blob GET 429, sleeping %.1fs before retry", wait_s)
+        time.sleep(wait_s)
+        attempt += 1
+
+
 def fetch_blob_bytes(blob_url: str) -> bytes:
     """
     Fetch a blob over HTTPS. The url passed in by the indexer is
-    metadata_storage_path — the unauthenticated blob URL.
+    metadata_storage_path -- the unauthenticated blob URL.
 
     Auth priority:
       1. Managed identity (production). Requires the Function App's MI to
@@ -102,16 +225,8 @@ def fetch_blob_bytes(blob_url: str) -> bytes:
          not available).
       3. Bare URL (blob must be public-read).
     """
-    headers: dict[str, str] = {}
-    fetch_url = blob_url
-
-    if use_managed_identity():
-        headers["Authorization"] = f"Bearer {bearer_token(STORAGE_SCOPE)}"
-        headers["x-ms-version"] = "2023-11-03"
-    else:
-        sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
-        if sas and "?" not in blob_url:
-            fetch_url = f"{blob_url}?{sas}"
+    headers = _storage_auth_headers()
+    fetch_url = _apply_sas_if_needed(blob_url)
 
     with httpx.Client(timeout=180.0) as client:
         resp = client.get(fetch_url, headers=headers)
@@ -127,47 +242,47 @@ def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:
     Check if a pre-analyzed DI result exists in the _dicache/ subfolder.
     The cache blob path is: <container>/_dicache/<filename>.pdf.di.json
 
-    Returns {"analyzeResult": {...}} on hit, or None on miss/error.
+    Returns {"analyzeResult": {...}} on hit, or None on miss.
     Crops are stored as separate per-figure blobs and fetched on demand
     via fetch_cached_crop(). This keeps memory usage low even for PDFs
     with thousands of figures.
 
     Run scripts/preanalyze.py to populate the cache for large PDFs.
     """
-    # blob_url is like https://account.blob.../container/file.pdf
-    # Cache URL is    https://account.blob.../container/_dicache/file.pdf.di.json
-    last_slash = blob_url.rfind("/")
-    if last_slash < 0:
+    cache_url = _build_cache_url(blob_url, "di.json")
+    if not cache_url:
         return None
-    base = blob_url[:last_slash]
-    filename = blob_url[last_slash + 1:]
-    cache_url = f"{base}/_dicache/{filename}.di.json"
-    headers: dict[str, str] = {}
-    fetch_url = cache_url
-
-    if use_managed_identity():
-        headers["Authorization"] = f"Bearer {bearer_token(STORAGE_SCOPE)}"
-        headers["x-ms-version"] = "2023-11-03"
-    else:
-        sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
-        if sas and "?" not in cache_url:
-            fetch_url = f"{cache_url}?{sas}"
+    fetch_url = _apply_sas_if_needed(cache_url)
+    headers = _storage_auth_headers()
 
     try:
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.get(fetch_url, headers=headers)
-            if resp.status_code == 200:
-                logging.info("DI cache hit: %s", cache_url)
-                data = json.loads(resp.content)
-                # Support both new format (bare analyzeResult) and old
-                # v2 wrapper format ({"analyzeResult": ..., "crops": ...})
-                if "analyzeResult" in data:
-                    return {"analyzeResult": data["analyzeResult"]}
-                # Bare analyzeResult dict (new format or legacy v1)
-                return {"analyzeResult": data}
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=120.0)
+        if resp is None:
             return None
-    except Exception:
-        logging.debug("DI cache miss or error for %s", cache_url)
+        if resp.status_code == 200:
+            logging.info("DI cache hit: %s", cache_url)
+            data = json.loads(resp.content)
+            # Support both new format (bare analyzeResult) and old
+            # v2 wrapper format ({"analyzeResult": ..., "crops": ...})
+            if isinstance(data, dict) and "analyzeResult" in data:
+                return {"analyzeResult": data["analyzeResult"]}
+            return {"analyzeResult": data}
+        if resp.status_code == 404:
+            return None
+        # Loud about every other status: it indicates a real failure
+        # (auth, permissions, throttling) the operator needs to know
+        # about, NOT a cache miss. Returning None is correct (fall back
+        # to live DI), but the warning surfaces the underlying issue.
+        logging.warning(
+            "DI cache fetch unexpected status %d for %s: %s",
+            resp.status_code, cache_url, resp.text[:200],
+        )
+        return None
+    except json.JSONDecodeError as exc:
+        logging.warning("DI cache JSON decode failed for %s: %s", cache_url, exc)
+        return None
+    except Exception as exc:
+        logging.warning("DI cache fetch error for %s: %s", cache_url, exc)
         return None
 
 
@@ -178,31 +293,32 @@ def fetch_cached_crop(blob_url: str, figure_id: str) -> dict[str, Any] | None:
 
     Returns {"image_b64": "...", "bbox": {...}} on hit, or None on miss.
     """
-    last_slash = blob_url.rfind("/")
-    if last_slash < 0:
+    crop_url = _build_cache_url_with_id(blob_url, "crop", figure_id)
+    if not crop_url:
         return None
-    base = blob_url[:last_slash]
-    filename = blob_url[last_slash + 1:]
-    crop_url = f"{base}/_dicache/{filename}.crop.{figure_id}.json"
-    headers: dict[str, str] = {}
-    fetch_url = crop_url
-
-    if use_managed_identity():
-        headers["Authorization"] = f"Bearer {bearer_token(STORAGE_SCOPE)}"
-        headers["x-ms-version"] = "2023-11-03"
-    else:
-        sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
-        if sas and "?" not in crop_url:
-            fetch_url = f"{crop_url}?{sas}"
+    fetch_url = _apply_sas_if_needed(crop_url)
+    headers = _storage_auth_headers()
 
     try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.get(fetch_url, headers=headers)
-            if resp.status_code == 200:
-                return json.loads(resp.content)
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=30.0)
+        if resp is None:
             return None
-    except Exception:
-        logging.debug("crop cache miss for %s/%s", filename, figure_id)
+        if resp.status_code == 200:
+            return json.loads(resp.content)
+        if resp.status_code == 404:
+            return None
+        logging.warning(
+            "crop cache fetch unexpected status %d for %s/%s: %s",
+            resp.status_code, blob_url, figure_id, resp.text[:200],
+        )
+        return None
+    except json.JSONDecodeError as exc:
+        logging.warning("crop cache JSON decode failed for %s/%s: %s",
+                        blob_url, figure_id, exc)
+        return None
+    except Exception as exc:
+        logging.warning("crop cache error for %s/%s: %s",
+                        blob_url, figure_id, exc)
         return None
 
 
@@ -213,32 +329,32 @@ def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
 
     Returns the full output dict on hit, or None on miss.
     """
-    last_slash = blob_url.rfind("/")
-    if last_slash < 0:
+    output_url = _build_cache_url(blob_url, "output.json")
+    if not output_url:
         return None
-    base = blob_url[:last_slash]
-    filename = blob_url[last_slash + 1:]
-    output_url = f"{base}/_dicache/{filename}.output.json"
-    headers: dict[str, str] = {}
-    fetch_url = output_url
-
-    if use_managed_identity():
-        headers["Authorization"] = f"Bearer {bearer_token(STORAGE_SCOPE)}"
-        headers["x-ms-version"] = "2023-11-03"
-    else:
-        sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
-        if sas and "?" not in output_url:
-            fetch_url = f"{output_url}?{sas}"
+    fetch_url = _apply_sas_if_needed(output_url)
+    headers = _storage_auth_headers()
 
     try:
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.get(fetch_url, headers=headers)
-            if resp.status_code == 200:
-                logging.info("pre-computed output hit: %s", output_url)
-                return json.loads(resp.content)
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=120.0)
+        if resp is None:
             return None
-    except Exception:
-        logging.debug("pre-computed output miss for %s", output_url)
+        if resp.status_code == 200:
+            logging.info("pre-computed output hit: %s", output_url)
+            return json.loads(resp.content)
+        if resp.status_code == 404:
+            return None
+        logging.warning(
+            "pre-computed output unexpected status %d for %s: %s",
+            resp.status_code, output_url, resp.text[:200],
+        )
+        return None
+    except json.JSONDecodeError as exc:
+        logging.warning("pre-computed output JSON decode failed for %s: %s",
+                        output_url, exc)
+        return None
+    except Exception as exc:
+        logging.warning("pre-computed output error for %s: %s", output_url, exc)
         return None
 
 
@@ -249,30 +365,31 @@ def fetch_precomputed_vision(blob_url: str, figure_id: str) -> dict[str, Any] | 
 
     Returns the vision result dict on hit, or None on miss.
     """
-    last_slash = blob_url.rfind("/")
-    if last_slash < 0:
+    vision_url = _build_cache_url_with_id(blob_url, "vision", figure_id)
+    if not vision_url:
         return None
-    base = blob_url[:last_slash]
-    filename = blob_url[last_slash + 1:]
-    vision_url = f"{base}/_dicache/{filename}.vision.{figure_id}.json"
-    headers: dict[str, str] = {}
-    fetch_url = vision_url
-
-    if use_managed_identity():
-        headers["Authorization"] = f"Bearer {bearer_token(STORAGE_SCOPE)}"
-        headers["x-ms-version"] = "2023-11-03"
-    else:
-        sas = optional_env("STORAGE_BLOB_SAS").lstrip("?")
-        if sas and "?" not in vision_url:
-            fetch_url = f"{vision_url}?{sas}"
+    fetch_url = _apply_sas_if_needed(vision_url)
+    headers = _storage_auth_headers()
 
     try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.get(fetch_url, headers=headers)
-            if resp.status_code == 200:
-                logging.info("pre-computed vision hit: %s/%s", filename, figure_id)
-                return json.loads(resp.content)
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=30.0)
+        if resp is None:
             return None
-    except Exception:
-        logging.debug("vision cache miss for %s/%s", filename, figure_id)
+        if resp.status_code == 200:
+            logging.info("pre-computed vision hit: %s/%s", blob_url, figure_id)
+            return json.loads(resp.content)
+        if resp.status_code == 404:
+            return None
+        logging.warning(
+            "pre-computed vision unexpected status %d for %s/%s: %s",
+            resp.status_code, blob_url, figure_id, resp.text[:200],
+        )
+        return None
+    except json.JSONDecodeError as exc:
+        logging.warning("pre-computed vision JSON decode for %s/%s failed: %s",
+                        blob_url, figure_id, exc)
+        return None
+    except Exception as exc:
+        logging.warning("pre-computed vision error for %s/%s: %s",
+                        blob_url, figure_id, exc)
         return None
