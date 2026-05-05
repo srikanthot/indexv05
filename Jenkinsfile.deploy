@@ -118,52 +118,27 @@ pipeline {
             }
         }
 
-        stage('Assign RBAC roles') {
-            // Idempotent. Discovers MI principal IDs (Function App + Search
-            // service) from the resources Bicep already created, then
-            // assigns every role from docs/SETUP.md. Existing assignments
-            // are skipped silently. RBAC propagation can take 5+ minutes,
-            // so we sleep before the next stage.
+        stage('Bootstrap environment') {
+            // Single-command end-to-end bootstrap. Auto-detects + handles:
+            //  - RBAC role assignments (function app MI, search MI, principal)
+            //  - Cosmos DB database creation if missing
+            //  - Search service authOptions: apiKeyOnly -> aadOrApiKey
+            //  - publicNetworkAccess: disabled -> enabled
+            //  - Function App + search artifacts deployment with retries
+            //  - Smoke test gate
+            //
+            // --auto-fix is set in the deploy pipeline because the agent
+            // identity is expected to have permission for these settings.
+            // For manual local runs, run without --auto-fix first to see
+            // what would be changed.
             steps {
                 sh '''
                     set -e
                     . .venv/bin/activate
-                    python scripts/assign_roles.py \
+                    python scripts/bootstrap.py \
                         --config deploy.config.json \
-                        --skip-deploy-principal \
-                        --wait-for-propagation 300
-                '''
-            }
-        }
-
-        stage('Deploy Function App') {
-            steps {
-                sh '''
-                    set -e
-                    . .venv/bin/activate
-                    chmod +x scripts/deploy_function.sh
-                    scripts/deploy_function.sh deploy.config.json
-                '''
-            }
-        }
-
-        stage('Deploy Search artifacts') {
-            steps {
-                sh '''
-                    set -e
-                    . .venv/bin/activate
-                    python scripts/deploy_search.py --config deploy.config.json
-                '''
-            }
-        }
-
-        stage('Smoke test') {
-            when { expression { !params.SKIP_SMOKE } }
-            steps {
-                sh '''
-                    set -e
-                    . .venv/bin/activate
-                    python scripts/smoke_test.py --config deploy.config.json --skip-run
+                        --auto-fix \
+                        --skip-deploy-principal
                 '''
             }
         }

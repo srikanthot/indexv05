@@ -292,6 +292,15 @@ def test_convert_raises_converter_not_available_when_libreoffice_missing():
         convert._libreoffice_binary = original
 
 
+def test_bootstrap_module_importable():
+    """bootstrap.py must import cleanly and expose the expected helpers."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    import bootstrap
+    assert hasattr(bootstrap, "main"), "bootstrap.py must have main()"
+    assert hasattr(bootstrap, "detect_search_service_config"), "missing detect_search_service_config"
+    assert hasattr(bootstrap, "detect_cosmos_database"), "missing detect_cosmos_database"
+
+
 def test_pipeline_lock_module_importable():
     """The pipeline_lock module must import cleanly (no syntax errors,
     no missing imports). We don't run live lock acquire/release here
@@ -355,6 +364,7 @@ def main():
         test_convert_needs_conversion,
         test_convert_pdf_passthrough_returns_unchanged,
         test_convert_raises_converter_not_available_when_libreoffice_missing,
+        test_bootstrap_module_importable,
         test_pipeline_lock_module_importable,
         test_pipeline_lock_blob_name_namespacing,
         test_supported_extensions_in_preanalyze_includes_office_formats,
