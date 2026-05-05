@@ -84,3 +84,8 @@ print(f'  BODY (first 1200 chars):')
 print(r.text[:1200])
 "@
 
+az cosmosdb sql database create `
+  --account-name psegtmcosmuatv01 `
+  --resource-group psegtmrguatv01 `
+  --name indexing `
+  --throughput 400
