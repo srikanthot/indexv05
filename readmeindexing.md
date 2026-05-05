@@ -89,3 +89,39 @@ az cosmosdb sql database create `
   --resource-group psegtmrguatv01 `
   --name indexing `
   --throughput 400
+# 1. Enable blob soft-delete on storage account (fixes FAIL #1)
+az storage account blob-service-properties update `
+  --account-name psegtmstacuatv01 `
+  --enable-delete-retention true `
+  --delete-retention-days 7
+
+
+# 3. Create the Cosmos database (only if step 2 didn't show it)
+az cosmosdb sql database create `
+  --account-name psegtmcosmuatv01 `
+  --resource-group psegtmrguatv01 `
+  --name indexing `
+  --throughput 400
+
+# Setup fixes
+az storage account blob-service-properties update --account-name psegtmstacuatv01 --enable-delete-retention true --delete-retention-days 7
+
+az cosmosdb sql database list --account-name psegtmcosmuatv01 --resource-group psegtmrguatv01 --query "[].name" -o tsv
+
+# If 'indexing' not in output above:
+az cosmosdb sql database create --account-name psegtmcosmuatv01 --resource-group psegtmrguatv01 --name indexing --throughput 400
+
+# Re-verify
+python scripts/preflight.py --config deploy.config.json
+
+# Big bootstrap
+python scripts/bootstrap.py --config deploy.config.json --auto-fix
+
+# Upload PDFs (do via portal or az upload-batch — your choice)
+
+# Preanalyze (1.5-3 hours for 50 PDFs)
+python scripts/preanalyze.py --config deploy.config.json --concurrency 3 --vision-parallel 50
+
+# Reset + verify
+.\scripts\reset_indexer.ps1
+python scripts/check_index.py --config deploy.config.json --coverage
