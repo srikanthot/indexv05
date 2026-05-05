@@ -266,22 +266,30 @@ def check_cosmos(cfg: dict) -> Check:
     if not endpoint or not database:
         return c.ok("not configured (dashboard features disabled)")
 
-    # Try a metadata-plane read first (cheap, doesn't need data role).
     account_name = endpoint.split("//")[-1].split(".")[0] if "//" in endpoint else ""
     if not account_name:
         return c.fail(
             f"cosmos.endpoint looks malformed: {endpoint}",
             "Use form: https://<account>.documents.azure.us:443/",
         )
-    rc, out, err = _run_az([
-        "az", "cosmosdb", "database", "exists",
-        "--name", account_name, "--db-name", database,
+    rg = cfg["functionApp"]["resourceGroup"]
+
+    # Use the modern `az cosmosdb sql database show` instead of the
+    # deprecated `az cosmosdb database exists` (which prints a deprecation
+    # warning even on success and confuses operators).
+    rc, _, err = _run_az([
+        "az", "cosmosdb", "sql", "database", "show",
+        "--account-name", account_name,
+        "--resource-group", rg,
+        "--name", database,
     ], timeout=30.0)
     if rc != 0:
         return c.fail(
-            f"cannot reach cosmos database {database} in {account_name}: {err[:200]}",
-            "Verify cosmos.endpoint and cosmos.database in deploy.config.json. "
-            "Agent identity needs at minimum reader to pass this check.",
+            f"cannot reach cosmos database '{database}' in {account_name}: {err[:200]}",
+            f"If the database doesn't exist yet, create it: "
+            f"az cosmosdb sql database create --account-name {account_name} "
+            f"--resource-group {rg} --name {database} --throughput 400. "
+            f"Otherwise verify cosmos.endpoint and cosmos.database in deploy.config.json.",
         )
     return c.ok(f"{account_name}/{database}")
 
