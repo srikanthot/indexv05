@@ -262,21 +262,17 @@ def main() -> int:
         return rc
 
     # ============================================================
-    section("STEP 5 / 8 — Force fresh AAD token (so role grants are visible)")
+    section("STEP 5 / 8 — Wait for RBAC propagation")
     # ============================================================
-    if not args.skip_deploy_principal:
-        step("running 'az logout' + 'az login' to refresh token claims")
-        az(["logout"])
-        # Login is interactive; can't fully automate. User will need to do this.
-        print("\n  ACTION REQUIRED: run 'az login' and 'az account set --subscription <id>',")
-        print("  then re-run this script with --skip-rbac --skip-fix (skipping above steps)")
-        print("\n  OR: if you'd rather skip the token refresh (RBAC may not be visible yet),")
-        print("       press Enter to continue. Subsequent steps may need to retry.")
-        try:
-            input("  Press Enter to continue or Ctrl+C to abort: ")
-        except KeyboardInterrupt:
-            print("\nAborted.")
-            return 1
+    # We don't force `az logout && az login` here because that breaks
+    # automation (interactive). Instead we rely on:
+    #   1. The 300s wait baked into assign_roles.py above
+    #   2. The 5-attempt retry on deploy_search below (with 120s between)
+    # In Gov cloud, total propagation can be 15-30 min. The retry loop
+    # absorbs that. If even after 5 retries deploy_search still 403s,
+    # the user can re-run bootstrap.py — it's idempotent.
+    step("relying on assign_roles' 300s wait + deploy_search's 5-attempt retry")
+    step("for full RBAC propagation. No interactive token refresh needed.")
 
     # ============================================================
     section("STEP 6 / 8 — Deploy Function App code")
@@ -295,18 +291,28 @@ def main() -> int:
             return 1
 
     # ============================================================
-    section("STEP 7 / 8 — Deploy search artifacts (with retry on 403)")
+    section("STEP 7 / 8 — Deploy search artifacts (5-attempt retry on 403)")
     # ============================================================
-    for attempt in range(1, 4):
+    # 5 attempts × 120s wait = up to 10 minutes of total retry time.
+    # That covers worst-case Gov-cloud RBAC propagation (~15-30 min)
+    # combined with the 5-min wait already done in step 4.
+    max_attempts = 5
+    rc = -1
+    for attempt in range(1, max_attempts + 1):
         rc = run_script("scripts/deploy_search.py", ["--config", args.config])
         if rc == 0:
             step(f"deploy_search succeeded on attempt {attempt}")
             break
-        if attempt < 3:
-            step(f"attempt {attempt}/3 failed; sleeping 60s for RBAC propagation")
-            time.sleep(60)
+        if attempt < max_attempts:
+            step(f"attempt {attempt}/{max_attempts} failed; sleeping 120s for RBAC propagation")
+            time.sleep(120)
     if rc != 0:
-        issues_blocking.append("deploy_search.py failed after 3 attempts; see logs above")
+        issues_blocking.append(
+            f"deploy_search.py failed after {max_attempts} attempts. Likely causes: "
+            "(1) Gov-cloud RBAC took longer than ~15 min — re-run bootstrap.py to retry. "
+            "(2) Network firewall blocking your laptop — run from corporate network. "
+            "(3) Search service in apiKeyOnly mode — re-run with --auto-fix."
+        )
         return 1
 
     # ============================================================
@@ -324,12 +330,25 @@ def main() -> int:
         for w in issues_warned:
             print(f"  - {w}")
         print()
-    print("Bootstrap complete. Next steps:")
-    print("  1. Upload PDFs to your blob container")
-    print("  2. Run preanalyze:    python scripts/preanalyze.py --config deploy.config.json")
-    print("  3. Reset + run idx:   .\\scripts\\reset_indexer.ps1   (or .sh)")
-    print("  4. Verify coverage:   python scripts/check_index.py --config deploy.config.json --coverage")
-    print("\n  In production, Jenkinsfile.run handles steps 2-4 nightly + on demand.")
+    print("Bootstrap complete. Your environment is ready to ingest PDFs.")
+    print()
+    print("NEXT STEPS (copy-paste in order):")
+    print()
+    print("  # 1. Upload your PDFs to the blob container, then:")
+    print(f"  python scripts/preanalyze.py --config {args.config}")
+    print()
+    print("  # 2. The indexer's first run after deploy_search may have fired with")
+    print("  #    no cache. Reset it so it reprocesses with the populated cache:")
+    if os.name == "nt":
+        print("  .\\scripts\\reset_indexer.ps1")
+    else:
+        print("  ./scripts/reset_indexer.sh")
+    print()
+    print("  # 3. Verify everything is indexed:")
+    print(f"  python scripts/check_index.py --config {args.config} --coverage")
+    print()
+    print("In production, Jenkinsfile.run handles steps 1-3 nightly + on demand:")
+    print(f"  python scripts/run_pipeline.py --config {args.config} --auto-heal")
     return 0
 
 
