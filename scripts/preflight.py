@@ -45,16 +45,29 @@ class Check:
     def __init__(self, name: str):
         self.name = name
         self.passed = False
+        self.is_warning = False
         self.message = ""
         self.fix = ""
 
     def ok(self, message: str = "") -> Check:
         self.passed = True
+        self.is_warning = False
         self.message = message
         return self
 
     def fail(self, message: str, fix: str) -> Check:
         self.passed = False
+        self.is_warning = False
+        self.message = message
+        self.fix = fix
+        return self
+
+    def warn(self, message: str, fix: str) -> Check:
+        """Optional / advisory check. Surfaced to the operator but does
+        NOT cause preflight to exit non-zero. Use for things like
+        LibreOffice (only matters for non-PDF files)."""
+        self.passed = False
+        self.is_warning = True
         self.message = message
         self.fix = fix
         return self
@@ -324,8 +337,8 @@ def check_libreoffice() -> Check:
         )
     if is_available():
         return c.ok("present (DOCX/PPTX/XLSX figure extraction enabled)")
-    return c.fail(
-        "not on PATH",
+    return c.warn(
+        "not on PATH (optional, OK to ignore for PDF-only corpora)",
         "Optional. Without LibreOffice, non-PDF files (.docx/.pptx/.xlsx) "
         "are still indexed for text + tables, but their figures are not "
         "analyzed. To enable figure extraction for those formats: "
@@ -395,17 +408,34 @@ def main() -> int:
     checks.append(check_pipeline_lock_module())
     checks.append(check_libreoffice())
 
-    # Print results
+    # Print results — three states: OK, WARN (advisory, doesn't block),
+    # FAIL (hard stop). Warnings are still surfaced so operators see
+    # them, but preflight returns 0 when only warnings are present.
     print()
     for c in checks:
-        tag = "OK  " if c.passed else "FAIL"
+        if c.passed:
+            tag = "OK  "
+        elif c.is_warning:
+            tag = "WARN"
+        else:
+            tag = "FAIL"
         msg = c.message or ""
         print(f"  [{tag}] {c.name:<28s} {msg}")
 
-    failures = [c for c in checks if not c.passed]
+    failures = [c for c in checks if not c.passed and not c.is_warning]
+    warnings = [c for c in checks if c.is_warning]
     print()
+
+    if warnings:
+        print(f"{len(warnings)} advisory warning(s) — review but not blocking:")
+        for c in warnings:
+            print(f"  * {c.name}: {c.message}")
+            if c.fix:
+                print(f"    note: {c.fix}")
+        print()
+
     if not failures:
-        print("All checks passed. You can run preanalyze now.")
+        print("All required checks passed. You can run preanalyze now.")
         print()
         return 0
 

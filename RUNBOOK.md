@@ -293,6 +293,16 @@ python scripts/bootstrap.py --config deploy.config.json --auto-fix
 
 You should see all 8 STEPs pass and end with something like:
 ```
+[OK]   Cosmos DB                cdb-ragchat-dev / indexing accessible
+[WARN] LibreOffice (optional)   not on PATH (optional, OK to ignore for PDF-only corpora)
+
+1 advisory warning(s) — review but not blocking:
+  * LibreOffice (optional): not on PATH (optional, OK to ignore for PDF-only corpora)
+
+All required checks passed. You can run preanalyze now.
+
+STEP 2/8 — ...
+...
 STEP 8/8 — Verify Function App MI roles
 [OK] Storage Blob Data Reader assigned
 [OK] Search Index Data Contributor assigned
@@ -301,7 +311,11 @@ STEP 8/8 — Verify Function App MI roles
 Bootstrap complete.
 ```
 
-If preflight still fails, fix what it reports and re-run.
+The LibreOffice line shows as `[WARN]` not `[FAIL]` — it's an advisory
+notice and does NOT block bootstrap. Only matters if you index
+.docx/.pptx/.xlsx files. For PDF-only corpora, ignore.
+
+If a non-LibreOffice check fails, fix what it reports and re-run.
 
 ### 5c. Wait 10 minutes for RBAC propagation
 
