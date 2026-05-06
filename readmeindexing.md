@@ -178,3 +178,7 @@ Start-Sleep -Seconds 30
 Start-Sleep -Seconds 120
 python scripts/smoke_test.py --config deploy.config.json --skip-run
 
+# List the _dicache folder, looking specifically for the .di.json files
+$STORAGE = ($CFG.storage.accountResourceId -split '/')[-1]
+$CONTAINER = $CFG.storage.pdfContainerName
+az storage blob list --account-name $STORAGE --container-name $CONTAINER --auth-mode login --prefix "_dicache/" --query "[?ends_with(name, '.di.json')].{name:name, size:properties.contentLength}" -o table
