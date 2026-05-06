@@ -19,6 +19,12 @@ PyMuPDF>=1.24.0,<2.0.0
 # PyMuPDF used to vendor it; modern PyMuPDF wheels do NOT, so declare
 # it explicitly to avoid an ImportError on phash compute.
 Pillow>=10.0.0,<12.99.0
+# openai: preanalyze.py calls vision directly for batch processing,
+# AND the unit-test suite transitively imports shared/aoai.py via
+# diagram.py -> normalize_figure_ref. Function App runtime has its
+# own copy in function_app/requirements.txt; this declaration is
+# specifically for the local script + test environment.
+openai>=1.40.0,<2.0.0
 # azure-cosmos is optional but recommended -- enables run_history +
 # pdf_state writes for the Power BI dashboard. Without it, the
 # cosmos_writer module silently no-ops (preanalyze still works).
