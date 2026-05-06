@@ -198,3 +198,5 @@ if ($j.analyzeResult) {
     Write-Host "paragraphs count: $($j.paragraphs.Count)"
     Write-Host "sections count: $($j.sections.Count)"
 }
+
+?filter=record_type eq 'text' and physical_pdf_page ne null&select=chunk_id,physical_pdf_page,printed_page_label,text_bbox,callouts,page_resolution_method&$top=3
