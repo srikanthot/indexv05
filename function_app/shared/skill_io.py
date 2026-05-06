@@ -43,10 +43,22 @@ def handle_skill_request(
 ) -> func.HttpResponse:
     try:
         body = req.get_json()
-    except ValueError:
+    except (ValueError, Exception) as exc:  # noqa: B014 -- defensive: any parse failure
+        # Catch ANY parse failure (not just ValueError). Some Azure
+        # Functions versions raise different exception types for
+        # malformed/missing bodies, and an uncaught exception here
+        # surfaces in the indexer log as "Web Api response status:
+        # 'InternalServerError'" with no useful detail.
+        logging.warning("skill request body parse failed: %s", exc)
         return func.HttpResponse("Invalid JSON body", status_code=400)
 
-    values_in = body.get("values", [])
+    if not isinstance(body, dict):
+        return func.HttpResponse("Body must be a JSON object", status_code=400)
+    values_in = body.get("values") or []
+    if not isinstance(values_in, list):
+        return func.HttpResponse(
+            "Body 'values' must be a list", status_code=400,
+        )
     values_out = []
 
     for record in values_in:
