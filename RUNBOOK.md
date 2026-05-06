@@ -223,18 +223,51 @@ If `Resource group:` is empty:
 
 ---
 
-#### Step 5 — Create the database
+#### Step 5 — Determine if your Cosmos account is serverless or provisioned
+
+Serverless accounts can't take a `--throughput` flag on database creation.
+Check first:
+
+```powershell
+$IS_SERVERLESS = (az cosmosdb show --name $COSMOS_ACCOUNT --resource-group $ACCOUNT_RG --query "capabilities[?name=='EnableServerless'] | length(@)" -o tsv)
+Write-Host "Serverless? $IS_SERVERLESS  (1 = yes, 0 = no)"
+```
+
+---
+
+#### Step 5b — Create the database (serverless path)
+
+If Step 5 said `Serverless? 1`, run this (NO --throughput flag):
+
+```powershell
+az cosmosdb sql database create --account-name $COSMOS_ACCOUNT --resource-group $ACCOUNT_RG --name $CFG.cosmos.database
+```
+
+If you get `(BadRequest) Shared throughput database creation is not
+supported for serverless accounts`, you accidentally included
+`--throughput` — drop it and re-run.
+
+---
+
+#### Step 5c — Create the database (provisioned path)
+
+If Step 5 said `Serverless? 0`, run this with throughput:
 
 ```powershell
 az cosmosdb sql database create --account-name $COSMOS_ACCOUNT --resource-group $ACCOUNT_RG --name $CFG.cosmos.database --throughput 400
 ```
 
-**What to expect**: JSON output describing the created database, OR a
-`(Conflict) ... already exists` error (that's also fine — means the
-database is already there).
+---
+
+**What to expect from either 5b or 5c**: JSON output describing the
+created database, OR a `(Conflict) ... already exists` error (also
+fine — means the database is already there).
 
 If you get `(--resource-group | -g) are required`, your `$ACCOUNT_RG`
 variable is empty — go back to Step 4 and set it manually.
+
+If you get `(ResourceNotFound)`, the account isn't in the RG you
+specified — re-check Step 1's table for the correct `Rg` column value.
 
 ---
 
