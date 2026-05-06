@@ -16,6 +16,15 @@ And must return:
     ...
   ]
 }
+
+CRITICAL contract: a single record cannot return BOTH `data` and
+`errors` populated at the same time. Azure Search rejects such
+responses with: "Web Api response contains both data and errors.
+Will not process." When a record fails, return `data: null` (not
+an empty dict — empty dict still trips the constraint) and put the
+failure in `errors`. The indexer logs the error in its execution
+status; the chunk doesn't land in the index, which is the right
+outcome — a partially-processed chunk would mislead retrieval.
 """
 
 import json
@@ -53,12 +62,14 @@ def handle_skill_request(
             })
         except ConfigError as exc:
             # Misconfigured Function App: surface as a clean per-record
-            # error instead of a 500. The skillset run will continue and
-            # the indexer error column will show exactly what is missing.
+            # error so the indexer's execution status shows exactly what
+            # is missing, instead of a 500 from this whole skill batch.
+            # `data: null` is required by Azure's "either data or errors,
+            # never both" contract — see module docstring.
             logging.error("record %s config error: %s", record_id, exc)
             values_out.append({
                 "recordId": record_id,
-                "data": {"processing_status": "config_error"},
+                "data": None,
                 "errors": [{"message": f"ConfigError: {exc}"}],
                 "warnings": [],
             })
@@ -66,7 +77,7 @@ def handle_skill_request(
             logging.exception("record %s failed: %s", record_id, exc)
             values_out.append({
                 "recordId": record_id,
-                "data": {"processing_status": "error"},
+                "data": None,
                 "errors": [{"message": f"{type(exc).__name__}: {exc}"}],
                 "warnings": [],
             })
