@@ -93,11 +93,28 @@
         { "name": "figure_ref", "targetName": "text_figure_ref" },
         { "name": "table_ref", "targetName": "text_table_ref" },
         { "name": "figures_referenced", "targetName": "text_figures_referenced" },
+        { "name": "figures_referenced_normalized", "targetName": "text_figures_referenced_normalized" },
         { "name": "tables_referenced", "targetName": "text_tables_referenced" },
+        { "name": "sections_referenced", "targetName": "text_sections_referenced" },
+        { "name": "pages_referenced", "targetName": "text_pages_referenced" },
         { "name": "highlight_text", "targetName": "text_highlight_text" },
         { "name": "text_bbox", "targetName": "text_text_bbox" },
         { "name": "pdf_total_pages", "targetName": "text_pdf_total_pages" },
         { "name": "page_resolution_method", "targetName": "text_page_resolution_method" },
+        { "name": "callouts", "targetName": "text_callouts" },
+        { "name": "safety_callout", "targetName": "text_safety_callout" },
+        { "name": "footnotes", "targetName": "text_footnotes" },
+        { "name": "ocr_min_confidence", "targetName": "text_ocr_min_confidence" },
+        { "name": "document_revision", "targetName": "text_document_revision" },
+        { "name": "effective_date", "targetName": "text_effective_date" },
+        { "name": "document_number", "targetName": "text_document_number" },
+        { "name": "record_subtype", "targetName": "text_record_subtype" },
+        { "name": "chunk_token_count", "targetName": "text_chunk_token_count" },
+        { "name": "embedding_version", "targetName": "text_embedding_version" },
+        { "name": "last_indexed_at", "targetName": "text_last_indexed_at" },
+        { "name": "equipment_ids", "targetName": "text_equipment_ids" },
+        { "name": "language", "targetName": "text_language" },
+        { "name": "chunk_quality_score", "targetName": "text_chunk_quality_score" },
         { "name": "processing_status", "targetName": "text_processing_status" },
         { "name": "skill_version", "targetName": "text_skill_version" }
       ]
@@ -135,6 +152,7 @@
         { "name": "figure_id", "targetName": "dgm_figure_id" },
         { "name": "figure_bbox", "targetName": "dgm_figure_bbox" },
         { "name": "image_hash", "targetName": "dgm_image_hash" },
+        { "name": "image_phash", "targetName": "dgm_image_phash" },
         { "name": "physical_pdf_page", "targetName": "dgm_physical_pdf_page" },
         { "name": "physical_pdf_page_end", "targetName": "dgm_physical_pdf_page_end" },
         { "name": "physical_pdf_pages", "targetName": "dgm_physical_pdf_pages" },
@@ -152,6 +170,7 @@
         { "name": "diagram_description", "targetName": "dgm_description" },
         { "name": "diagram_category", "targetName": "dgm_category" },
         { "name": "figure_ref", "targetName": "dgm_figure_ref" },
+        { "name": "figures_referenced_normalized", "targetName": "dgm_figures_referenced_normalized" },
         { "name": "processing_status", "targetName": "dgm_processing_status" },
         { "name": "skill_version", "targetName": "dgm_skill_version" }
       ]
@@ -207,7 +226,9 @@
         { "name": "table_col_count", "targetName": "tbl_col_count" },
         { "name": "table_caption", "targetName": "tbl_caption" },
         { "name": "processing_status", "targetName": "tbl_processing_status" },
-        { "name": "skill_version", "targetName": "tbl_skill_version" }
+        { "name": "skill_version", "targetName": "tbl_skill_version" },
+        { "name": "table_rows", "targetName": "tbl_table_rows" },
+        { "name": "chunk_content_hash", "targetName": "tbl_chunk_content_hash" }
       ]
     },
 
@@ -286,22 +307,41 @@
         { "name": "chunk_for_semantic", "targetName": "sum_chunk_for_semantic" },
         { "name": "highlight_text", "targetName": "sum_highlight_text" },
         { "name": "pdf_total_pages", "targetName": "sum_pdf_total_pages" },
+        { "name": "page_resolution_method", "targetName": "sum_page_resolution_method" },
+        { "name": "document_revision", "targetName": "sum_document_revision" },
+        { "name": "effective_date", "targetName": "sum_effective_date" },
+        { "name": "document_number", "targetName": "sum_document_number" },
         { "name": "processing_status", "targetName": "sum_processing_status" },
         { "name": "skill_version", "targetName": "sum_skill_version" }
       ]
     },
 
     {
+      "@odata.type": "#Microsoft.Skills.Util.ConditionalSkill",
+      "name": "gate-text-embedding-input",
+      "description": "Cost gate: pass chunk_for_semantic to the embedding skill ONLY when processing_status != 'toc_like'. TOC chunks are filtered at retrieval anyway, so embedding them was pure cost.",
+      "context": "/document/markdownDocument/*/pages/*",
+      "inputs": [
+        { "name": "condition", "source": "= $(/document/markdownDocument/*/pages/*/text_processing_status) != 'toc_like'" },
+        { "name": "whenTrue", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" },
+        { "name": "whenFalse", "source": "= ''" }
+      ],
+      "outputs": [
+        { "name": "output", "targetName": "text_chunk_for_embedding" }
+      ]
+    },
+
+    {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-text-chunks",
-      "description": "Ada-002 embeddings for text chunks",
+      "description": "Ada-002 embeddings for text chunks. Reads text_chunk_for_embedding (gated) instead of text_chunk_for_semantic so toc_like chunks pass an empty string and don't trigger an embedding call.",
       "context": "/document/markdownDocument/*/pages/*",
       "resourceUri": "<AOAI_ENDPOINT>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
       "inputs": [
-        { "name": "text", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" }
+        { "name": "text", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_embedding" }
       ],
       "outputs": [
         { "name": "embedding", "targetName": "text_vector" }
@@ -309,16 +349,31 @@
     },
 
     {
+      "@odata.type": "#Microsoft.Skills.Util.ConditionalSkill",
+      "name": "gate-diagram-embedding-input",
+      "description": "Cost gate: pass dgm_chunk_for_semantic to the embedding skill ONLY when has_diagram=true. Decorative / not-useful figures emit empty descriptions and embedding them was pure waste (~30-50% of diagram embedding spend).",
+      "context": "/document/enriched_figures/*",
+      "inputs": [
+        { "name": "condition", "source": "= $(/document/enriched_figures/*/dgm_has_diagram)" },
+        { "name": "whenTrue", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" },
+        { "name": "whenFalse", "source": "= ''" }
+      ],
+      "outputs": [
+        { "name": "output", "targetName": "dgm_chunk_for_embedding" }
+      ]
+    },
+
+    {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-diagram-chunks",
-      "description": "Ada-002 embeddings for per-figure diagram chunks",
+      "description": "Ada-002 embeddings for per-figure diagram chunks. Reads the gated dgm_chunk_for_embedding so figures with has_diagram=false skip the AOAI call.",
       "context": "/document/enriched_figures/*",
       "resourceUri": "<AOAI_ENDPOINT>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
       "inputs": [
-        { "name": "text", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" }
+        { "name": "text", "source": "/document/enriched_figures/*/dgm_chunk_for_embedding" }
       ],
       "outputs": [
         { "name": "embedding", "targetName": "dgm_text_vector" }
@@ -339,6 +394,23 @@
       ],
       "outputs": [
         { "name": "embedding", "targetName": "tbl_text_vector" }
+      ]
+    },
+
+    {
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "name": "embed-table-row-chunks",
+      "description": "Ada-002 embeddings for per-row table records (record_type=table_row)",
+      "context": "/document/enriched_tables/*/tbl_table_rows/*",
+      "resourceUri": "<AOAI_ENDPOINT>",
+      "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
+      "modelName": "text-embedding-ada-002",
+      "dimensions": 1536,
+      "inputs": [
+        { "name": "text", "source": "/document/enriched_tables/*/tbl_table_rows/*/chunk_for_semantic" }
+      ],
+      "outputs": [
+        { "name": "embedding", "targetName": "row_text_vector" }
       ]
     },
 
@@ -392,6 +464,9 @@
           { "name": "figure_ref", "source": "/document/markdownDocument/*/pages/*/text_figure_ref" },
           { "name": "table_ref", "source": "/document/markdownDocument/*/pages/*/text_table_ref" },
           { "name": "figures_referenced", "source": "/document/markdownDocument/*/pages/*/text_figures_referenced" },
+          { "name": "figures_referenced_normalized", "source": "/document/markdownDocument/*/pages/*/text_figures_referenced_normalized" },
+          { "name": "sections_referenced", "source": "/document/markdownDocument/*/pages/*/text_sections_referenced" },
+          { "name": "pages_referenced", "source": "/document/markdownDocument/*/pages/*/text_pages_referenced" },
           { "name": "tables_referenced", "source": "/document/markdownDocument/*/pages/*/text_tables_referenced" },
           { "name": "parent_id", "source": "/document/markdownDocument/*/pages/*/text_parent_id" },
           { "name": "chunk", "source": "/document/markdownDocument/*/pages/*" },
@@ -400,6 +475,20 @@
           { "name": "text_bbox", "source": "/document/markdownDocument/*/pages/*/text_text_bbox" },
           { "name": "pdf_total_pages", "source": "/document/markdownDocument/*/pages/*/text_pdf_total_pages" },
           { "name": "page_resolution_method", "source": "/document/markdownDocument/*/pages/*/text_page_resolution_method" },
+          { "name": "callouts", "source": "/document/markdownDocument/*/pages/*/text_callouts" },
+          { "name": "safety_callout", "source": "/document/markdownDocument/*/pages/*/text_safety_callout" },
+          { "name": "footnotes", "source": "/document/markdownDocument/*/pages/*/text_footnotes" },
+          { "name": "ocr_min_confidence", "source": "/document/markdownDocument/*/pages/*/text_ocr_min_confidence" },
+          { "name": "document_revision", "source": "/document/markdownDocument/*/pages/*/text_document_revision" },
+          { "name": "effective_date", "source": "/document/markdownDocument/*/pages/*/text_effective_date" },
+          { "name": "document_number", "source": "/document/markdownDocument/*/pages/*/text_document_number" },
+          { "name": "record_subtype", "source": "/document/markdownDocument/*/pages/*/text_record_subtype" },
+          { "name": "chunk_token_count", "source": "/document/markdownDocument/*/pages/*/text_chunk_token_count" },
+          { "name": "embedding_version", "source": "/document/markdownDocument/*/pages/*/text_embedding_version" },
+          { "name": "last_indexed_at", "source": "/document/markdownDocument/*/pages/*/text_last_indexed_at" },
+          { "name": "equipment_ids", "source": "/document/markdownDocument/*/pages/*/text_equipment_ids" },
+          { "name": "language", "source": "/document/markdownDocument/*/pages/*/text_language" },
+          { "name": "chunk_quality_score", "source": "/document/markdownDocument/*/pages/*/text_chunk_quality_score" },
           { "name": "text_vector", "source": "/document/markdownDocument/*/pages/*/text_vector" },
           { "name": "processing_status", "source": "/document/markdownDocument/*/pages/*/text_processing_status" },
           { "name": "skill_version", "source": "/document/markdownDocument/*/pages/*/text_skill_version" },
@@ -438,7 +527,9 @@
           { "name": "diagram_category", "source": "/document/enriched_figures/*/dgm_category" },
           { "name": "has_diagram", "source": "/document/enriched_figures/*/dgm_has_diagram" },
           { "name": "figure_ref", "source": "/document/enriched_figures/*/dgm_figure_ref" },
+          { "name": "figures_referenced_normalized", "source": "/document/enriched_figures/*/dgm_figures_referenced_normalized" },
           { "name": "image_hash", "source": "/document/enriched_figures/*/dgm_image_hash" },
+          { "name": "image_phash", "source": "/document/enriched_figures/*/dgm_image_phash" },
           { "name": "surrounding_context", "source": "/document/enriched_figures/*/dgm_surrounding_context" },
           { "name": "parent_id", "source": "/document/enriched_figures/*/dgm_parent_id" },
           { "name": "chunk", "source": "/document/enriched_figures/*/dgm_description" },
@@ -483,8 +574,48 @@
           { "name": "chunk", "source": "/document/enriched_tables/*/tbl_chunk" },
           { "name": "chunk_for_semantic", "source": "/document/enriched_tables/*/tbl_chunk_for_semantic" },
           { "name": "text_vector", "source": "/document/enriched_tables/*/tbl_text_vector" },
+          { "name": "chunk_content_hash", "source": "/document/enriched_tables/*/tbl_chunk_content_hash" },
           { "name": "processing_status", "source": "/document/enriched_tables/*/tbl_processing_status" },
           { "name": "skill_version", "source": "/document/enriched_tables/*/tbl_skill_version" },
+          { "name": "operationalarea", "source": "/document/operationalarea" },
+          { "name": "functionalarea",  "source": "/document/functionalarea" },
+          { "name": "doctype",         "source": "/document/doctype" },
+          { "name": "filetype",        "source": "/document/filetype" }
+        ]
+      },
+
+      {
+        "targetIndexName": "<INDEX_NAME>",
+        "parentKeyFieldName": "tbl_parent_id",
+        "sourceContext": "/document/enriched_tables/*/tbl_table_rows/*",
+        "mappings": [
+          { "name": "chunk_id", "source": "/document/enriched_tables/*/tbl_table_rows/*/chunk_id" },
+          { "name": "record_type", "source": "/document/enriched_tables/*/tbl_table_rows/*/record_type" },
+          { "name": "source_file", "source": "/document/enriched_tables/*/tbl_table_rows/*/source_file" },
+          { "name": "source_url", "source": "/document/enriched_tables/*/tbl_table_rows/*/source_path" },
+          { "name": "source_path", "source": "/document/enriched_tables/*/tbl_table_rows/*/source_path" },
+          { "name": "parent_id", "source": "/document/enriched_tables/*/tbl_table_rows/*/parent_id" },
+          { "name": "header_1", "source": "/document/enriched_tables/*/tbl_table_rows/*/header_1" },
+          { "name": "header_2", "source": "/document/enriched_tables/*/tbl_table_rows/*/header_2" },
+          { "name": "header_3", "source": "/document/enriched_tables/*/tbl_table_rows/*/header_3" },
+          { "name": "physical_pdf_page", "source": "/document/enriched_tables/*/tbl_table_rows/*/physical_pdf_page" },
+          { "name": "physical_pdf_page_end", "source": "/document/enriched_tables/*/tbl_table_rows/*/physical_pdf_page_end" },
+          { "name": "physical_pdf_pages", "source": "/document/enriched_tables/*/tbl_table_rows/*/physical_pdf_pages" },
+          { "name": "printed_page_label", "source": "/document/enriched_tables/*/tbl_table_rows/*/printed_page_label" },
+          { "name": "printed_page_label_end", "source": "/document/enriched_tables/*/tbl_table_rows/*/printed_page_label_end" },
+          { "name": "printed_page_label_is_synthetic", "source": "/document/enriched_tables/*/tbl_table_rows/*/printed_page_label_is_synthetic" },
+          { "name": "pdf_total_pages", "source": "/document/enriched_tables/*/tbl_table_rows/*/pdf_total_pages" },
+          { "name": "page_resolution_method", "source": "/document/enriched_tables/*/tbl_table_rows/*/page_resolution_method" },
+          { "name": "highlight_text", "source": "/document/enriched_tables/*/tbl_table_rows/*/highlight_text" },
+          { "name": "table_bbox", "source": "/document/enriched_tables/*/tbl_table_rows/*/table_bbox" },
+          { "name": "table_caption", "source": "/document/enriched_tables/*/tbl_table_rows/*/table_caption" },
+          { "name": "table_parent_chunk_id", "source": "/document/enriched_tables/*/tbl_table_rows/*/table_parent_chunk_id" },
+          { "name": "table_row_index", "source": "/document/enriched_tables/*/tbl_table_rows/*/table_row_index" },
+          { "name": "chunk", "source": "/document/enriched_tables/*/tbl_table_rows/*/chunk" },
+          { "name": "chunk_for_semantic", "source": "/document/enriched_tables/*/tbl_table_rows/*/chunk_for_semantic" },
+          { "name": "text_vector", "source": "/document/enriched_tables/*/tbl_table_rows/*/row_text_vector" },
+          { "name": "processing_status", "source": "/document/enriched_tables/*/tbl_table_rows/*/processing_status" },
+          { "name": "skill_version", "source": "/document/enriched_tables/*/tbl_table_rows/*/skill_version" },
           { "name": "operationalarea", "source": "/document/operationalarea" },
           { "name": "functionalarea",  "source": "/document/functionalarea" },
           { "name": "doctype",         "source": "/document/doctype" },
@@ -507,6 +638,10 @@
           { "name": "chunk_for_semantic", "source": "/document/sum_chunk_for_semantic" },
           { "name": "highlight_text", "source": "/document/sum_highlight_text" },
           { "name": "pdf_total_pages", "source": "/document/sum_pdf_total_pages" },
+          { "name": "page_resolution_method", "source": "/document/sum_page_resolution_method" },
+          { "name": "document_revision", "source": "/document/sum_document_revision" },
+          { "name": "effective_date", "source": "/document/sum_effective_date" },
+          { "name": "document_number", "source": "/document/sum_document_number" },
           { "name": "text_vector", "source": "/document/sum_text_vector" },
           { "name": "processing_status", "source": "/document/sum_processing_status" },
           { "name": "skill_version", "source": "/document/sum_skill_version" },

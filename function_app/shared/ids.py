@@ -53,6 +53,14 @@ def table_chunk_id(source_path: str, source_file: str, table_index: str) -> str:
     return f"tbl_{pid}_{table_index}"
 
 
+def table_row_chunk_id(source_path: str, source_file: str, table_index: str, row_index: int) -> str:
+    """ID for a per-row table record. Stable as long as the parent
+    table_index and row_index are stable (DI's table re-numbering on
+    paragraph insertion can break this — same caveat as table_chunk_id)."""
+    pid = parent_id_for(source_path, source_file)
+    return f"trow_{pid}_{table_index}_{row_index}"
+
+
 def summary_chunk_id(source_path: str, source_file: str) -> str:
     pid = parent_id_for(source_path, source_file)
     return f"sum_{pid}"

@@ -11,10 +11,12 @@ from typing import Any
 
 from .ids import (
     SKILL_VERSION,
+    chunk_content_hash,
     parent_id_for,
     safe_int,
     safe_str,
     table_chunk_id,
+    table_row_chunk_id,
 )
 from .text_utils import build_highlight_text
 
@@ -99,12 +101,92 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     printed_label = str(page_start) if page_start is not None else ""
     printed_label_end = str(page_end) if page_end is not None else printed_label
 
+    # Per-row records (record_type="table_row"). Built upstream by
+    # tables.extract_table_records; we just shape them into ready-to-
+    # project index documents here. Each row carries:
+    #   - the parent table's caption + section path + table_index
+    #   - the row content rendered as "Header: value; Header: value"
+    #   - its own chunk_id, page, bbox (inherited from parent for now)
+    # so a query like "200A 4-wire 277/480V conductor" hits the row
+    # directly via BM25 + vector search, without the LLM having to
+    # traverse the full markdown grid.
+    raw_rows = data.get("table_rows") or []
+    row_records: list[dict[str, Any]] = []
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict):
+            continue
+        row_index = safe_int(raw_row.get("row_index"), default=0)
+        row_text = safe_str(raw_row.get("row_text"))
+        row_page = safe_int(raw_row.get("page"), default=page_start)
+        if not row_text:
+            continue
+        row_chunk_id = table_row_chunk_id(source_path, source_file, table_index, row_index)
+        # Semantic form: lead with the parent table's identity so the
+        # ranker treats the row as a member of that table, not as
+        # standalone content. Important for queries that name the table
+        # ("Table 18-3 row for 200A").
+        row_semantic_parts: list[str] = []
+        if source_file:
+            row_semantic_parts.append(f"Source: {source_file}")
+        header_path = " > ".join([h for h in [h1, h2, h3] if h])
+        if header_path:
+            row_semantic_parts.append(f"Section: {header_path}")
+        if row_page is not None:
+            row_semantic_parts.append(f"Page: {row_page}")
+        if caption:
+            row_semantic_parts.append(f"Table: {caption}")
+        row_semantic_parts.append(f"Row: {row_text}")
+        row_semantic = "\n".join(row_semantic_parts)
+
+        row_printed = str(row_page) if row_page is not None else ""
+        row_records.append({
+            "chunk_id": row_chunk_id,
+            "parent_id": parent_id,
+            "record_type": "table_row",
+            "chunk": row_text,
+            "chunk_for_semantic": row_semantic,
+            "highlight_text": build_highlight_text(row_text),
+            # Inherit the parent table's bbox (we don't compute per-row
+            # bboxes — frontend can dim the parent table and accent the
+            # row by index if it wants). Same JSON shape as the parent.
+            "table_bbox": table_bbox_json,
+            "header_1": h1,
+            "header_2": h2,
+            "header_3": h3,
+            "physical_pdf_page": row_page,
+            "physical_pdf_page_end": row_page,
+            "physical_pdf_pages": [row_page] if row_page is not None else [],
+            "printed_page_label": row_printed,
+            "printed_page_label_end": row_printed,
+            "printed_page_label_is_synthetic": bool(row_printed),
+            "pdf_total_pages": pdf_total_pages,
+            "page_resolution_method": "di_input" if row_page is not None else "missing",
+            # Parent linkage for the citation UI: clicking a row
+            # citation can fetch the parent table_chunk_id to render
+            # the surrounding context.
+            "table_caption": caption,
+            "table_parent_chunk_id": chunk_id,
+            "table_row_index": row_index,
+            "source_file": source_file,
+            "source_path": source_path,
+            "processing_status": "ok",
+            "skill_version": SKILL_VERSION,
+        })
+
+    # Content hash for re-embedding gate. When the markdown content of
+    # this logical table is unchanged across indexer runs, the embedding
+    # skill can short-circuit (search_cache.lookup_existing_by_content_hash
+    # returns the prior text_vector). Saves the AOAI call on every table
+    # whose content didn't change between runs.
+    content_hash = chunk_content_hash(markdown, length=16)
+
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
         "record_type": "table",
         "chunk": markdown,
         "chunk_for_semantic": chunk_for_semantic,
+        "chunk_content_hash": content_hash,
         "highlight_text": highlight,
         "table_bbox": table_bbox_json,
         "header_1": h1,
@@ -128,4 +210,8 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "source_path": source_path,
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
+        # List of pre-built per-row records ready for indexProjection.
+        # Empty list when the table has fewer than 5 or more than 80 body
+        # rows (cf. ROW_RECORD_MIN/MAX_ROWS in tables.py).
+        "table_rows": row_records,
     }

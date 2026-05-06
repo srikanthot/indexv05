@@ -17,6 +17,9 @@ walk the marker timeline to figure out which page it starts on and which
 page it ends on.
 """
 
+from __future__ import annotations
+
+import datetime
 import json
 import logging
 import re
@@ -24,6 +27,7 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
+from .config import optional_env
 from .di_client import fetch_cached_analysis
 from .ids import (
     SKILL_VERSION,
@@ -32,6 +36,125 @@ from .ids import (
     safe_str,
     text_chunk_id,
 )
+
+
+def _embedding_version() -> str:
+    """Return the embedding model identifier for this index. Sourced from
+    env so a model upgrade (ada-002 → text-embedding-3-large) bumps the
+    field without code changes; the orchestrator can then prefer-rank
+    rows with the current embedding_version."""
+    return optional_env("EMBEDDING_MODEL_VERSION", "text-embedding-ada-002")
+
+
+# Equipment-id detection. PSEG manuals reference equipment by manufacturer
+# part numbers ("GE-THQL-1120-2"), model numbers ("ABB-VD4-1250"), and
+# class codes ("NEMA 4X"). The single most common chatbot query shape on
+# technical manuals is "what does manual X say about model Y", so
+# extracting these as a filterable collection enables exact-match lookup
+# without going through full-text search.
+_EQUIPMENT_ID_RE = re.compile(
+    # 2-5 letters, hyphen, then alphanumeric chunks separated by hyphens.
+    # Requires at least one digit somewhere in the right-hand portion to
+    # avoid matching all-letter words ("NEMA-style").
+    r"\b[A-Z]{2,5}-(?:[A-Z0-9]{1,8}-){0,3}[A-Z0-9]*\d[A-Z0-9-]{0,8}\b"
+)
+
+
+def _extract_equipment_ids(text: str) -> list[str]:
+    if not text:
+        return []
+    return sorted({
+        m.group(0).rstrip(".,;:")
+        for m in _EQUIPMENT_ID_RE.finditer(text)
+    })
+
+
+def _detect_language(text: str) -> str:
+    """Best-effort language code for the chunk.
+
+    Cheap heuristic — looks for English stop-words. This is enough for
+    today's PSEG corpus (English-only) but lets a future Spanish or
+    French manual flag itself for filter routing without a full
+    language-detect dependency. Returns ISO 639-1 codes when detected,
+    "" when undetermined."""
+    if not text or len(text) < 30:
+        return ""
+    sample = text[:500].lower()
+    en_markers = (" the ", " and ", " of ", " for ", " with ", " is ")
+    es_markers = (" el ", " la ", " los ", " las ", " que ", " para ")
+    fr_markers = (" le ", " la ", " les ", " des ", " pour ", " avec ")
+    en = sum(1 for m in en_markers if m in sample)
+    es = sum(1 for m in es_markers if m in sample)
+    fr = sum(1 for m in fr_markers if m in sample)
+    best = max(en, es, fr)
+    if best == 0:
+        return ""
+    if en == best:
+        return "en"
+    if es == best:
+        return "es"
+    return "fr"
+
+
+def _compute_quality_score(
+    *,
+    page_resolution_method: str,
+    chunk_len: int,
+    has_headers: bool,
+    is_toc_like: bool,
+    has_callouts: bool,
+    has_figure_or_table_ref: bool,
+) -> float:
+    """Composite chunk-quality score in [0.0, 1.0]. Used as a tie-breaker
+    when the semantic ranker can't distinguish two near-equal hits.
+
+    Signals (each weighted by how strongly it predicts retrieval value):
+      - page_resolution_method: di_input/header_match (high) vs missing (low)
+      - chunk_len: too-short chunks under-perform; very long chunks
+        risk being a TOC dump or boilerplate
+      - has_headers: header chain attached -> strong context
+      - is_toc_like: penalty (these are filtered, but the score reflects
+        weakness if a TOC sneaks past the heuristic)
+      - has_callouts / has_figure_or_table_ref: retrieval-rich content
+    """
+    score = 0.0
+    method_weight = {
+        "di_input": 0.30,
+        "header_match": 0.30,
+        "fuzzy_match": 0.20,
+        "paragraph_bbox": 0.20,
+        "bbox_corrected": 0.25,
+        "missing": 0.0,
+        "document_summary": 0.20,
+    }.get(page_resolution_method, 0.10)
+    score += method_weight
+    if has_headers:
+        score += 0.20
+    if 200 <= chunk_len <= 3000:
+        score += 0.20
+    elif 100 <= chunk_len < 200:
+        score += 0.10
+    if has_callouts:
+        score += 0.10
+    if has_figure_or_table_ref:
+        score += 0.10
+    if is_toc_like:
+        score -= 0.30
+    # Clamp to [0, 1].
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _approx_token_count(text: str) -> int:
+    """Cheap token-count approximation for prompt-budget math without
+    pulling in a tokenizer. ~4 chars per token for English text matches
+    BPE tokenizers (cl100k_base) within ~10%, which is enough precision
+    for the orchestrator to decide "can I fit 8 chunks in a 4k window?"
+    without the runtime cost of a real tokenizer call."""
+    if not text:
+        return 0
+    # Round up so an empty-after-strip chunk still reports 0, and a
+    # 1-char chunk reports 1.
+    return max(0, (len(text) + 3) // 4)
 from .sections import build_section_index
 from .text_utils import build_highlight_text
 
@@ -66,6 +189,61 @@ TABLE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Section-number references: "Section 4.2", "Sec. 18-3", "§ 4.2.1".
+# Captures just the number portion (e.g. "4.2") so the collection field
+# can be queried as `sections_referenced/any(s: s eq '4.2')`. We do NOT
+# require a leading word boundary because `§` is a non-word character.
+SECTION_REF_RE = re.compile(
+    r"(?:Section|Sec\.?|§)\s*([0-9]+(?:[\.\-][0-9]+){0,3})\b",
+    re.IGNORECASE,
+)
+
+# Page references: "page 18-25", "p. 215", "pp. 18-25", "page A-7".
+# Captures the page label (e.g. "18-25"). We accept both digit-only
+# and chapter-prefixed labels because PSEG manuals use both.
+PAGE_REF_RE = re.compile(
+    r"\b(?:page|pages|pp?\.?)\s+([A-Z]{0,3}[\-\.]?\d[\w\-\.]{0,8})",
+    re.IGNORECASE,
+)
+
+
+# Heuristic for detecting glossary / definitions / acronyms chunks. Match
+# on the chunk's header chain (h1/h2/h3) — these sections are usually
+# tagged clearly in the manual's TOC. We also check for "definition" lines
+# in the body as a content-side signal for chunks that DI didn't tag with
+# a clean header. The result populates `record_subtype="glossary"` so a
+# chatbot answering "what does X mean?" can prefer-rank glossary entries
+# over body prose that happens to mention X.
+GLOSSARY_HEADER_RE = re.compile(
+    r"\b(glossary|definitions?|acronyms?|abbreviations?|nomenclature|terminology)\b",
+    re.IGNORECASE,
+)
+# Body-side signal: lines like "TERM:" or "TERM —" followed by a definition.
+# Looks for at least 3 consecutive such lines (a glossary in flight). The
+# term character class allows letters, digits, ampersand, parens, slash,
+# dot, comma, apostrophe, and hyphen — covers common glossary terms like
+# "PSE&G", "I/O", "120/240V", "Section 4.2", "L1 (line 1)".
+GLOSSARY_LINE_RE = re.compile(
+    r"^\s*[A-Z][\w &()/.,'\-]{1,40}\s*[:\-—–]\s+\S",
+    re.MULTILINE,
+)
+
+
+def _is_glossary_chunk(text: str, h1: str, h2: str, h3: str) -> bool:
+    """True if the chunk is glossary content. Header match wins; body
+    pattern match (≥3 definition-style lines) is a fallback."""
+    for h in (h1, h2, h3):
+        if h and GLOSSARY_HEADER_RE.search(h):
+            return True
+    if text:
+        # Count definition-style lines. ≥3 indicates a glossary in flight.
+        # Lower threshold than _is_toc_like because glossary chunks are
+        # often shorter and more uniform.
+        matches = GLOSSARY_LINE_RE.findall(text)
+        if len(matches) >= 3:
+            return True
+    return False
+
 
 # Heuristic for detecting Table-of-Contents / List-of-Figures style chunks:
 # lines like "Section title ............... 18-3" with dot-leaders followed
@@ -76,23 +254,43 @@ TOC_LEADER_LINE_RE = re.compile(
     r".+?(?:\s*\.\s*){3,}\s*[\dA-Z][\w\-\.]{0,8}\s*$",
 )
 
+# Relaxed variant: a line that ENDS with a page-pointer (e.g. "18-3", "215",
+# "A-7"), regardless of whether dot-leaders are present. Catches:
+#   - Tab-aligned TOCs that DI rendered as columns of whitespace
+#   - List-of-Figures pages with multi-line caption wraps
+#   - Back-of-book index lines: "Breaker, molded-case . . . 18-3, 18-7"
+#
+# More forgiving than the dot-leader regex but still anchored on the trailing
+# page reference to keep false positives off body content.
+TOC_TAILING_PAGE_RE = re.compile(
+    r"^.{4,}?\s+[A-Z]?\d[\w\-\.]{0,8}(?:\s*,\s*[A-Z]?\d[\w\-\.]{0,8})*\s*$"
+)
+
 
 def _is_toc_like(text: str) -> bool:
     """True if the chunk reads as a TOC / list-of-figures / index page.
 
-    Conservative thresholds to avoid false positives on legitimate content
-    that happens to have a page-pointer or two:
-      - at least 5 dot-leader lines
-      - >= 60% of non-empty lines match
-    A real body chunk almost never crosses both bars; a TOC chunk almost
-    always does.
+    Two-tier detection:
+      - Strict: dot-leader lines (".....18-3"). High precision.
+      - Relaxed: lines ending with a page-pointer (and no other content
+        signal). Catches tab-aligned TOCs and back-of-book indexes.
+
+    Tier requirements:
+      - At least 5 lines that match either tier
+      - >= 60% of non-empty lines match (ratio guard against body-text
+        chunks that contain a few page pointers but read as prose)
+
+    A real body chunk almost never crosses both bars; a TOC / index
+    chunk almost always does.
     """
     if not text:
         return False
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if len(lines) < 5:
         return False
-    matches = sum(1 for ln in lines if TOC_LEADER_LINE_RE.match(ln))
+    strict = sum(1 for ln in lines if TOC_LEADER_LINE_RE.match(ln))
+    relaxed = sum(1 for ln in lines if TOC_TAILING_PAGE_RE.match(ln))
+    matches = max(strict, relaxed)
     if matches < 5:
         return False
     return (matches / len(lines)) >= 0.6
@@ -207,6 +405,286 @@ def _pdf_total_pages_for(source_path: str) -> int | None:
     return len(pages) if pages else None
 
 
+def _printed_label_for_page(source_path: str, physical_page: int | None) -> str | None:
+    """Look up the printed page label for a specific physical page by
+    scanning DI's pageNumber/pageFooter/pageHeader role paragraphs in
+    the cached analyzeResult.
+
+    DI tags page-furniture paragraphs with `role` ∈ {pageNumber,
+    pageFooter, pageHeader, pageBreak}. The pageNumber role, when
+    present, holds exactly the printed label ("5-7", "iv", "A-12").
+    Footers/headers may carry it inline among other text; we extract
+    it via the same heuristic as `_extract_label`.
+
+    This catches chapter-prefixed labels like "5-7" that the chunk
+    body doesn't contain (they live in the page footer, which DI
+    extracts as a separate paragraph with role=pageFooter — not
+    visible to the SplitSkill chunk).
+
+    Returns None when no label can be recovered. Callers should fall
+    back to synthesizing from the physical page number in that case.
+    """
+    if physical_page is None or not source_path:
+        return None
+    result = _analysis_for(source_path)
+    if not result:
+        return None
+    paragraphs = result.get("paragraphs") or []
+    if not paragraphs:
+        return None
+
+    # First pass: pageNumber-role paragraphs on this physical page are
+    # the canonical source. If DI tagged any, trust them.
+    for para in paragraphs:
+        role = (para.get("role") or "").lower()
+        if role != "pagenumber":
+            continue
+        for region in para.get("boundingRegions") or []:
+            if region.get("pageNumber") == physical_page:
+                content = (para.get("content") or "").strip()
+                if content:
+                    return content
+
+    # Second pass: scan pageFooter / pageHeader paragraphs on this page.
+    # These often look like "Chapter 5 — Meters | 5-7" or similar; run
+    # the printed-label heuristic over their text.
+    for para in paragraphs:
+        role = (para.get("role") or "").lower()
+        if role not in ("pagefooter", "pageheader"):
+            continue
+        for region in para.get("boundingRegions") or []:
+            if region.get("pageNumber") == physical_page:
+                content = (para.get("content") or "").strip()
+                if not content:
+                    continue
+                label = _extract_label(content)
+                if label:
+                    return label
+                break
+
+    return None
+
+
+# ---------- cover-page metadata ----------
+#
+# These regexes are used to mine page-1 paragraphs for document-level
+# fields the chatbot must know to answer "is this the current revision?".
+# Tolerant: PSEG manuals format these many ways across the corpus.
+_REVISION_RE = re.compile(
+    r"\b(?:rev(?:ision)?|version|issue|ver)\.?\s*[:\-]?\s*([A-Z0-9][\w\.\-]{0,15})",
+    re.IGNORECASE,
+)
+_DOC_NUMBER_RE = re.compile(
+    r"\b(?:document\s*(?:number|no\.?)|doc\s*(?:no\.?|#)|publication\s*(?:no\.?|number))\s*[:\-]?\s*([A-Z0-9][\w\-]{2,30})",
+    re.IGNORECASE,
+)
+# Date matchers — try month-year, ISO, and slash formats. We emit ISO 8601
+# (YYYY-MM or YYYY-MM-DD) so the index field is sort/filter-friendly.
+_MONTHS = {
+    "jan": "01", "january": "01", "feb": "02", "february": "02",
+    "mar": "03", "march": "03", "apr": "04", "april": "04",
+    "may": "05", "jun": "06", "june": "06", "jul": "07", "july": "07",
+    "aug": "08", "august": "08", "sep": "09", "sept": "09", "september": "09",
+    "oct": "10", "october": "10", "nov": "11", "november": "11",
+    "dec": "12", "december": "12",
+}
+_DATE_MONTH_YEAR_RE = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\s+(\d{1,2}),?\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+_DATE_MONTH_YEAR_SHORT_RE = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+_DATE_ISO_RE = re.compile(r"\b(\d{4})[\-/](\d{1,2})[\-/](\d{1,2})\b")
+
+
+def _parse_date(text: str) -> str:
+    """Return an ISO 8601 date (YYYY-MM-DD or YYYY-MM) or '' if no
+    parseable date is found. Forgiving: scans the input for any of the
+    common formats and returns the first match. Used for cover-page
+    effective-date extraction."""
+    if not text:
+        return ""
+    m = _DATE_ISO_RE.search(text)
+    if m:
+        y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+        return f"{y}-{mo}-{d}"
+    m = _DATE_MONTH_YEAR_RE.search(text)
+    if m:
+        mo = _MONTHS.get(m.group(1).lower()[:3])
+        if mo:
+            return f"{m.group(3)}-{mo}-{m.group(2).zfill(2)}"
+    m = _DATE_MONTH_YEAR_SHORT_RE.search(text)
+    if m:
+        mo = _MONTHS.get(m.group(1).lower()[:3])
+        if mo:
+            return f"{m.group(2)}-{mo}"
+    return ""
+
+
+def cover_metadata_for_pdf(source_path: str) -> dict[str, str]:
+    """Extract document-level metadata from the cover/title page of a
+    PDF: revision identifier, effective date (ISO format), document
+    number. Returns a dict with three string fields, each '' when not
+    extractable.
+
+    Why this matters: PSEG technical manuals are revised over decades.
+    The chatbot must be able to filter retrieval to the current revision
+    of a manual; the LLM cannot tell a 1998 manual from a 2024 manual
+    by inspecting page text alone. Surfacing these as filterable index
+    fields lets the orchestrator say "only consider chunks where
+    effective_date >= '2020-01'".
+
+    Strategy: scan all paragraphs whose `boundingRegions[*].pageNumber`
+    is in {1, 2, 3} (cover pages — many manuals push real metadata to
+    page 2 or 3 with a logo/blank cover) and run revision/date/doc-
+    number regexes over each. Earliest match wins for revision (cover
+    is more authoritative than continuation pages); first-match for
+    date and doc-number too.
+    """
+    if not source_path:
+        return {"document_revision": "", "effective_date": "", "document_number": ""}
+    result = _analysis_for(source_path)
+    if not result:
+        return {"document_revision": "", "effective_date": "", "document_number": ""}
+    paragraphs = result.get("paragraphs") or []
+    if not paragraphs:
+        return {"document_revision": "", "effective_date": "", "document_number": ""}
+
+    revision = ""
+    effective_date = ""
+    document_number = ""
+    for para in paragraphs:
+        on_cover = False
+        for region in para.get("boundingRegions") or []:
+            pn = region.get("pageNumber")
+            if isinstance(pn, int) and pn in (1, 2, 3):
+                on_cover = True
+                break
+        if not on_cover:
+            continue
+        content = (para.get("content") or "").strip()
+        if not content:
+            continue
+        if not revision:
+            m = _REVISION_RE.search(content)
+            if m:
+                revision = m.group(1).rstrip(".,;:")
+        if not document_number:
+            m = _DOC_NUMBER_RE.search(content)
+            if m:
+                document_number = m.group(1).rstrip(".,;:")
+        if not effective_date:
+            d = _parse_date(content)
+            if d:
+                effective_date = d
+        if revision and effective_date and document_number:
+            break
+
+    return {
+        "document_revision": revision,
+        "effective_date": effective_date,
+        "document_number": document_number,
+    }
+
+
+def _ocr_min_confidence_for_pages(source_path: str, pages: list[int] | None) -> float | None:
+    """Return the minimum DI per-word OCR confidence across all words on
+    `pages`, or None when no confidence data is present (digital-text
+    PDFs typically omit it; only OCR'd pages carry word-level confidence).
+
+    Used to populate `ocr_min_confidence` on text records so a chatbot
+    can caveat answers grounded in low-confidence OCR ("the manual *may*
+    say 240V but the OCR confidence on this page is 0.62"). The
+    chatbot orchestrator can also refuse-with-citation when the value
+    drops below a configured threshold (e.g. 0.75).
+
+    Implementation note: DI emits confidence at the word level. We take
+    the min (worst case) rather than the mean so a single low-confidence
+    word — which might be the answer ("240" vs "440") — surfaces.
+    """
+    if not source_path or not pages:
+        return None
+    page_set = {p for p in pages if isinstance(p, int)}
+    if not page_set:
+        return None
+    result = _analysis_for(source_path)
+    if not result:
+        return None
+    di_pages = result.get("pages") or []
+    if not di_pages:
+        return None
+
+    min_conf: float | None = None
+    for page in di_pages:
+        pn = page.get("pageNumber")
+        if not isinstance(pn, int) or pn not in page_set:
+            continue
+        for word in page.get("words") or []:
+            conf = word.get("confidence")
+            if not isinstance(conf, (int, float)):
+                continue
+            c = float(conf)
+            if min_conf is None or c < min_conf:
+                min_conf = c
+    return round(min_conf, 4) if min_conf is not None else None
+
+
+def _footnotes_for_pages(source_path: str, pages: list[int] | None) -> list[str]:
+    """Return all DI footnote paragraphs that fall on any of `pages`,
+    preserving document order. Used to populate the `footnotes` collection
+    field on each text record so a chatbot can surface IEEE / NEC / OSHA
+    citations that live in footnotes alongside the body chunk that
+    referenced them.
+
+    DI tags footnote paragraphs with `role: "footnote"`. Each entry in
+    the returned list is the verbatim footnote text — the citation UI
+    (or the LLM) can decide whether to render them inline or as a
+    collapsed list. We do NOT attempt marker→body linkage here (that
+    requires parsing superscript markers in body paragraphs against
+    leading numerals/glyphs in footnote paragraphs and is brittle); a
+    follow-up pass can add `footnote_marker` / `parent_chunk_anchor`
+    once we have a body-marker extractor.
+    """
+    if not source_path or not pages:
+        return []
+    page_set = {p for p in pages if isinstance(p, int)}
+    if not page_set:
+        return []
+    result = _analysis_for(source_path)
+    if not result:
+        return []
+    paragraphs = result.get("paragraphs") or []
+    if not paragraphs:
+        return []
+
+    out: list[str] = []
+    for para in paragraphs:
+        role = (para.get("role") or "").lower()
+        if role != "footnote":
+            continue
+        on_target_page = False
+        for region in para.get("boundingRegions") or []:
+            pn = region.get("pageNumber")
+            if isinstance(pn, int) and pn in page_set:
+                on_target_page = True
+                break
+        if not on_target_page:
+            continue
+        content = (para.get("content") or "").strip()
+        if content:
+            # Cap each footnote at 500 chars so a single long footnote
+            # can't blow up the embedding string. Full content remains
+            # in the raw DI cache for ops debugging.
+            out.append(content[:500])
+    return out
+
+
 def _bbox_from_polygon(polygon: list[float]) -> tuple[float, float, float, float] | None:
     """Convert DI's 8-number polygon (x1,y1,...,x4,y4 in inches) to
     an axis-aligned (x, y, w, h) bbox. Returns None on malformed input."""
@@ -230,10 +708,21 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
     Output shape: list of {page, x_in, y_in, w_in, h_in}, one entry per
     distinct page the chunk touches. Empty list if we can't resolve.
 
-    Matching is fuzzy by design — DI paragraphs and the SplitSkill chunk
-    are derived from the same source but reformatted differently. We
-    require ≥10-char paragraphs and check that a 60-char prefix of the
-    paragraph appears in the chunk's normalized form.
+    Matching strategy (intentionally strict to avoid false positives on
+    repeated boilerplate, TOC entries, and back-of-book index lines):
+      1. Skip paragraphs shorter than 40 chars (TOC/index/footer artifacts).
+      2. Use a 120-char head probe — long enough to be specific, short
+         enough that paragraphs straddling a chunk boundary still match.
+      3. For paragraphs longer than 200 chars, require a *second* window
+         (chars 100-200) to also appear in the chunk. A common opening
+         phrase ("For meter installations to residential...") will pass
+         the head probe in TOC entries; only the real body paragraph
+         will pass the second probe because TOC entries don't carry the
+         continuation text.
+
+    These three guards eliminate the multi-page-bbox false positives we
+    saw in production where a single chunk's content matched paragraphs
+    on the TOC page, the body page, and the appendix page simultaneously.
     """
     if not chunk_text or not source_path:
         return []
@@ -251,17 +740,27 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
     bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
     for para in paragraphs:
         content = (para.get("content") or "").strip()
-        if not content or len(content) < 10:
+        # Guard 1: minimum content length. TOC lines, page footers, and
+        # bare index entries are typically <40 chars and they're the
+        # primary source of cross-page false matches.
+        if not content or len(content) < 40:
             continue
         para_norm = _normalize_text(content)
-        if not para_norm:
+        if len(para_norm) < 40:
             continue
-        # Use a prefix probe so longer paragraphs that span chunk
-        # boundaries still match. 60 chars is enough to be specific
-        # without missing partial overlaps.
-        probe = para_norm[:60]
+        # Guard 2: 120-char head probe (was 60). Doubling the probe length
+        # halves the false-match rate on common technical-manual phrasings.
+        probe = para_norm[:120]
         if probe not in chunk_norm:
             continue
+        # Guard 3: second-window verification for long paragraphs. A TOC
+        # entry that copies the section title's first sentence will pass
+        # guard 2 but fail here because TOC entries don't carry body
+        # continuation text.
+        if len(para_norm) >= 200:
+            second = para_norm[100:200]
+            if second and second not in chunk_norm:
+                continue
         for region in para.get("boundingRegions") or []:
             page = region.get("pageNumber")
             polygon = region.get("polygon") or []
@@ -702,6 +1201,57 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     start_page, end_page, pages_covered = compute_page_span(
         page_text, section_content, section_start_page
     )
+
+    # text_bbox is computed from DI's paragraphs[].boundingRegions —
+    # the most reliable per-paragraph page data DI emits. It is used in
+    # three ways below, in order of authority:
+    #   (a) as the primary fallback when section resolution returned None
+    #       (paragraph_bbox method);
+    #   (b) as a cross-validator when section resolution returned a page
+    #       that disagrees with the bbox (bbox_corrected method) — this
+    #       catches the case where DI groups paragraphs from earlier pages
+    #       into a section and our index records a too-early page_start;
+    #   (c) for the final text_bbox field surfaced to the front-end.
+    text_bbox_list = _text_bbox_for_chunk(page_text, source_path)
+
+    # Build a map of {page -> total bbox area} for cross-validation. The
+    # page with the largest area is the page that owns the bulk of the
+    # chunk's content; ancillary entries (chunk content also appearing
+    # on a TOC page or an appendix) carry tiny bboxes and lose the tie.
+    bbox_pages_area: dict[int, float] = {}
+    for b in text_bbox_list:
+        pg = b.get("page")
+        w = b.get("w_in") or 0.0
+        h = b.get("h_in") or 0.0
+        if isinstance(pg, int):
+            bbox_pages_area[pg] = bbox_pages_area.get(pg, 0.0) + float(w) * float(h)
+
+    if start_page is None and bbox_pages_area:
+        # Path (a): section resolution failed entirely; bbox is the only
+        # signal. Use the page with the largest content area as the
+        # canonical page; surface the full bbox span for end_page.
+        primary = max(bbox_pages_area, key=bbox_pages_area.get)
+        bbox_pages = sorted(bbox_pages_area.keys())
+        start_page = primary
+        end_page = max(bbox_pages)
+        if end_page < start_page:
+            end_page = start_page
+        pages_covered = bbox_pages
+        page_resolution_method = "paragraph_bbox"
+
+    elif start_page is not None and bbox_pages_area:
+        # Path (b): section resolution gave us an answer; cross-check it
+        # against the bbox. If our answer is not among the bbox pages,
+        # the section index lied (typically because DI grouped earlier-
+        # page paragraphs into the section). Trust the bbox.
+        if start_page not in bbox_pages_area:
+            primary = max(bbox_pages_area, key=bbox_pages_area.get)
+            bbox_pages = sorted(bbox_pages_area.keys())
+            start_page = primary
+            end_page = primary
+            pages_covered = [primary]
+            page_resolution_method = "bbox_corrected"
+
     if start_page is None:
         page_resolution_method = "missing"
 
@@ -724,6 +1274,13 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             break
     if not label:
         label = _extract_label(page_text) or ""
+    # DI cache fallback: scan pageNumber/pageFooter/pageHeader paragraphs
+    # on this physical page. Chapter-prefixed labels like "5-7" live in
+    # page footers, not in the chunk body, so the chunk-text heuristics
+    # above never see them. _printed_label_for_page reaches the DI cache
+    # and pulls the canonical label for this physical page.
+    if not label:
+        label = _printed_label_for_page(source_path, start_page) or ""
     if not label and start_page is not None:
         label = str(start_page)
         label_is_synthetic = True
@@ -741,6 +1298,10 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             if cand:
                 last_marker = cand
         end_label = last_marker or (_extract_label(_last_page_segment(page_text)) or "")
+        # DI cache fallback for the end label too — same rationale as
+        # the start-label case: chapter-prefixed labels live in footers.
+        if not end_label:
+            end_label = _printed_label_for_page(source_path, end_page) or ""
     if not end_label:
         if start_page == end_page:
             # Single-page chunk: end mirrors start.
@@ -774,6 +1335,19 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     )
     figure_ref = ", ".join(fig_refs) if fig_refs else ""
 
+    # Cross-record join key. The frontend / chatbot can issue one filter
+    # query that finds both the diagram record AND every text record
+    # mentioning the same figure:
+    #   figures_referenced_normalized/any(f: f eq '18117')
+    # Both record types populate this field with the same normalization
+    # (lowercased, separators stripped) so typography variations like
+    # "Figure 18.117" vs "Fig 18-117" join cleanly. Imported lazily to
+    # avoid circular import with diagram.py.
+    from .diagram import normalize_figure_ref
+    fig_refs_normalized = sorted({
+        n for n in (normalize_figure_ref(f) for f in fig_refs) if n
+    })
+
     tbl_refs = sorted(
         set(
             f"Table {_clean_ref(m.group(2))}"
@@ -783,16 +1357,86 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     )
     table_ref = ", ".join(tbl_refs) if tbl_refs else ""
 
+    # Section + page cross-references. Parallel to figures_referenced /
+    # tables_referenced — these collections let a chatbot answering
+    # "what does Section 4.2 say?" or "what's on page 18-25?" filter
+    # text records by `sections_referenced/any(s: s eq '4.2')` instead
+    # of full-text searching for the phrase "Section 4.2".
+    section_refs = sorted({
+        _clean_ref(m.group(1))
+        for m in SECTION_REF_RE.finditer(page_text or "")
+        if _clean_ref(m.group(1))
+    })
+    page_refs = sorted({
+        _clean_ref(m.group(1))
+        for m in PAGE_REF_RE.finditer(page_text or "")
+        if _clean_ref(m.group(1))
+    })
+
     # Highlight + bbox + total-pages: new fields to support precise
-    # client-side highlighting in the citation UI.
+    # client-side highlighting in the citation UI. text_bbox_list was
+    # already computed earlier so we could use it as a page-resolution
+    # fallback; reuse it here for serialization.
     highlight_text = build_highlight_text(page_text)
-    text_bbox_list = _text_bbox_for_chunk(page_text, source_path)
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
     pdf_total_pages = _pdf_total_pages_for(source_path)
+
+    # Safety callouts (WARNING / DANGER / CAUTION / NOTICE / NOTE).
+    # Extract the deduped keyword list so the index can filter on
+    # `callouts/any(c: c eq 'DANGER')` and the UI can render a badge.
+    # Also surface a boolean for the common case (any callout present).
+    # Note: imported lazily to avoid circular import with semantic.py.
+    from .semantic import extract_callout_keywords
+    callout_keywords = extract_callout_keywords(page_text)
+
+    # Footnotes that sit on this chunk's physical pages. DI tags them
+    # with role=footnote; we surface them as a collection field so a
+    # chatbot can answer "what does footnote 3 in the meter section say"
+    # and the UI can render them as collapsed citations beneath the
+    # main body. The body chunk itself still contains the footnote text
+    # verbatim (DI emits footnotes as ordinary paragraphs in document
+    # order), so this is purely a retrieval/display assist — it doesn't
+    # duplicate searchable content.
+    footnotes_list = _footnotes_for_pages(source_path, pages_covered)
+
+    # OCR confidence (None for digital-text pages, 0.0-1.0 for OCR'd
+    # pages). Surfaced so the chatbot can caveat or down-rank answers
+    # grounded in low-confidence scanned content. We take the per-word
+    # minimum across all words on the chunk's pages — worst-case is
+    # what matters when a single mis-OCR'd digit ("240" vs "440")
+    # could change the meaning of a safety answer.
+    ocr_min_conf = _ocr_min_confidence_for_pages(source_path, pages_covered)
+
+    # Document-level metadata mined from the cover page. Propagated to
+    # every text record so retrieval can filter by current revision /
+    # effective date — critical for safety manuals that are rev'd
+    # repeatedly and where stale guidance can be dangerous.
+    cover_meta = cover_metadata_for_pdf(source_path)
 
     # TOC / list-of-figures detection. UIs that want clean retrieval
     # filter on processing_status eq 'ok' and never see TOC fragments.
     status = "toc_like" if _is_toc_like(page_text) else "ok"
+
+    # Glossary detection. Stamps record_subtype="glossary" on definition /
+    # acronym chunks so a chatbot can prefer-rank them for "what does X
+    # mean?" queries. Header-match is the primary signal; body-pattern
+    # match catches glossary content under non-obvious headers.
+    record_subtype = "glossary" if _is_glossary_chunk(page_text, h1_in, h2_in, h3_in) else ""
+
+    # Tier-5 ops fields: equipment_id collection (for exact-match lookup
+    # by part / model number), language code (future Spanish/French
+    # manuals will flag themselves), composite quality score (tie-breaker
+    # when the semantic ranker can't separate two hits).
+    equipment_ids = _extract_equipment_ids(page_text)
+    language = _detect_language(page_text)
+    quality_score = _compute_quality_score(
+        page_resolution_method=page_resolution_method,
+        chunk_len=len(page_text or ""),
+        has_headers=bool(h1_in or h2_in or h3_in),
+        is_toc_like=(status == "toc_like"),
+        has_callouts=bool(callout_keywords),
+        has_figure_or_table_ref=bool(fig_refs or tbl_refs),
+    )
 
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
@@ -806,12 +1450,32 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_pages": pages_covered,
         "figure_ref": figure_ref,
         "figures_referenced": fig_refs,
+        "figures_referenced_normalized": fig_refs_normalized,
         "table_ref": table_ref,
         "tables_referenced": tbl_refs,
+        "sections_referenced": section_refs,
+        "pages_referenced": page_refs,
         "highlight_text": highlight_text,
         "text_bbox": text_bbox_json,
         "pdf_total_pages": pdf_total_pages,
         "page_resolution_method": page_resolution_method,
+        "callouts": callout_keywords,
+        "safety_callout": bool(callout_keywords),
+        "footnotes": footnotes_list,
+        "ocr_min_confidence": ocr_min_conf,
+        "document_revision": cover_meta["document_revision"],
+        "effective_date": cover_meta["effective_date"],
+        "document_number": cover_meta["document_number"],
+        "record_subtype": record_subtype,
+        # Ops fields — let the orchestrator do prompt-budget math, let
+        # ops queries find stale rows, let the chatbot prefer rows that
+        # match the current embedding model.
+        "chunk_token_count": _approx_token_count(page_text),
+        "embedding_version": _embedding_version(),
+        "last_indexed_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "equipment_ids": equipment_ids,
+        "language": language,
+        "chunk_quality_score": quality_score,
         "processing_status": status,
         "skill_version": SKILL_VERSION,
     }

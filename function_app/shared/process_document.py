@@ -32,6 +32,7 @@ from .sections import (
     build_section_index,
     extract_surrounding_text,
     find_section_for_page,
+    find_section_for_page_range,
 )
 from .tables import extract_table_records
 
@@ -111,6 +112,8 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
 
     enriched_figures: list[dict[str, Any]] = []
     skipped_no_polygon = 0
+    skipped_no_crop = 0
+    di_figure_count = len(analyze.get("figures", []) or [])
     for fig_idx, figure in enumerate(analyze.get("figures", []) or []):
         page = _figure_first_page(figure)
         polygon = _figure_polygon(figure)
@@ -129,6 +132,7 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         # to analyze and we skip the figure with a clear log.
         crop_data = fetch_cached_crop(source_path, figure_id)
         if crop_data is None:
+            skipped_no_crop += 1
             logging.warning(
                 "crop cache missing for %s fig %s; skipping (re-run preanalyze to rebuild)",
                 source_file, figure_id,
@@ -169,12 +173,20 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
 
     enriched_tables: list[dict[str, Any]] = []
     for tbl in extract_table_records(analyze):
-        section = find_section_for_page(sections_index, tbl["page_start"])
+        # Use the table's full page range when picking the section, not
+        # just page_start. A multi-page table that begins at the bottom
+        # of one section's last page and continues into the next section
+        # should inherit the section that contains the *bulk* of its
+        # content, not the section that happens to start at page_start.
+        section = find_section_for_page_range(
+            sections_index, tbl["page_start"], tbl.get("page_end")
+        )
         h1 = section["header_1"] if section else ""
         h2 = section["header_2"] if section else ""
         h3 = section["header_3"] if section else ""
         enriched_tables.append({
             "table_index": tbl["index"],
+            "table_rows": tbl.get("table_rows", []),
             "page_start": tbl["page_start"],
             "page_end": tbl["page_end"],
             "markdown": tbl["markdown"],
@@ -195,10 +207,37 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         logging.info("process_document %s: skipped %d figures with no polygon/page",
                      source_file, skipped_no_polygon)
 
+    # Surface visibility on figure/table loss so operators have a quantitative
+    # signal beyond grep-the-logs. The status string switches to a non-ok
+    # tag when material loss occurred — the indexer status page and any
+    # downstream monitoring keyed on `processing_status` immediately
+    # surface "this PDF lost N figures" without requiring log-mining.
+    di_table_count = len(enriched_tables)
+    figures_dropped = skipped_no_polygon + skipped_no_crop
+    figures_kept = len(enriched_figures)
+    status = "ok"
+    if di_figure_count > 0 and figures_kept == 0:
+        # Catastrophic: DI saw figures, we emitted none. Crop-cache rot or
+        # systematic preanalyze failure on this PDF.
+        status = "all_figures_dropped"
+    elif figures_dropped > 0 and figures_dropped >= max(5, di_figure_count // 4):
+        # Material loss: ≥25% of DI's figures didn't survive. Worth alerting.
+        status = "partial_figure_loss"
+
+    logging.info(
+        "process_document %s: figures DI=%d kept=%d dropped=%d (no_polygon=%d, no_crop=%d) tables=%d status=%s",
+        source_file, di_figure_count, figures_kept, figures_dropped,
+        skipped_no_polygon, skipped_no_crop, di_table_count, status,
+    )
+
     return {
         "enriched_figures": enriched_figures,
         "enriched_tables": enriched_tables,
         "pdf_total_pages": pdf_total_pages,
-        "processing_status": "ok",
+        "processing_status": status,
+        "di_figure_count": di_figure_count,
+        "figures_kept_count": figures_kept,
+        "figures_dropped_count": figures_dropped,
+        "tables_count": di_table_count,
         "skill_version": SKILL_VERSION,
     }

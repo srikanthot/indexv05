@@ -81,25 +81,83 @@ def _extract_section_refs(text: str) -> list[str]:
 
 
 def _extract_callouts(text: str) -> list[str]:
-    """Returns the FIRST 3 safety callouts found, each as
-    'KEYWORD: short text'. Capped at 3 + 200 chars each so a chunk
-    full of safety boilerplate doesn't dominate the embedding."""
+    """Returns ALL safety callouts found, each as 'KEYWORD: short text'.
+    Each callout's tail is capped at 200 chars (long callouts are still
+    in the raw chunk verbatim — this is just for the head-loaded
+    semantic anchor).
+
+    Previously this was capped at the first 3 to limit embedding-token
+    spend, but for safety-critical manuals that's a correctness risk:
+    a page with 5 distinct WARNING boxes silently lost 2. Embedding
+    cost of an extra 200-char prefix per callout is negligible
+    compared to the cost of a chatbot missing a DANGER notice.
+    """
     if not text:
         return []
     out: list[str] = []
+    seen: set[str] = set()
     for m in SAFETY_CALLOUT_RE.finditer(text):
         keyword = m.group(1).upper()
         tail = m.group(2).strip()
         if not tail:
             continue
-        out.append(f"{keyword}: {tail[:200]}")
-        if len(out) >= 3:
-            break
+        formatted = f"{keyword}: {tail[:200]}"
+        # Dedup exact-match callouts: the same WARNING text repeated on
+        # every page of a section would otherwise appear N times.
+        if formatted in seen:
+            continue
+        seen.add(formatted)
+        out.append(formatted)
     return out
+
+
+def extract_callout_keywords(text: str) -> list[str]:
+    """Returns the deduped, sorted list of distinct callout *keywords*
+    (WARNING / DANGER / CAUTION / NOTICE / NOTE) found in the text. Used
+    to populate the `callouts` collection field on text records so a
+    chatbot can filter `callouts/any(c: c eq 'DANGER')` and a UI can
+    render a 'DANGER' badge on the citation chip.
+
+    The boolean `safety_callout` is `len(extract_callout_keywords(t)) > 0`.
+    """
+    if not text:
+        return []
+    found: set[str] = set()
+    for m in SAFETY_CALLOUT_RE.finditer(text):
+        kw = (m.group(1) or "").upper()
+        if kw:
+            found.add(kw)
+    return sorted(found)
 
 
 def _join_nonempty(parts: list[str], sep: str) -> str:
     return sep.join([p for p in parts if p])
+
+
+# Markdown pipe-table block: a header row, separator row, and 1+ body
+# rows. We strip these from `chunk_for_semantic` because the same cells
+# are already indexed as separate `record_type="table"` (and per-row
+# `table_row`) records — embedding them again here is pure cost and
+# pollutes the text-record vector with table boilerplate ("| --- | --- |").
+# The raw `chunk` field keeps the markdown verbatim for the citation UI.
+_MARKDOWN_TABLE_BLOCK_RE = re.compile(
+    r"(?:^|\n)"                          # block start
+    r"\|[^\n]+\|\s*\n"                   # header row
+    r"\|\s*[\-:|\s]+\|\s*\n"              # separator row (--- / :--- / etc.)
+    r"(?:\|[^\n]+\|\s*\n?)+",            # one or more body rows
+    re.MULTILINE,
+)
+
+
+def _strip_inline_tables(text: str) -> str:
+    """Remove markdown pipe-table blocks from text. Preserves a marker
+    line (`[Table omitted from embedding — indexed separately as
+    record_type='table'/'table_row']`) so the embedding still knows a
+    table appeared at this point in the chunk's flow."""
+    if not text or "|" not in text:
+        return text
+    placeholder = "\n[Table omitted from embedding -- indexed separately]\n"
+    return _MARKDOWN_TABLE_BLOCK_RE.sub(placeholder, text)
 
 
 def _build_text_string(data: dict[str, Any]) -> str:
@@ -139,11 +197,12 @@ def _build_text_string(data: dict[str, Any]) -> str:
     callouts = _extract_callouts(chunk)
     callout_line = f"Callouts: {' || '.join(callouts)}" if callouts else ""
 
-    # Strip repeating header/footer artifacts so the embedding doesn't
-    # learn boilerplate. `chunk` (the raw markdown) is preserved as-is
-    # in the index for the citation UI; only the embedded form is
-    # cleaned.
-    cleaned_chunk = _strip_running_artifacts(chunk).strip()
+    # Strip repeating header/footer artifacts AND inline table blocks so
+    # the embedding doesn't learn boilerplate or duplicate table content
+    # that's already a separate `record_type="table"` row. `chunk`
+    # (the raw markdown) is preserved as-is in the index for the
+    # citation UI; only the embedded form is cleaned.
+    cleaned_chunk = _strip_inline_tables(_strip_running_artifacts(chunk)).strip()
 
     return _join_nonempty(
         [source_line, header_line, page_line, ref_line, callout_line, cleaned_chunk],

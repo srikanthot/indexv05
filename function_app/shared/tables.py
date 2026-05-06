@@ -8,11 +8,23 @@ Features:
   page with the same column count and no caption is merged.
 - Splits oversized tables (>3000 chars) at row boundaries, repeating the
   header row in each split.
+- Emits per-row records (record_type="table_row") for tables with 5–80
+  body rows, so cell-level queries ("200A 4-wire 277/480V conductor?")
+  retrieve the relevant row directly without the LLM having to traverse
+  a markdown grid.
 """
 
 from typing import Any
 
 MAX_TABLE_CHARS = 3000
+
+# Row-record emission: only for tables in this row-count band. Below 5
+# rows the parent table record is enough; above 80 rows the parent has
+# too much content to be a useful retrieval anchor and per-row records
+# would dominate the index. The band keeps the index size proportional
+# to its retrieval value.
+ROW_RECORD_MIN_ROWS = 5
+ROW_RECORD_MAX_ROWS = 80
 
 
 def _cell_text(cell: dict[str, Any]) -> str:
@@ -51,13 +63,105 @@ def _table_to_grid(table: dict[str, Any]) -> list[list[str]]:
     return grid
 
 
-def _grid_to_markdown(grid: list[list[str]]) -> str:
+def _header_row_count(table: dict[str, Any]) -> int:
+    """How many leading rows of the table are header rows.
+
+    PSEG manuals routinely use 2-row or 3-row table headers (super-header
+    + sub-header), e.g. a "Voltage" super-header spanning two columns
+    above "120/240" and "277/480" sub-headers. The naive "row 0 is the
+    header" assumption flattens that hierarchy and the chunk no longer
+    answers cell-level questions like "for 200A 4-wire 277/480V, what
+    conductor size?".
+
+    Strategy: walk DI's `cells` array and find leading rows where the
+    majority of original (non-replicated) cells are tagged
+    `kind: "columnHeader"`. Falls back to 1 when DI didn't populate
+    `kind` (older models / OCR'd PDFs) — preserves the prior behavior
+    for tables without explicit header tagging.
+    """
+    cells = table.get("cells", []) or []
+    if not cells:
+        return 1
+    row_count = table.get("rowCount") or 0
+    if row_count == 0:
+        return 1
+
+    # Group cells by their *original* row position (rowIndex of the
+    # cell record itself, not replicated positions covered by spans).
+    rows_to_kinds: dict[int, list[str]] = {}
+    for cell in cells:
+        ri = cell.get("rowIndex", 0)
+        kind = (cell.get("kind") or "").lower()
+        rows_to_kinds.setdefault(ri, []).append(kind)
+
+    leading_header_rows = 0
+    for r in range(row_count):
+        kinds = rows_to_kinds.get(r) or []
+        if not kinds:
+            break
+        header_count = sum(1 for k in kinds if k == "columnheader")
+        # ≥50% of original cells in the row tagged as columnHeader
+        # means this whole row is header. (DI sometimes only tags the
+        # leftmost / representative cells, so we don't require all.)
+        if header_count > 0 and header_count >= len(kinds) / 2:
+            leading_header_rows += 1
+        else:
+            break
+
+    return leading_header_rows if leading_header_rows >= 1 else 1
+
+
+def _fold_headers(grid: list[list[str]], header_rows: int) -> list[str]:
+    """Combine multi-row headers into one header row by joining each
+    column's stacked header cells with " — ".
+
+    Input grid:           Output for header_rows=2:
+        | "" | Voltage | Voltage |        | Service Class | Voltage — 120/240 | Voltage — 277/480 |
+        | Service Class | 120/240 | 277/480 |
+        | 200A | 4-wire | 4-wire |
+
+    The folded header preserves the column hierarchy in the embedding
+    text so semantic search and the LLM both see the relationship
+    between "Voltage" and "277/480" — without that, "200A 4-wire
+    277/480" is unanswerable from the table alone.
+
+    Duplicate values stacked in one column (a super-header that spans
+    multiple columns is replicated across them by _table_to_grid) are
+    de-duplicated so we don't emit "Voltage — Voltage — 120/240"."""
+    if header_rows <= 0 or not grid:
+        return []
+    if header_rows == 1:
+        return list(grid[0])
+    cols = len(grid[0]) if grid else 0
+    folded: list[str] = []
+    for c in range(cols):
+        # Walk top-to-bottom for this column; collect non-empty,
+        # non-duplicate cell values.
+        seen: list[str] = []
+        for r in range(min(header_rows, len(grid))):
+            v = (grid[r][c] if c < len(grid[r]) else "").strip()
+            if not v:
+                continue
+            if seen and seen[-1] == v:
+                continue  # super-header replicated across cells
+            seen.append(v)
+        folded.append(" — ".join(seen))
+    return folded
+
+
+def _grid_to_markdown(grid: list[list[str]], header_rows: int = 1) -> str:
     if not grid or not grid[0]:
         return ""
-    header = grid[0]
-    sep = ["---"] * len(header)
-    lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(sep) + " |"]
-    for row in grid[1:]:
+    folded_header = _fold_headers(grid, header_rows)
+    if not folded_header:
+        folded_header = list(grid[0])
+        header_rows = 1
+    sep = ["---"] * len(folded_header)
+    lines = [
+        "| " + " | ".join(folded_header) + " |",
+        "| " + " | ".join(sep) + " |",
+    ]
+    for row in grid[header_rows:]:
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
 
@@ -82,12 +186,27 @@ def _try_merge_continuation(prev: dict[str, Any], curr: dict[str, Any]) -> bool:
     return True
 
 
-def _first_row_matches(prev_grid: list[list[str]], curr_grid: list[list[str]]) -> bool:
-    """True if curr_grid's first row equals prev_grid's first row (header
-    repeated on continuation page)."""
+def _header_block_matches(
+    prev_grid: list[list[str]],
+    curr_grid: list[list[str]],
+    header_rows: int,
+) -> bool:
+    """True if curr_grid's first `header_rows` rows match prev_grid's
+    first `header_rows` rows. Used to detect headers DI repeats on a
+    continuation page so they can be dropped from the merged body.
+
+    Multi-row aware: when a table has 2 or 3 header rows, DI typically
+    repeats ALL of them on the continuation. The previous single-row
+    check kept rows 1..N-1 of the duplicated header as data rows, which
+    polluted the body. This block-aware check drops the full header
+    stack."""
     if not prev_grid or not curr_grid:
         return False
-    return prev_grid[0] == curr_grid[0]
+    if header_rows <= 0:
+        return False
+    if len(prev_grid) < header_rows or len(curr_grid) < header_rows:
+        return False
+    return prev_grid[:header_rows] == curr_grid[:header_rows]
 
 
 def _split_oversized(markdown: str) -> list[str]:
@@ -112,6 +231,85 @@ def _split_oversized(markdown: str) -> list[str]:
         cur_len += len(row) + 1
     if cur:
         out.append("\n".join([header, sep, *cur]))
+    return out
+
+
+def _build_row_records_for_cluster(
+    cluster: list[dict[str, Any]],
+    grid: list[list[str]],
+    header_rows: int,
+) -> list[dict[str, Any]]:
+    """Render per-row records for the cluster's body rows.
+
+    Each row becomes "{header_1_folded}: {value_1}; {header_2_folded}: {value_2}; ..."
+    so a query like "200A 4-wire 277/480V conductor 4/0" hits the row
+    directly via BM25 + vector search. The parent's caption and
+    section path travel separately on the row record so the chatbot
+    can render a "Table 18-3, page 5-7, row 4: ..." citation.
+
+    Returns a list of dicts with row_index, row_text, page (the source
+    DI table's first page — close enough for citation), and a
+    cluster-relative row_index for ordering. Empty list when the table
+    falls outside ROW_RECORD_MIN_ROWS..MAX bounds (we only emit row
+    records where they buy retrieval).
+    """
+    body_rows = grid[header_rows:]
+    if not (ROW_RECORD_MIN_ROWS <= len(body_rows) <= ROW_RECORD_MAX_ROWS):
+        return []
+    folded_headers = _fold_headers(grid, header_rows)
+    if not folded_headers:
+        return []
+
+    # Map merged-grid body rows to their source-table page. Walk the
+    # cluster in order, mirroring the merge logic that trims duplicated
+    # header blocks on continuation pages so row counts add up correctly.
+    row_to_page: list[int | None] = []
+    prev_grid = None
+    for tbl_idx, tbl in enumerate(cluster):
+        tbl_grid = _table_to_grid(tbl)
+        pages = _table_pages(tbl)
+        page_for_rows = pages[0] if pages else None
+        if tbl_idx == 0:
+            contributed = max(0, len(tbl_grid) - header_rows)
+        else:
+            # Continuation: merge code dropped the duplicated header block
+            # iff _header_block_matches returned True. Replicate that
+            # check to know how many rows this continuation contributed.
+            assert prev_grid is not None
+            if _header_block_matches(prev_grid, tbl_grid, header_rows):
+                contributed = max(0, len(tbl_grid) - header_rows)
+            else:
+                contributed = len(tbl_grid)
+        for _ in range(contributed):
+            row_to_page.append(page_for_rows)
+        prev_grid = tbl_grid
+
+    out: list[dict[str, Any]] = []
+    for i, row_cells in enumerate(body_rows):
+        # Render as "Header: value" pairs joined with semicolons. Empty
+        # values are skipped so a sparse row doesn't render as
+        # "H1:; H2:; H3: x;" with stray separators.
+        parts: list[str] = []
+        for h, v in zip(folded_headers, row_cells):
+            v_clean = (v or "").strip()
+            if not v_clean:
+                continue
+            h_clean = (h or "").strip()
+            if h_clean:
+                parts.append(f"{h_clean}: {v_clean}")
+            else:
+                # Header column was empty (e.g. row-label leftmost
+                # column). Emit value alone so it still indexes.
+                parts.append(v_clean)
+        if not parts:
+            continue
+        row_text = "; ".join(parts)
+        page = row_to_page[i] if i < len(row_to_page) else None
+        out.append({
+            "row_index": i,
+            "row_text": row_text,
+            "page": page,
+        })
     return out
 
 
@@ -187,22 +385,27 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         key=lambda t: (_table_pages(t)[0] if _table_pages(t) else 0),
     )
 
-    merged: list[tuple[list[dict[str, Any]], list[list[str]]]] = []
+    # Each merged entry: (cluster_tables, grid, header_rows). header_rows
+    # comes from the first table in the cluster (continuation pages
+    # repeat the same header structure).
+    merged: list[tuple[list[dict[str, Any]], list[list[str]], int]] = []
     for tbl in sorted_tables:
         if merged and _try_merge_continuation(merged[-1][0][-1], tbl):
             prev_grid = merged[-1][1]
+            header_rows = merged[-1][2]
             new_grid = _table_to_grid(tbl)
-            # DI often repeats the header row on continuation pages; drop it
-            # so it does not appear as a data row in the merged markdown.
-            if _first_row_matches(prev_grid, new_grid):
-                new_grid = new_grid[1:]
+            # DI often repeats the FULL header block (all N header rows)
+            # on continuation pages. The block-aware match drops every
+            # repeated header row so the merged body has clean data rows.
+            if _header_block_matches(prev_grid, new_grid, header_rows):
+                new_grid = new_grid[header_rows:]
             prev_grid.extend(new_grid)
             merged[-1][0].append(tbl)
         else:
-            merged.append(([tbl], _table_to_grid(tbl)))
+            merged.append(([tbl], _table_to_grid(tbl), _header_row_count(tbl)))
 
     out: list[dict[str, Any]] = []
-    for cluster_idx, (cluster, grid) in enumerate(merged):
+    for cluster_idx, (cluster, grid, header_rows) in enumerate(merged):
         first = cluster[0]
         last = cluster[-1]
         pages_first = _table_pages(first)
@@ -213,8 +416,14 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         page_start = pages_first[0] if pages_first else 1
         page_end = pages_last[-1] if pages_last else page_start
         caption = _table_caption(first)
-        md = _grid_to_markdown(grid)
+        md = _grid_to_markdown(grid, header_rows=header_rows)
         cluster_bboxes = _bboxes_for_cluster(cluster)
+
+        # Per-row records (only for tables with 5..80 body rows). All
+        # splits of one logical table share the same row-record list —
+        # row records are cluster-level, not split-level, since they're
+        # already at row granularity.
+        row_records = _build_row_records_for_cluster(cluster, grid, header_rows)
 
         for split_idx, chunk in enumerate(_split_oversized(md)):
             # Count data rows in this split chunk (total lines minus header
@@ -229,6 +438,10 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
                 "col_count": len(grid[0]) if grid else 0,
                 "caption": caption,
                 "bboxes": cluster_bboxes,
+                # Only attach row records to the first split — keeps
+                # row records emitted exactly once per logical table
+                # rather than duplicated across every oversized split.
+                "table_rows": row_records if split_idx == 0 else [],
             })
 
     return out
