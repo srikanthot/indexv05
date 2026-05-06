@@ -586,7 +586,7 @@
 
       {
         "targetIndexName": "<INDEX_NAME>",
-        "parentKeyFieldName": "tbl_parent_id",
+        "parentKeyFieldName": "tbl_row_parent_id",
         "sourceContext": "/document/enriched_tables/*/tbl_table_rows/*",
         "mappings": [
           { "name": "chunk_id", "source": "/document/enriched_tables/*/tbl_table_rows/*/chunk_id" },
