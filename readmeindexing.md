@@ -182,3 +182,19 @@ python scripts/smoke_test.py --config deploy.config.json --skip-run
 $STORAGE = ($CFG.storage.accountResourceId -split '/')[-1]
 $CONTAINER = $CFG.storage.pdfContainerName
 az storage blob list --account-name $STORAGE --container-name $CONTAINER --auth-mode login --prefix "_dicache/" --query "[?ends_with(name, '.di.json')].{name:name, size:properties.contentLength}" -o table
+
+
+# Download
+az storage blob download --account-name sapsegtmandev01 --container-name techmanualsv06 --name "_dicache/ED-DC-IRE.pdf.di.json" --file ".\test_di.json" --auth-mode login
+
+# Quick structure check
+$j = Get-Content .\test_di.json -Raw | ConvertFrom-Json
+Write-Host "Has analyzeResult key: $($j.analyzeResult -ne $null)"
+Write-Host "Top-level keys: $($j.PSObject.Properties.Name -join ', ')"
+if ($j.analyzeResult) {
+    Write-Host "analyzeResult.paragraphs count: $($j.analyzeResult.paragraphs.Count)"
+    Write-Host "analyzeResult.sections count: $($j.analyzeResult.sections.Count)"
+} else {
+    Write-Host "paragraphs count: $($j.paragraphs.Count)"
+    Write-Host "sections count: $($j.sections.Count)"
+}
