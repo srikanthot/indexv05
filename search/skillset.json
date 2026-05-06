@@ -317,31 +317,16 @@
     },
 
     {
-      "@odata.type": "#Microsoft.Skills.Util.ConditionalSkill",
-      "name": "gate-text-embedding-input",
-      "description": "Cost gate: pass chunk_for_semantic to the embedding skill ONLY when processing_status != 'toc_like'. TOC chunks are filtered at retrieval anyway, so embedding them was pure cost.",
-      "context": "/document/markdownDocument/*/pages/*",
-      "inputs": [
-        { "name": "condition", "source": "= $(/document/markdownDocument/*/pages/*/text_processing_status) != 'toc_like'" },
-        { "name": "whenTrue", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" },
-        { "name": "whenFalse", "source": "= ''" }
-      ],
-      "outputs": [
-        { "name": "output", "targetName": "text_chunk_for_embedding" }
-      ]
-    },
-
-    {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-text-chunks",
-      "description": "Ada-002 embeddings for text chunks. Reads text_chunk_for_embedding (gated) instead of text_chunk_for_semantic so toc_like chunks pass an empty string and don't trigger an embedding call.",
+      "description": "Ada-002 embeddings for text chunks. Always runs; toc_like chunks are filtered at retrieval. The previous ConditionalSkill cost gate was reverted because Azure's Util.ConditionalSkill with iterated context + $() references is undocumented territory and the failure mode (empty embedding for every row) silently kills vector search.",
       "context": "/document/markdownDocument/*/pages/*",
       "resourceUri": "<AOAI_ENDPOINT>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
       "inputs": [
-        { "name": "text", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_embedding" }
+        { "name": "text", "source": "/document/markdownDocument/*/pages/*/text_chunk_for_semantic" }
       ],
       "outputs": [
         { "name": "embedding", "targetName": "text_vector" }
@@ -349,31 +334,16 @@
     },
 
     {
-      "@odata.type": "#Microsoft.Skills.Util.ConditionalSkill",
-      "name": "gate-diagram-embedding-input",
-      "description": "Cost gate: pass dgm_chunk_for_semantic to the embedding skill ONLY when has_diagram=true. Decorative / not-useful figures emit empty descriptions and embedding them was pure waste (~30-50% of diagram embedding spend).",
-      "context": "/document/enriched_figures/*",
-      "inputs": [
-        { "name": "condition", "source": "= $(/document/enriched_figures/*/dgm_has_diagram)" },
-        { "name": "whenTrue", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" },
-        { "name": "whenFalse", "source": "= ''" }
-      ],
-      "outputs": [
-        { "name": "output", "targetName": "dgm_chunk_for_embedding" }
-      ]
-    },
-
-    {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-diagram-chunks",
-      "description": "Ada-002 embeddings for per-figure diagram chunks. Reads the gated dgm_chunk_for_embedding so figures with has_diagram=false skip the AOAI call.",
+      "description": "Ada-002 embeddings for per-figure diagram chunks. Always runs; has_diagram=false rows can be filtered at retrieval. Same ConditionalSkill-revert rationale as embed-text-chunks.",
       "context": "/document/enriched_figures/*",
       "resourceUri": "<AOAI_ENDPOINT>",
       "deploymentId": "<AOAI_EMBED_DEPLOYMENT>",
       "modelName": "text-embedding-ada-002",
       "dimensions": 1536,
       "inputs": [
-        { "name": "text", "source": "/document/enriched_figures/*/dgm_chunk_for_embedding" }
+        { "name": "text", "source": "/document/enriched_figures/*/dgm_chunk_for_semantic" }
       ],
       "outputs": [
         { "name": "embedding", "targetName": "dgm_text_vector" }
