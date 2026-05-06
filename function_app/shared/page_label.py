@@ -405,6 +405,59 @@ def _pdf_total_pages_for(source_path: str) -> int | None:
     return len(pages) if pages else None
 
 
+def _page_dimensions_for(source_path: str, physical_page: int | None) -> tuple[float, float] | None:
+    """Return (width_in, height_in) of the given physical page from DI's
+    pages[] array. Falls back to US Letter (8.5 x 11) when DI cache is
+    unreachable or page index is out of range.
+
+    Used by the whole-page-bbox fallback below."""
+    if physical_page is None or physical_page < 1:
+        return (8.5, 11.0)
+    if not source_path:
+        return (8.5, 11.0)
+    result = _analysis_for(source_path)
+    if not result:
+        return (8.5, 11.0)
+    pages = result.get("pages") or []
+    if not pages or physical_page > len(pages):
+        return (8.5, 11.0)
+    page = pages[physical_page - 1]
+    width = page.get("width")
+    height = page.get("height")
+    unit = (page.get("unit") or "inch").lower()
+    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+        return (8.5, 11.0)
+    # DI emits dimensions in the unit specified per page. Convert to inches.
+    if unit in ("inch", "inches"):
+        return (float(width), float(height))
+    if unit in ("pixel", "pixels"):
+        # 96 DPI assumption for pixel measurements
+        return (float(width) / 96.0, float(height) / 96.0)
+    if unit in ("centimeter", "cm"):
+        return (float(width) / 2.54, float(height) / 2.54)
+    return (float(width), float(height))
+
+
+def _whole_page_bbox(source_path: str, physical_page: int) -> dict[str, Any]:
+    """Build a single bbox covering the entire physical page. Used as a
+    last-resort fallback when:
+      - we know the chunk's physical_pdf_page (via header_match,
+        bbox_corrected, etc.)
+      - BUT the strict paragraph matcher returned no per-paragraph bboxes
+        (chunks with fragmentary content like form data, GIS layer
+        names, single-word lists)
+    The frontend can render a faint full-page highlight in this case
+    rather than no highlight at all. Better than empty text_bbox."""
+    width_in, height_in = _page_dimensions_for(source_path, physical_page) or (8.5, 11.0)
+    return {
+        "page": physical_page,
+        "x_in": 0.0,
+        "y_in": 0.0,
+        "w_in": round(width_in, 3),
+        "h_in": round(height_in, 3),
+    }
+
+
 def _printed_label_for_page(source_path: str, physical_page: int | None) -> str | None:
     """Look up the printed page label for a specific physical page by
     scanning DI's pageNumber/pageFooter/pageHeader role paragraphs in
@@ -1424,6 +1477,19 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     # already computed earlier so we could use it as a page-resolution
     # fallback; reuse it here for serialization.
     highlight_text = build_highlight_text(page_text)
+
+    # Whole-page-bbox fallback. The strict paragraph matcher can return
+    # empty for chunks with fragmentary content (form data, GIS layer
+    # names, single-word lists) even when we KNOW the physical page. To
+    # ensure every text record with a known page gets SOME bbox, emit a
+    # full-page rectangle as a last resort. The frontend can render a
+    # faint full-page highlight in this case rather than no highlight at
+    # all. Method tag stays "header_match"/etc. (the page resolution was
+    # the real signal); callers can detect "is this a precise bbox or a
+    # whole-page fallback" by checking if the bbox covers the full page.
+    if not text_bbox_list and start_page is not None:
+        text_bbox_list = [_whole_page_bbox(source_path, start_page)]
+
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
     pdf_total_pages = _pdf_total_pages_for(source_path)
 
