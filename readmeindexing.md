@@ -1,3 +1,5 @@
+Tell your frontend dev: when text_bbox.w_in >= 8 and text_bbox.h_in >= 10, treat it as a whole-page highlight (use low opacity ~0.15). When the rectangle is smaller, it's a precise highlight (use higher opacity ~0.35). This gives users a visual cue: precise yellow box = "this exact text" vs. faint full-page tint = "somewhere on this page."
+
 python -c @"
 import httpx, json
 from azure.identity import DefaultAzureCredential
