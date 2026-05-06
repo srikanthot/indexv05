@@ -147,3 +147,15 @@ Write-Host "Database '$DB' created."
 
 # ─── Re-run bootstrap (should now pass all 8 STEPs) ───
 python scripts/bootstrap.py --config deploy.config.json --auto-fix
+
+
+# Step 1 — Get the Function App's MI principal ID
+$CFG = Get-Content deploy.config.json | ConvertFrom-Json
+$RG  = $CFG.functionApp.resourceGroup
+$FN  = $CFG.functionApp.name
+$PRINCIPAL = (az functionapp identity show -g $RG -n $FN --query principalId -o tsv)
+Write-Host "Function App MI: $PRINCIPAL"
+
+
+# Step 3 — Assign Storage Blob Data Reader
+az role assignment create --assignee $PRINCIPAL --role "Storage Blob Data Reader" --scope $STORAGE_ID
