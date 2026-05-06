@@ -205,14 +205,25 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
         for pn in _paragraph_pages(paragraphs, pidx):
             orphans_by_page.setdefault(pn, []).append(content)
 
-    # Use a section_idx beyond the real sections range so document-order
-    # tiebreak (later wins) puts orphan sections after real ones at
-    # equal page-span. Numerically smallest section_idx wins -- since
-    # find_section_for_page sorts ascending by span and descending by
-    # section_idx, real sections with the same span/page win because
-    # they have a smaller section_idx.
+    # Compute the set of pages already covered by at least one real
+    # section. We only emit orphan sections for pages that NO real
+    # section covers — otherwise the orphan would compete with the
+    # real section in find_section_for_page (orphan wins by smallest
+    # span, even when a wider real section is the right answer for a
+    # figure or chunk on that page). The "(orphan paragraphs)" header
+    # would then leak into the figure/chunk records.
+    real_section_covered_pages: set[int] = set()
+    for s in flat:
+        for p in range(s["page_start"], s["page_end"] + 1):
+            real_section_covered_pages.add(p)
+
     next_idx = len(sections) + 100000
     for page in sorted(orphans_by_page):
+        if page in real_section_covered_pages:
+            # A real section already covers this page. Don't emit an
+            # orphan that would shadow the real one. Orphan content is
+            # still in the markdown stream and gets chunked normally.
+            continue
         orphan_content = "\n".join(orphans_by_page[page])
         flat.append({
             "section_idx": next_idx,
@@ -222,6 +233,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
             "page_start": page,
             "page_end": page,
             "content": orphan_content,
+            "is_orphan": True,  # explicit flag for find_section_for_page
         })
         next_idx += 1
 
@@ -272,6 +284,12 @@ def find_section_for_page(
     Return the most-specific section whose page range covers page_number.
     Most-specific = smallest page span among matches; ties broken by
     document order (later wins, since deeper sections are visited later).
+
+    Orphan sections (synthetic "(orphan paragraphs)" entries) are always
+    deprioritized — a real section with ANY page span beats an orphan
+    section, even when the orphan has a smaller span. This prevents
+    figures and chunks from being attributed to "(orphan paragraphs)"
+    when their physical page is also covered by a real chapter section.
     """
     matches = [
         s for s in sections_index
@@ -279,7 +297,11 @@ def find_section_for_page(
     ]
     if not matches:
         return None
-    matches.sort(key=lambda s: (s["page_end"] - s["page_start"], -s["section_idx"]))
+    matches.sort(key=lambda s: (
+        1 if s.get("is_orphan") else 0,            # orphans always last
+        s["page_end"] - s["page_start"],           # tightest span next
+        -s["section_idx"],                         # deepest tie-breaker
+    ))
     return matches[0]
 
 
@@ -316,29 +338,36 @@ def find_section_for_page_range(
     ]
     if fully_containing:
         # Tightest fit (smallest range) wins; document-order tiebreak
-        # picks the deepest section.
-        fully_containing.sort(
-            key=lambda s: (s["page_end"] - s["page_start"], -s["section_idx"])
-        )
+        # picks the deepest section. Orphans always lose to real
+        # sections (same rationale as find_section_for_page).
+        fully_containing.sort(key=lambda s: (
+            1 if s.get("is_orphan") else 0,
+            s["page_end"] - s["page_start"],
+            -s["section_idx"],
+        ))
         return fully_containing[0]
 
     # Tier 2: majority overlap. Compute, for each section that overlaps
     # the range at all, the count of pages in [page_start, page_end]
     # that fall within the section's range. Pick the section with the
-    # most overlap pages.
+    # most overlap pages. Orphan sections are deprioritized: they only
+    # win if no real section overlaps the range at all.
     span_pages = list(range(page_start, page_end + 1))
-    best: tuple[int, int, dict[str, Any]] | None = None  # (overlap, -section_idx, section)
+    best: tuple[int, int, int, dict[str, Any]] | None = None  # (-is_orphan_flag, overlap, -section_idx, section)
     for s in sections_index:
         ps, pe = s["page_start"], s["page_end"]
         overlap = sum(1 for p in span_pages if ps <= p <= pe)
         if overlap == 0:
             continue
-        # Higher overlap wins; deeper section breaks ties.
-        key = (overlap, -s["section_idx"])
-        if best is None or key > (best[0], best[1]):
-            best = (overlap, -s["section_idx"], s)
+        is_real = 0 if s.get("is_orphan") else 1  # real wins over orphan
+        # Real sections win regardless of overlap; otherwise higher
+        # overlap wins; deeper section breaks ties.
+        key = (is_real, overlap, -s["section_idx"])
+        if best is None or key > (best[0], best[1], best[2]):
+            best = (is_real, overlap, -s["section_idx"], s)
     if best is not None:
-        return best[2]
+        # Re-extract section in 4th position (we expanded the tuple).
+        return best[3]
 
     # Tier 3: defer to legacy single-page lookup on page_start.
     return find_section_for_page(sections_index, page_start)
