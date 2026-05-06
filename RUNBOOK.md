@@ -117,11 +117,85 @@ Storage / Search / AOAI / DI / Cosmos. **Run this every time you create
 a new Function App or recreate one** — the MI's principalId changes and
 old role assignments don't carry over.
 
+### 5a. (First time only) Make sure Cosmos DB account + database exist
+
+If `bootstrap.py` fails preflight with
+`[FAIL] Cosmos DB cannot reach cosmos database 'indexing' in <...>`,
+the database (and possibly the account) doesn't exist yet. Run these
+once per environment:
+
+```powershell
+$CFG = Get-Content deploy.config.json | ConvertFrom-Json
+$RG  = $CFG.functionApp.resourceGroup
+$DB  = $CFG.cosmos.database
+$LOC = "usgovvirginia"   # adjust to your region
+
+# Step A — Verify your config has a REAL cosmos endpoint (not '<your-cosmos>')
+if ($CFG.cosmos.endpoint -match '<') {
+    Write-Host "Your deploy.config.json still has placeholder <your-cosmos>."
+    Write-Host "List existing Cosmos accounts in this resource group:"
+    az cosmosdb list -g $RG --query "[].{name:name, endpoint:documentEndpoint}" -o table
+
+    Write-Host ""
+    Write-Host "If a Cosmos account already exists above, copy its endpoint and"
+    Write-Host "paste it into deploy.config.json -> cosmos.endpoint, then re-run."
+    Write-Host ""
+    Write-Host "If NO Cosmos account exists, create one (takes ~5 min):"
+    Write-Host "  `$ACCT = 'cosmos-pseg-tman-dev01'   # pick a unique name"
+    Write-Host "  az cosmosdb create -g $RG -n `$ACCT --locations regionName=$LOC --capabilities EnableServerless"
+    Write-Host "  Then update deploy.config.json with the new endpoint and re-run."
+    return
+}
+
+# Extract the account name from the endpoint URL
+$COSMOS_ACCOUNT = ($CFG.cosmos.endpoint -replace 'https://', '' -split '\.')[0]
+Write-Host "Cosmos account: $COSMOS_ACCOUNT"
+Write-Host "Database to create: $DB"
+
+# Step B — Verify the account exists in your subscription
+$ACCOUNT_RG = (az cosmosdb show --name $COSMOS_ACCOUNT --query resourceGroup -o tsv 2>$null)
+if (-not $ACCOUNT_RG) {
+    Write-Host "Cosmos account '$COSMOS_ACCOUNT' not found. Create it first:"
+    Write-Host "  az cosmosdb create -g $RG -n $COSMOS_ACCOUNT --locations regionName=$LOC --capabilities EnableServerless"
+    return
+}
+Write-Host "Account is in resource group: $ACCOUNT_RG"
+
+# Step C — Create the database (containers will auto-create on first write)
+az cosmosdb sql database create `
+  --account-name $COSMOS_ACCOUNT `
+  --resource-group $ACCOUNT_RG `
+  --name $DB `
+  --throughput 400
+
+Write-Host "Database '$DB' created in Cosmos account '$COSMOS_ACCOUNT'."
+Write-Host "Containers (indexing_run_history, indexing_pdf_state) will be"
+Write-Host "auto-created by cosmos_writer.py on first preanalyze run."
+```
+
+### 5b. Run bootstrap
+
 ```powershell
 python scripts/bootstrap.py --config deploy.config.json --auto-fix
 ```
 
-**Then wait 10 minutes** for Azure RBAC to propagate. Don't skip this.
+You should see all 8 STEPs pass and end with something like:
+```
+STEP 8/8 — Verify Function App MI roles
+[OK] Storage Blob Data Reader assigned
+[OK] Search Index Data Contributor assigned
+[OK] Cognitive Services User on AOAI assigned
+[OK] Cognitive Services User on AI Services assigned
+Bootstrap complete.
+```
+
+If preflight still fails, fix what it reports and re-run.
+
+### 5c. Wait 10 minutes for RBAC propagation
+
+Don't skip this. Triggering anything before propagation gives you the
+SAME `DefaultAzureCredential failed` error and you'll think the fix
+didn't work.
 
 ```powershell
 Write-Host "Waiting 10 min for RBAC propagation..."
