@@ -125,3 +125,25 @@ python scripts/preanalyze.py --config deploy.config.json --concurrency 3 --visio
 # Reset + verify
 .\scripts\reset_indexer.ps1
 python scripts/check_index.py --config deploy.config.json --coverage
+
+
+# ─── Read your config values ───
+$CFG = Get-Content deploy.config.json | ConvertFrom-Json
+$DB  = $CFG.cosmos.database
+$COSMOS_ACCOUNT = ($CFG.cosmos.endpoint -replace 'https://', '' -split '\.')[0]
+$ACCOUNT_RG = (az cosmosdb show --name $COSMOS_ACCOUNT --query resourceGroup -o tsv)
+
+Write-Host "Cosmos account: $COSMOS_ACCOUNT (in $ACCOUNT_RG)"
+Write-Host "Will create database: $DB"
+
+# ─── Create the database ───
+az cosmosdb sql database create `
+  --account-name $COSMOS_ACCOUNT `
+  --resource-group $ACCOUNT_RG `
+  --name $DB `
+  --throughput 400
+
+Write-Host "Database '$DB' created."
+
+# ─── Re-run bootstrap (should now pass all 8 STEPs) ───
+python scripts/bootstrap.py --config deploy.config.json --auto-fix
