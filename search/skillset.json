@@ -66,7 +66,7 @@
       "context": "/document/markdownDocument/*/pages/*",
       "uri": "https://<FUNCTION_APP_HOST>/api/extract-page-label?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
-      "timeout": "PT60S",
+      "timeout": "PT230S",
       "batchSize": 5,
       "degreeOfParallelism": 4,
       "inputs": [
@@ -183,7 +183,7 @@
       "context": "/document/enriched_tables/*",
       "uri": "https://<FUNCTION_APP_HOST>/api/shape-table?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
-      "timeout": "PT60S",
+      "timeout": "PT230S",
       "batchSize": 5,
       "degreeOfParallelism": 4,
       "inputs": [
@@ -239,7 +239,7 @@
       "context": "/document/markdownDocument/*/pages/*",
       "uri": "https://<FUNCTION_APP_HOST>/api/build-semantic-string?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
-      "timeout": "PT60S",
+      "timeout": "PT230S",
       "batchSize": 10,
       "degreeOfParallelism": 4,
       "inputs": [
@@ -265,7 +265,7 @@
       "context": "/document/enriched_figures/*",
       "uri": "https://<FUNCTION_APP_HOST>/api/build-semantic-string?code=<FUNCTION_KEY>",
       "httpMethod": "POST",
-      "timeout": "PT60S",
+      "timeout": "PT230S",
       "batchSize": 10,
       "degreeOfParallelism": 4,
       "inputs": [

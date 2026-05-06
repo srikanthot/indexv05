@@ -1435,6 +1435,16 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         source_file = pdf_name
         parent_id = parent_id_for(source_path, source_file)
 
+        # Total physical page count of the source PDF, derived from DI's
+        # `pages[]` array. Stamped onto every enriched_figure and
+        # enriched_table dict so the analyze-diagram + shape-table skills
+        # can read `/document/enriched_figures/*/pdf_total_pages` etc.
+        # without the indexer logging "Missing or empty value" warnings
+        # (one per item, hundreds in aggregate). Mirrors the field
+        # process_document.py emits in the live-DI fallback path.
+        pages_array = result.get("pages") or []
+        pdf_total_pages = len(pages_array) if pages_array else None
+
         enriched_figures = []
         # Concat with PyMuPDF supplement so synthetic figures appear in
         # output.json's enriched_figures and reach the index.
@@ -1500,6 +1510,11 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 "source_file": source_file,
                 "source_path": source_path,
                 "parent_id": parent_id,
+                # Per-item pdf_total_pages so the analyze-diagram skill's
+                # input mapping (`/document/enriched_figures/*/pdf_total_pages`)
+                # resolves cleanly. Without it, the indexer logs a warning
+                # per figure -- ~167 warnings on a typical PSEG manual.
+                "pdf_total_pages": pdf_total_pages,
             }
 
             vision_blob = f"_dicache/{pdf_name}.vision.{fig_id}.json"
@@ -1550,9 +1565,18 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             h1 = section["header_1"] if section else ""
             h2 = section["header_2"] if section else ""
             h3 = section["header_3"] if section else ""
+            # Stamp pdf_total_pages on each row record too. The
+            # embed-table-row-chunks skill iterates
+            # `/document/enriched_tables/*/tbl_table_rows/*` and any
+            # downstream skill reading row-level pdf_total_pages would
+            # otherwise see null per row.
+            row_records = tbl.get("table_rows", []) or []
+            for row in row_records:
+                if isinstance(row, dict) and "pdf_total_pages" not in row:
+                    row["pdf_total_pages"] = pdf_total_pages
             enriched_tables.append({
                 "table_index": tbl["index"],
-                "table_rows": tbl.get("table_rows", []),
+                "table_rows": row_records,
                 "page_start": tbl["page_start"],
                 "page_end": tbl["page_end"],
                 "markdown": tbl["markdown"],
@@ -1564,6 +1588,10 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 "source_file": source_file,
                 "source_path": source_path,
                 "parent_id": parent_id,
+                # Per-item pdf_total_pages -- same rationale as the
+                # enriched_figures item above. Without this, every
+                # shape-table skill invocation logs a warning.
+                "pdf_total_pages": pdf_total_pages,
             })
 
         # Read DI-missed-image warnings (written during _do_crops). When
