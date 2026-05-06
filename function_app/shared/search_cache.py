@@ -185,3 +185,58 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
     except Exception as exc:
         logging.warning("hash cache parse error: %s", exc)
         return None
+
+
+def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
+    """Cross-PDF figure dedup via perceptual hash. Looks up any prior
+    diagram record across the entire index whose image_phash matches.
+
+    Gated by env flag SEARCH_CACHE_CROSS_PARENT=true (default off).
+    Reason: it changes dedup semantics — a shared OEM nameplate
+    appearing in 50 different manuals collapses to ONE vision call
+    instead of 50, but it also means a "cached" record's caption /
+    surrounding_context come from a *different* manual, which can be
+    semantically misleading when the same image carries different
+    contextual meaning. Only enable after evaluating false-positive
+    rate on your corpus.
+
+    Returns None (not raises) on every failure mode. Callers should
+    fall through to the live vision call when None is returned.
+    """
+    if not _enabled():
+        return None
+    if not feature_enabled("SEARCH_CACHE_CROSS_PARENT"):
+        return None
+    if not image_phash:
+        return None
+
+    safe_phash = _safe_token(image_phash)
+    if not safe_phash:
+        return None
+
+    body = {
+        "search": "*",
+        "filter": (
+            f"record_type eq 'diagram' "
+            f"and image_phash eq '{_odata_escape(safe_phash)}' "
+            f"and processing_status eq 'ok'"
+        ),
+        "select": ",".join(SELECT_FIELDS),
+        "top": 1,
+    }
+    headers = {"Content-Type": "application/json", **_auth_header()}
+    resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=10.0)
+    if resp is None:
+        return None
+    if resp.status_code != 200:
+        logging.warning(
+            "phash cache lookup failed: %s %s",
+            resp.status_code, resp.text[:200],
+        )
+        return None
+    try:
+        hits = resp.json().get("value", [])
+        return hits[0] if hits else None
+    except Exception as exc:
+        logging.warning("phash cache parse error: %s", exc)
+        return None

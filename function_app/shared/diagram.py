@@ -30,7 +30,7 @@ from .ids import (
     safe_int,
     safe_str,
 )
-from .search_cache import lookup_existing_by_hash
+from .search_cache import lookup_existing_by_hash, lookup_existing_by_phash
 from .text_utils import build_highlight_text
 
 VALID_CATEGORIES = {
@@ -93,6 +93,31 @@ FIGURE_REF_RE = re.compile(
 )
 
 
+def normalize_figure_ref(s: str) -> str:
+    """Normalize a figure reference for cross-record joins.
+
+    "Figure 18.117"  → "18117"
+    "Fig 18-117"     → "18117"
+    "Figure A-1"     → "a1"
+    "FIG. 4.2"  → "42"
+    ""               → ""
+
+    Strips the Figure/Fig prefix and all separators (dots, dashes,
+    whitespace, NBSP, em-dash). The result is what frontend / Search
+    queries should use when joining text-record `figures_referenced_normalized`
+    to diagram-record `figures_referenced_normalized`. The original
+    `figure_ref` ("Figure 18.117") is preserved separately for display.
+    """
+    if not s:
+        return ""
+    # Drop the prefix; we only want the ID portion. Be tolerant of
+    # NBSP, em-dash, and double whitespace introduced by DI typography.
+    cleaned = re.sub(r"\b(figure|fig)\.?\s*[\-:]?\s*", "", s, flags=re.IGNORECASE)
+    # Strip any remaining non-alphanumerics — separators are noise for joins.
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "", cleaned)
+    return cleaned.lower()
+
+
 def _image_hash(image_b64: str) -> str:
     if not image_b64:
         return "noimage"
@@ -101,6 +126,135 @@ def _image_hash(image_b64: str) -> str:
         return hashlib.sha256(raw).hexdigest()
     except Exception:
         return hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
+
+
+def _image_phash(image_b64: str) -> str:
+    """Perceptual hash (dHash variant) over a grayscale 9x8 thumbnail.
+
+    Returns a 16-hex-char string (64-bit dHash). Two crops with the same
+    visual content produce the same — or near-equal — phash even when
+    PyMuPDF rendering differs across font subsetting / DPI / antialias.
+    SHA-256 over the raw PNG bytes does NOT have this property and was
+    the source of the brittle-dedup bug flagged in the audit.
+
+    Use as a SECONDARY dedup key alongside `image_hash` (SHA-256). The
+    cross-PDF dedup path (search_cache) compares phash with a Hamming
+    distance threshold; intra-PDF dedup still uses SHA-256 for the
+    common case where two crops are byte-identical.
+
+    Implementation: decode → grayscale → resize 9x8 → for each row
+    compute the bit-vector of "pixel[i] > pixel[i+1]" → pack 64 bits
+    into 16 hex chars. PIL is the only dependency (already pulled in
+    by PyMuPDF in this environment). Returns '' on any failure (callers
+    should fall back to SHA-256 on empty phash).
+    """
+    if not image_b64:
+        return ""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        raw = base64.b64decode(image_b64)
+        img = Image.open(BytesIO(raw)).convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+        pixels = list(img.getdata())  # 72 grayscale ints
+        bits = []
+        for row in range(8):
+            for col in range(8):
+                left = pixels[row * 9 + col]
+                right = pixels[row * 9 + col + 1]
+                bits.append(1 if left > right else 0)
+        # Pack 64 bits into a 16-hex-char string.
+        n = 0
+        for b in bits:
+            n = (n << 1) | b
+        return f"{n:016x}"
+    except Exception as exc:
+        logging.warning("phash failed: %s", exc)
+        return ""
+
+
+def phash_distance(a: str, b: str) -> int:
+    """Hamming distance between two 16-hex-char phashes. Returns 64 (max)
+    when either is empty / malformed. Threshold of <=8 is a typical
+    'visually identical' band for dHash; <=16 catches mild compression
+    / DPI variants."""
+    if not a or not b or len(a) != len(b):
+        return 64
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1")
+    except ValueError:
+        return 64
+
+
+# Category-specific extraction hints. We don't run a separate
+# classifier call (that would double cost); instead we use caption
+# and surrounding-text keywords to guess the likely category and
+# include tailored extraction instructions in the user prompt. The
+# model still classifies definitively in its JSON response, but the
+# tailored hints meaningfully improve description quality on the
+# common figure types in technical manuals.
+_CATEGORY_HINTS = {
+    "schematic_wiring": (
+        "Likely a schematic / wiring diagram. In addition to the general "
+        "description, transcribe EVERY visible reference designator (R1, "
+        "C2, T3, F1, K1, J1, etc.) in declaration order. Note all wire "
+        "tags, terminal IDs, and pin numbers. List signal flow between "
+        "labeled terminals (e.g. 'J1 pin 3 -> TB-2 terminal A'). Identify "
+        "voltage levels, currents, and component values where shown."
+    ),
+    "nameplate": (
+        "Likely an equipment nameplate or label plate. Extract as STRUCTURED "
+        "fields in the description: Manufacturer, Model, Serial, "
+        "Voltage rating, Current rating, Power rating, Frequency, Phase, "
+        "Insulation class, Enclosure rating, Date/year, Standards (UL/CSA/IEC). "
+        "If a field is illegible say so explicitly — do not guess."
+    ),
+    "block_flow": (
+        "Likely a block / flow / P&ID / control-logic diagram. List every "
+        "labeled block in document order, then describe the connections "
+        "(arrows / signal lines) between them. For P&ID, capture loop tags "
+        "(e.g. FT-101, PV-204) and instrument types. Note any setpoints "
+        "or threshold values shown."
+    ),
+    "parts_exploded": (
+        "Likely an exploded view / parts list. Transcribe every callout "
+        "number and the part it references. Note assembly order if "
+        "implied by the numbering. Capture any torque / fastener specs "
+        "shown alongside the callouts."
+    ),
+    "default": (
+        "Describe what the figure shows in technical detail. Name "
+        "components, labels, units, and connections. If text is "
+        "unclear, say so — do not guess values."
+    ),
+}
+
+
+def _guess_category_from_context(caption: str, surrounding: str) -> str:
+    """Cheap pre-classification using caption / surrounding-text keywords.
+    Returns one of `_CATEGORY_HINTS` keys. The model still makes the
+    final classification call in its JSON response — this just adds
+    tailored extraction guidance to the prompt."""
+    text = (caption + " " + surrounding).lower()
+    if any(k in text for k in (
+        "wiring diagram", "schematic", "single-line", "single line",
+        "one-line", "one line", "circuit",
+    )):
+        return "schematic_wiring"
+    if any(k in text for k in (
+        "nameplate", "name plate", "rating plate", "label plate", "data plate",
+    )):
+        return "nameplate"
+    if any(k in text for k in (
+        "block diagram", "p&id", "p & id", "flow diagram", "control logic",
+        "logic diagram", "process flow",
+    )):
+        return "block_flow"
+    if any(k in text for k in (
+        "exploded view", "parts list", "parts diagram", "assembly drawing",
+        "callouts", "call-outs",
+    )):
+        return "parts_exploded"
+    return "default"
 
 
 def _build_user_text(data: dict[str, Any]) -> str:
@@ -119,6 +273,12 @@ def _build_user_text(data: dict[str, Any]) -> str:
 
     surrounding_safe = surrounding[:1500].replace('"', "'")
 
+    # Pick category-specific extraction guidance based on caption /
+    # surrounding text keywords. Falls back to the default prompt for
+    # photos and figures we can't pre-classify.
+    category_guess = _guess_category_from_context(caption, surrounding)
+    category_hint = _CATEGORY_HINTS[category_guess]
+
     return (
         f"You are analyzing a figure from technical manual \"{source_file}\".\n"
         f"Section: {header_path or '(unknown)'}\n"
@@ -126,6 +286,7 @@ def _build_user_text(data: dict[str, Any]) -> str:
         f"Caption (from layout): {caption or '(none)'}\n"
         f"Body text references this figure as: {refs or '(none)'}\n"
         f"Surrounding text: \"{surrounding_safe}\"\n\n"
+        f"Category-specific guidance: {category_hint}\n\n"
         f"If this is a technical diagram, describe it in full detail.\n"
         f"If any text/value is unclear, say so explicitly. Do not guess.\n"
         f"If decorative/logo/photo, return category=decorative and is_useful=false."
@@ -181,9 +342,15 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     parent_id = safe_str(data.get("parent_id"))
     pdf_total_pages = safe_int(data.get("pdf_total_pages"), default=None)
     bbox = data.get("bbox") or {}
-    bbox_json = json.dumps(bbox, separators=(",", ":")) if bbox else ""
+    # Serialize as a single-element list of {page, x_in, y_in, w_in, h_in}
+    # so the citation contract matches text_bbox (list of per-page entries)
+    # and table_bbox (list of per-page entries). Frontend can render
+    # highlights uniformly across record types: parse JSON → iterate the
+    # array → for each entry draw a rect on entry.page.
+    bbox_json = json.dumps([bbox], separators=(",", ":")) if bbox else ""
 
     img_hash = _image_hash(image_b64)
+    img_phash = _image_phash(image_b64)
     chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
 
     # Diagrams always live on a single physical page, so physical_pdf_pages
@@ -204,6 +371,12 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "figure_id": figure_id,
         "figure_bbox": bbox_json,
         "image_hash": img_hash,
+        # Perceptual hash — robust to PyMuPDF rendering non-determinism
+        # across font subsetting / antialias / DPI tile cache. Used for
+        # cross-PDF dedup (same OEM nameplate in 50 manuals = 1 vision
+        # call instead of 50) and as a secondary intra-PDF dedup signal
+        # when SHA-256 misses a near-duplicate render.
+        "image_phash": img_phash,
         "physical_pdf_page": page_number,
         "physical_pdf_page_end": page_number,
         "physical_pdf_pages": physical_pdf_pages,
@@ -224,10 +397,20 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     def _finalize(record: dict[str, Any]) -> dict[str, Any]:
-        """Stamp highlight_text onto the record from its description.
-        Centralized so every return path of this function emits the
-        same sanitized highlight string the citation UI consumes."""
+        """Stamp highlight_text + figures_referenced_normalized onto every
+        return path so the record carries:
+          - sanitized highlight string the citation UI consumes
+          - cross-record join key matching text-record
+            `figures_referenced_normalized`. Diagrams emit a
+            single-element list (or empty) so the field type
+            (Collection(Edm.String)) is the same across record types
+            and frontend filters can use one query shape:
+              figures_referenced_normalized/any(f: f eq '18117')
+        """
         record["highlight_text"] = build_highlight_text(record.get("diagram_description", ""))
+        ref = record.get("figure_ref") or ""
+        norm = normalize_figure_ref(ref)
+        record["figures_referenced_normalized"] = [norm] if norm else []
         return record
 
     if not image_b64:
@@ -238,16 +421,20 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 image_b64 = crop_data.get("image_b64", "")
                 if not bbox:
                     bbox = crop_data.get("bbox", {})
-                    bbox_json = json.dumps(bbox, separators=(",", ":")) if bbox else ""
+                    # Same list-wrapping rationale as the primary path —
+                    # keeps the citation contract uniform across record types.
+                    bbox_json = json.dumps([bbox], separators=(",", ":")) if bbox else ""
                 logging.info("fetched crop from cache for %s/%s", source_file, figure_id)
                 # Recompute hash + chunk_id + bbox_json because they were
                 # originally computed on empty image_b64. Without this, the
                 # dedup-by-hash cache lookup at the bottom of the function
                 # always misses, and base_record carries stale identifiers.
                 img_hash = _image_hash(image_b64)
+                img_phash = _image_phash(image_b64)
                 chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
                 base_record["chunk_id"] = chunk_id
                 base_record["image_hash"] = img_hash
+                base_record["image_phash"] = img_phash
                 base_record["figure_bbox"] = bbox_json
 
     if not image_b64:
@@ -300,9 +487,11 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 full_desc = f"{p_description}\nLabels: {p_ocr_text}"
 
             img_hash = _image_hash(image_b64)
+            img_phash = _image_phash(image_b64)
             chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
             base_record["chunk_id"] = chunk_id
             base_record["image_hash"] = img_hash
+            base_record["image_phash"] = img_phash
 
             logging.info("using precomputed vision for %s/%s", source_file, figure_id)
             return _finalize({
@@ -324,6 +513,27 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": safe_str(cached.get("figure_ref")),
             "processing_status": "cache_hit",
         })
+
+    # Cross-PDF perceptual-hash lookup. Gated by env flag
+    # SEARCH_CACHE_CROSS_PARENT — off by default so this is opt-in.
+    # When enabled, the same OEM nameplate appearing in 50 manuals
+    # collapses to one vision call (the first manual indexed pays;
+    # the rest hit cache via phash). The trade-off is that the
+    # cached caption / surrounding_context come from a different
+    # manual; for nameplates and other context-independent figures
+    # that's fine, but for figures whose meaning depends on the
+    # surrounding manual it can be misleading. Evaluate per corpus.
+    if img_phash:
+        cached_phash = lookup_existing_by_phash(img_phash)
+        if cached_phash:
+            return _finalize({
+                **base_record,
+                "has_diagram": bool(cached_phash.get("has_diagram")),
+                "diagram_description": safe_str(cached_phash.get("diagram_description")),
+                "diagram_category": safe_str(cached_phash.get("diagram_category"), "unknown"),
+                "figure_ref": safe_str(cached_phash.get("figure_ref")),
+                "processing_status": "cache_hit_phash",
+            })
 
     try:
         result = _call_vision(image_b64, _build_user_text(data))

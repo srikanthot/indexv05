@@ -59,6 +59,11 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     parent_id = parent_id_for(source_path, source_file)
     chunk_id = summary_chunk_id(source_path, source_file)
 
+    # Document-level metadata from the cover page. Imported lazily to
+    # avoid pulling in page_label's heavyweight imports at module load.
+    from .page_label import cover_metadata_for_pdf
+    cover_meta = cover_metadata_for_pdf(source_path)
+
     if not primary_text:
         return {
             "chunk_id": chunk_id,
@@ -68,6 +73,14 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             "chunk_for_semantic": f"Source: {source_file}\nSummary unavailable.",
             "highlight_text": "",
             "pdf_total_pages": pdf_total_pages,
+            # Summary records cover the whole document; they don't bind to
+            # a specific page. Stamp a dedicated value so frontend code that
+            # filters/sorts on page_resolution_method has a deterministic
+            # signal for these rows ("don't render a page-jump button").
+            "page_resolution_method": "document_summary",
+            "document_revision": cover_meta["document_revision"],
+            "effective_date": cover_meta["effective_date"],
+            "document_number": cover_meta["document_number"],
             "processing_status": "no_content",
             "skill_version": SKILL_VERSION,
         }
@@ -114,6 +127,13 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "chunk_for_semantic": semantic,
         "highlight_text": build_highlight_text(summary_text),
         "pdf_total_pages": pdf_total_pages,
+        # Summary records are doc-level — no specific page. Stamp a
+        # dedicated method tag so frontend logic has a deterministic
+        # signal across record types.
+        "page_resolution_method": "document_summary",
+        "document_revision": cover_meta["document_revision"],
+        "effective_date": cover_meta["effective_date"],
+        "document_number": cover_meta["document_number"],
         "processing_status": status,
         "skill_version": SKILL_VERSION,
     }

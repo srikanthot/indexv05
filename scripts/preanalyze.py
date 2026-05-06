@@ -96,8 +96,10 @@ USEFUL_CATEGORIES = {
 # the response as degenerate (truncated / hallucinated) and retry once.
 # 30 is enough to capture short useful descriptions like "Wiring diagram
 # showing breaker B1, B2, B3 connections to busbar TB-1." but rejects
-# fragments like "Diagram." or "(unclear)".
-_VISION_MIN_DESCRIPTION_CHARS = 30
+# fragments like "Diagram." or "(unclear)". Bar lowered from 30 to 20
+# so brief-but-legitimate equipment-photo descriptions ("Side view of
+# relay 5L. Cover removed.") aren't forced into a retry.
+_VISION_MIN_DESCRIPTION_CHARS = 20
 
 
 def _validate_and_retry_if_degenerate(
@@ -982,7 +984,216 @@ def _do_crops(cfg: dict, pdf_name: str, pdf_bytes: bytes,
                 if crop_count % 100 == 0 and crop_count > 0:
                     print(f"    {crop_count}/{len(pending_uploads)} uploaded...", flush=True)
 
-    return f"  ok-di  {pdf_name} ({elapsed:.0f}s, {crop_count} crops, {skip_count} skipped)"
+    # PyMuPDF supplemental-figure pass: detect raster images that DI
+    # didn't pick up and synthesize figure entries so the rest of the
+    # pipeline (vision, output assembly, indexer projection) treats them
+    # exactly like DI figures. Pre-Sprint-6 this was diagnostic-only —
+    # it counted missed images but didn't extract them. Now we crop,
+    # upload, and write a supplement file that phase_vision and
+    # phase_output read alongside the DI cache.
+    di_pages_with_figures: set[int] = set()
+    for figure in figures:
+        for br in figure.get("boundingRegions", []) or []:
+            p = br.get("pageNumber")
+            if isinstance(p, int):
+                di_pages_with_figures.add(p)
+
+    supplement_figures: list[dict] = []
+    supplement_uploads: list[tuple[str, bytes]] = []
+    di_missed_pages_detail: list[dict] = []
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            for page_idx in range(doc.page_count):
+                page_num = page_idx + 1
+                if page_num in di_pages_with_figures:
+                    continue
+                page = doc.load_page(page_idx)
+                raster_images = page.get_images(full=False) or []
+                page_substantial = 0
+                for img_idx, img_info in enumerate(raster_images):
+                    xref = img_info[0]
+                    try:
+                        rects = page.get_image_rects(xref)
+                    except Exception:
+                        rects = []
+                    for rect in rects:
+                        w_in = (rect.x1 - rect.x0) / 72.0
+                        h_in = (rect.y1 - rect.y0) / 72.0
+                        # Same minimum-size triage as DI figures
+                        # (`_passes_triage`): skip tiny logos / bullets.
+                        if max(w_in, h_in) < 1.0:
+                            continue
+                        # Build a DI-shaped polygon (8 numbers in inches)
+                        # from the PyMuPDF rect (PDF points). DI emits
+                        # polygons in inches at the layout level.
+                        x0_in = rect.x0 / 72.0
+                        y0_in = rect.y0 / 72.0
+                        x1_in = rect.x1 / 72.0
+                        y1_in = rect.y1 / 72.0
+                        polygon = [
+                            x0_in, y0_in,
+                            x1_in, y0_in,
+                            x1_in, y1_in,
+                            x0_in, y1_in,
+                        ]
+                        passes_geom, _ = _passes_triage(polygon)
+                        if not passes_geom:
+                            continue
+
+                        # Synthetic figure id encodes page + image index
+                        # so it's stable across re-runs (assuming PyMuPDF
+                        # enumerates images in the same order — which it
+                        # does for non-incremental edits).
+                        synthetic_id = f"mupdf_p{page_num}_i{img_idx}"
+
+                        # Render the crop using the same helper DI figures
+                        # use, so frontend rendering / hash dedup logic
+                        # treats them identically.
+                        try:
+                            image_b64, bbox = crop_figure_png_b64(
+                                pdf_bytes, page_num, polygon
+                            )
+                        except Exception as crop_exc:
+                            print(f"    mupdf crop error (p{page_num} i{img_idx}): {crop_exc}",
+                                  flush=True)
+                            continue
+
+                        # Re-triage on rendered size (same as DI path).
+                        passes_size, _ = _passes_triage(polygon, image_b64)
+                        if not passes_size:
+                            continue
+
+                        # Hash dedup against existing DI crops AND
+                        # already-collected supplemental crops on this
+                        # PDF, so the same OEM nameplate appearing on
+                        # 5 pages doesn't get cropped 5 times.
+                        try:
+                            raw_png = base64.b64decode(image_b64)
+                        except Exception:
+                            continue
+                        crop_sha = hashlib.sha256(raw_png).hexdigest()
+                        if crop_sha in seen_hashes:
+                            continue
+                        seen_hashes[crop_sha] = synthetic_id
+
+                        crop_obj = {"image_b64": image_b64, "bbox": bbox}
+                        crop_blob = f"_dicache/{pdf_name}.crop.{synthetic_id}.json"
+                        supplement_uploads.append((
+                            crop_blob,
+                            json.dumps(crop_obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                        ))
+
+                        # DI-shaped figure dict for the supplement file —
+                        # phase_vision and phase_output concat these into
+                        # `result["figures"]` and treat them identically
+                        # to native DI figures.
+                        supplement_figures.append({
+                            "id": synthetic_id,
+                            "boundingRegions": [{
+                                "pageNumber": page_num,
+                                "polygon": polygon,
+                            }],
+                            "_source": "pymupdf_supplement",
+                        })
+                        page_substantial += 1
+                if page_substantial > 0:
+                    di_missed_pages_detail.append({
+                        "page": page_num,
+                        "image_count": page_substantial,
+                    })
+        finally:
+            doc.close()
+    except Exception as exc:
+        # Non-fatal: a failure here means we miss synthetic figures for
+        # this PDF, but the build proceeds with whatever DI detected.
+        print(f"    mupdf supplement scan failed for {pdf_name}: {exc}", flush=True)
+
+    supplement_count = 0
+    if supplement_uploads:
+        print(
+            f"    uploading {len(supplement_uploads)} supplemental crops...",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futs = [
+                pool.submit(lambda item: upload_blob(cfg, item[0], item[1]) or True, item)
+                for item in supplement_uploads
+            ]
+            for f in as_completed(futs):
+                try:
+                    if f.result():
+                        supplement_count += 1
+                except Exception as exc:
+                    print(f"    supplement upload error: {exc}", flush=True)
+
+    # Always write the supplement file (even when empty) so phase_vision
+    # and phase_output have a deterministic source of truth — empty
+    # supplement means "nothing to add to DI's figures[]".
+    try:
+        sup_blob = f"_dicache/{pdf_name}.figures_supplement.json"
+        sup_payload = {
+            "figures": supplement_figures,
+            "missed_pages": di_missed_pages_detail[:50],
+            "missed_image_pages": len(di_missed_pages_detail),
+            "missed_image_count": sum(d["image_count"] for d in di_missed_pages_detail),
+        }
+        upload_blob(
+            cfg, sup_blob,
+            json.dumps(sup_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        )
+    except Exception as exc:
+        print(f"    supplement write failed for {pdf_name}: {exc}", flush=True)
+
+    # Back-compat: keep writing the .di_warnings.json file so older
+    # consumers keep working. New consumers should prefer the supplement.
+    if di_missed_pages_detail:
+        try:
+            warn_blob = f"_dicache/{pdf_name}.di_warnings.json"
+            warn_payload = {
+                "di_missed_image_pages": len(di_missed_pages_detail),
+                "di_missed_image_count": sum(d["image_count"] for d in di_missed_pages_detail),
+                "pages": di_missed_pages_detail[:50],
+            }
+            upload_blob(
+                cfg, warn_blob,
+                json.dumps(warn_payload, separators=(",", ":")).encode("utf-8"),
+            )
+        except Exception as exc:
+            print(f"    di-missed-image write failed for {pdf_name}: {exc}", flush=True)
+
+    sup_msg = (
+        f", auto-extracted {supplement_count} pymupdf figures from "
+        f"{len(di_missed_pages_detail)} pages"
+    ) if supplement_count else ""
+
+    return f"  ok-di  {pdf_name} ({elapsed:.0f}s, {crop_count} crops, {skip_count} skipped{sup_msg})"
+
+
+def _load_figures_supplement(cfg: dict, pdf_name: str) -> list[dict]:
+    """Load the PyMuPDF figures supplement file written by _do_crops, if
+    present. Returns a list of synthetic figure dicts in DI's `figures[]`
+    shape so callers can `figures + supplement_figures` them and treat
+    them uniformly. Empty list when no supplement exists or it can't
+    be parsed.
+
+    Used by phase_vision (so synthetic figures get vision analysis) and
+    phase_output (so synthetic figures appear in enriched_figures and
+    therefore in the index)."""
+    sup_blob = f"_dicache/{pdf_name}.figures_supplement.json"
+    try:
+        if not blob_exists(cfg, sup_blob):
+            return []
+        raw = fetch_blob(cfg, sup_blob)
+        data = json.loads(raw)
+        figs = data.get("figures") or []
+        if not isinstance(figs, list):
+            return []
+        return [f for f in figs if isinstance(f, dict)]
+    except Exception as exc:
+        print(f"    supplement load failed for {pdf_name}: {exc}", flush=True)
+        return []
 
 
 # -- Phase B: Vision analysis (parallel within each PDF) --
@@ -1096,7 +1307,9 @@ def phase_vision(cfg: dict, pdf_name: str, force: bool, vision_parallel: int = 2
         source_file = pdf_name
         parent_id = parent_id_for(source_path, source_file)
 
-        figures = result.get("figures", []) or []
+        # Concatenate DI figures with PyMuPDF-supplemental figures so
+        # vision is called on raster schematics DI missed.
+        figures = (result.get("figures", []) or []) + _load_figures_supplement(cfg, pdf_name)
         fig_tasks: list[dict] = []
 
         for fig_idx, figure in enumerate(figures):
@@ -1128,7 +1341,13 @@ def phase_vision(cfg: dict, pdf_name: str, force: bool, vision_parallel: int = 2
             h1 = section["header_1"] if section else ""
             h2 = section["header_2"] if section else ""
             h3 = section["header_3"] if section else ""
-            surrounding = extract_surrounding_text(section["content"], caption, chars=200) if section else ""
+            # 400 chars before + 400 after the caption matches what
+            # process_document.py uses in the live-DI path. Wider window
+            # captures multi-paragraph procedural context that grounds
+            # the figure ("after de-energizing per Section 4.1, locate
+            # the relay shown in Figure 18.117 and..." needs the full
+            # 400 chars on each side).
+            surrounding = extract_surrounding_text(section["content"], caption, chars=400) if section else ""
 
             fig_tasks.append({
                 "figure_id": fig_id,
@@ -1217,7 +1436,9 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         parent_id = parent_id_for(source_path, source_file)
 
         enriched_figures = []
-        figures = result.get("figures", []) or []
+        # Concat with PyMuPDF supplement so synthetic figures appear in
+        # output.json's enriched_figures and reach the index.
+        figures = (result.get("figures", []) or []) + _load_figures_supplement(cfg, pdf_name)
         for fig_idx, figure in enumerate(figures):
             fig_id = figure.get("id") or f"fig_{fig_idx}"
             page = None
@@ -1260,7 +1481,13 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             h1 = section["header_1"] if section else ""
             h2 = section["header_2"] if section else ""
             h3 = section["header_3"] if section else ""
-            surrounding = extract_surrounding_text(section["content"], caption, chars=200) if section else ""
+            # 400 chars before + 400 after the caption matches what
+            # process_document.py uses in the live-DI path. Wider window
+            # captures multi-paragraph procedural context that grounds
+            # the figure ("after de-energizing per Section 4.1, locate
+            # the relay shown in Figure 18.117 and..." needs the full
+            # 400 chars on each side).
+            surrounding = extract_surrounding_text(section["content"], caption, chars=400) if section else ""
 
             fig_data = {
                 "figure_id": fig_id,
@@ -1312,29 +1539,55 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             enriched_figures.append(fig_data)
 
         enriched_tables = []
+        from shared.sections import find_section_for_page_range
         for tbl in extract_table_records(result):
-            section = find_section_for_page(sections_index, tbl["page_start"])
+            # Page-range section lookup: tables that cross section
+            # boundaries inherit the section containing the bulk of
+            # their content, not just page_start's section.
+            section = find_section_for_page_range(
+                sections_index, tbl["page_start"], tbl.get("page_end")
+            )
             h1 = section["header_1"] if section else ""
             h2 = section["header_2"] if section else ""
             h3 = section["header_3"] if section else ""
             enriched_tables.append({
                 "table_index": tbl["index"],
+                "table_rows": tbl.get("table_rows", []),
                 "page_start": tbl["page_start"],
                 "page_end": tbl["page_end"],
                 "markdown": tbl["markdown"],
                 "row_count": tbl["row_count"],
                 "col_count": tbl["col_count"],
                 "caption": tbl["caption"],
+                "bboxes": tbl.get("bboxes", []),
                 "header_1": h1, "header_2": h2, "header_3": h3,
                 "source_file": source_file,
                 "source_path": source_path,
                 "parent_id": parent_id,
             })
 
+        # Read DI-missed-image warnings (written during _do_crops). When
+        # present, surface counts in the output so process_document.py
+        # can stamp `processing_status="di_missed_images"` for the
+        # operator dashboard.
+        di_warnings = {}
+        warn_blob = f"_dicache/{pdf_name}.di_warnings.json"
+        try:
+            if blob_exists(cfg, warn_blob):
+                di_warnings = json.loads(fetch_blob(cfg, warn_blob))
+        except Exception:
+            pass
+
+        output_status = "ok"
+        if di_warnings.get("di_missed_image_pages"):
+            output_status = "di_missed_images"
+
         output = {
             "enriched_figures": enriched_figures,
             "enriched_tables": enriched_tables,
-            "processing_status": "ok",
+            "processing_status": output_status,
+            "di_missed_image_pages": di_warnings.get("di_missed_image_pages", 0),
+            "di_missed_image_count": di_warnings.get("di_missed_image_count", 0),
             "skill_version": SKILL_VERSION,
         }
         output_bytes = json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
