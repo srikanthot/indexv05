@@ -1195,6 +1195,15 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         section_start_page, page_resolution_method = _find_section_start_page(
             source_path, section_content, h1_in, h2_in, h3_in,
         )
+        # Diagnostic logging — surface what's happening per chunk so
+        # operators can see WHY page resolution is failing in the wild.
+        # Keep at INFO level so it shows up in Function App Log Stream
+        # without needing Verbose.
+        logging.info(
+            "page_label: source=%s headers=(%r,%r,%r) -> start_page=%s method=%s",
+            (source_path or "")[-60:], h1_in, h2_in, h3_in,
+            section_start_page, page_resolution_method,
+        )
     else:
         page_resolution_method = "di_input"
 
@@ -1252,8 +1261,45 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
             pages_covered = [primary]
             page_resolution_method = "bbox_corrected"
 
+    # Final fallback (Path c): cache fetch failed entirely (e.g. function
+    # app can't reach blob storage, or DI cache file is malformed). Try
+    # to recover a physical page from the chunk's own DI markdown markers:
+    # `<!-- PageNumber="N" -->` and `<!-- PageBreak -->` carry physical-
+    # page transitions inline in the chunk text. Even when the cache is
+    # totally unreachable, these inline markers give us SOMETHING.
+    #
+    # We use the first integer marker found in either the chunk OR the
+    # section content. Printed labels like "18-33" are skipped — only
+    # integer values map cleanly to physical pages.
     if start_page is None:
-        page_resolution_method = "missing"
+        recovered_page: int | None = None
+        for source_text in (page_text or "", section_content or ""):
+            for m in PAGE_NUMBER_MARKER_RE.finditer(source_text):
+                lbl = (m.group(1) or "").strip()
+                if lbl.isdigit():
+                    recovered_page = int(lbl)
+                    break
+            if recovered_page is not None:
+                break
+        if recovered_page is not None:
+            start_page = recovered_page
+            end_page = recovered_page
+            pages_covered = [recovered_page]
+            page_resolution_method = "marker_inline"
+            logging.info(
+                "page_label: cache fetch failed for source=%s headers=(%r,%r,%r); "
+                "recovered page %d from inline marker",
+                (source_path or "")[-60:], h1_in, h2_in, h3_in, recovered_page,
+            )
+        else:
+            page_resolution_method = "missing"
+            logging.warning(
+                "page_label: ALL fallbacks failed for source=%s headers=(%r,%r,%r) "
+                "section_content_len=%d page_text_len=%d bbox_pages=%d",
+                (source_path or "")[-60:], h1_in, h2_in, h3_in,
+                len(section_content or ""), len(page_text or ""),
+                len(bbox_pages_area),
+            )
 
     # Prefer the explicit `<!-- PageNumber="..." -->` marker from DI when
     # present in the chunk — for technical manuals it holds the printed

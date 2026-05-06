@@ -251,16 +251,21 @@ def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:
     """
     cache_url = _build_cache_url(blob_url, "di.json")
     if not cache_url:
+        logging.warning("fetch_cached_analysis: could not build cache_url from blob_url=%s", blob_url)
         return None
     fetch_url = _apply_sas_if_needed(cache_url)
     headers = _storage_auth_headers()
+    logging.info("fetch_cached_analysis: GET %s (auth_header=%s)",
+                 cache_url, "yes" if headers.get("Authorization") else "no")
 
     try:
         resp = _http_get_with_retry(fetch_url, headers, timeout_s=120.0)
         if resp is None:
+            logging.warning("fetch_cached_analysis: _http_get_with_retry returned None for %s", cache_url)
             return None
+        logging.info("fetch_cached_analysis: status=%d for %s", resp.status_code, cache_url)
         if resp.status_code == 200:
-            logging.info("DI cache hit: %s", cache_url)
+            logging.info("DI cache hit: %s (size=%d bytes)", cache_url, len(resp.content))
             data = json.loads(resp.content)
             # Support both new format (bare analyzeResult) and old
             # v2 wrapper format ({"analyzeResult": ..., "crops": ...})
