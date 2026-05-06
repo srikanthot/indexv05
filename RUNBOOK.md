@@ -117,61 +117,132 @@ Storage / Search / AOAI / DI / Cosmos. **Run this every time you create
 a new Function App or recreate one** — the MI's principalId changes and
 old role assignments don't carry over.
 
-### 5a. (First time only) Make sure Cosmos DB account + database exist
+### 5a. (First time only) Set up Cosmos DB
 
-If `bootstrap.py` fails preflight with
-`[FAIL] Cosmos DB cannot reach cosmos database 'indexing' in <...>`,
-the database (and possibly the account) doesn't exist yet. Run these
-once per environment:
+If `bootstrap.py` fails preflight with:
+```
+[FAIL] Cosmos DB cannot reach cosmos database 'indexing' in <your-cosmos>
+```
+
+It means EITHER (a) your config still has the placeholder `<your-cosmos>`,
+OR (b) the database doesn't exist yet. Follow the numbered steps below
+in order. Run ONE command at a time. Don't skip steps.
+
+---
+
+#### Step 1 — List every Cosmos account in your subscription
+
+```powershell
+az cosmosdb list --query "[].{name:name, rg:resourceGroup, endpoint:documentEndpoint}" -o table
+```
+
+**What to expect**: a table showing your existing Cosmos accounts. Copy
+the `endpoint` value of the one you want to use.
+
+If the table is **empty** (no Cosmos accounts at all), skip to Step 1b.
+Otherwise skip to Step 2.
+
+---
+
+#### Step 1b — Only if no Cosmos account exists: create one
+
+Skip this step if Step 1 showed an existing account.
+
+```powershell
+$RG = (Get-Content deploy.config.json | ConvertFrom-Json).functionApp.resourceGroup
+$ACCT = "cosmos-pseg-tman-dev01"
+$LOC = "usgovvirginia"
+az cosmosdb create -g $RG -n $ACCT --locations regionName=$LOC --capabilities EnableServerless
+```
+
+**What to expect**: takes ~5 minutes. Output is JSON describing the new
+account. Note the `documentEndpoint` field — that's what you'll paste
+into the config in Step 2.
+
+---
+
+#### Step 2 — Open deploy.config.json in Notepad
+
+```powershell
+notepad deploy.config.json
+```
+
+**What to do**: find the `"cosmos"` section. Replace the placeholder
+endpoint with your real one from Step 1 (or Step 1b).
+
+Find this:
+```json
+"cosmos": {
+  "endpoint": "https://<your-cosmos>.documents.azure.us:443/",
+  "database": "indexing"
+}
+```
+
+Change to (paste YOUR real endpoint):
+```json
+"cosmos": {
+  "endpoint": "https://cosmos-pseg-tman-dev01.documents.azure.us:443/",
+  "database": "indexing"
+}
+```
+
+**Save the file (Ctrl+S). Close Notepad.**
+
+---
+
+#### Step 3 — Verify the config is now correct
 
 ```powershell
 $CFG = Get-Content deploy.config.json | ConvertFrom-Json
-$RG  = $CFG.functionApp.resourceGroup
-$DB  = $CFG.cosmos.database
-$LOC = "usgovvirginia"   # adjust to your region
-
-# Step A — Verify your config has a REAL cosmos endpoint (not '<your-cosmos>')
-if ($CFG.cosmos.endpoint -match '<') {
-    Write-Host "Your deploy.config.json still has placeholder <your-cosmos>."
-    Write-Host "List existing Cosmos accounts in this resource group:"
-    az cosmosdb list -g $RG --query "[].{name:name, endpoint:documentEndpoint}" -o table
-
-    Write-Host ""
-    Write-Host "If a Cosmos account already exists above, copy its endpoint and"
-    Write-Host "paste it into deploy.config.json -> cosmos.endpoint, then re-run."
-    Write-Host ""
-    Write-Host "If NO Cosmos account exists, create one (takes ~5 min):"
-    Write-Host "  `$ACCT = 'cosmos-pseg-tman-dev01'   # pick a unique name"
-    Write-Host "  az cosmosdb create -g $RG -n `$ACCT --locations regionName=$LOC --capabilities EnableServerless"
-    Write-Host "  Then update deploy.config.json with the new endpoint and re-run."
-    return
-}
-
-# Extract the account name from the endpoint URL
-$COSMOS_ACCOUNT = ($CFG.cosmos.endpoint -replace 'https://', '' -split '\.')[0]
-Write-Host "Cosmos account: $COSMOS_ACCOUNT"
-Write-Host "Database to create: $DB"
-
-# Step B — Verify the account exists in your subscription
-$ACCOUNT_RG = (az cosmosdb show --name $COSMOS_ACCOUNT --query resourceGroup -o tsv 2>$null)
-if (-not $ACCOUNT_RG) {
-    Write-Host "Cosmos account '$COSMOS_ACCOUNT' not found. Create it first:"
-    Write-Host "  az cosmosdb create -g $RG -n $COSMOS_ACCOUNT --locations regionName=$LOC --capabilities EnableServerless"
-    return
-}
-Write-Host "Account is in resource group: $ACCOUNT_RG"
-
-# Step C — Create the database (containers will auto-create on first write)
-az cosmosdb sql database create `
-  --account-name $COSMOS_ACCOUNT `
-  --resource-group $ACCOUNT_RG `
-  --name $DB `
-  --throughput 400
-
-Write-Host "Database '$DB' created in Cosmos account '$COSMOS_ACCOUNT'."
-Write-Host "Containers (indexing_run_history, indexing_pdf_state) will be"
-Write-Host "auto-created by cosmos_writer.py on first preanalyze run."
+Write-Host "Endpoint in config: $($CFG.cosmos.endpoint)"
 ```
+
+**What to expect**: the line should show your REAL endpoint (no angle
+brackets). If you still see `<your-cosmos>`, Notepad didn't save —
+re-do Step 2.
+
+---
+
+#### Step 4 — Find the resource group containing the Cosmos account
+
+```powershell
+$COSMOS_ACCOUNT = ($CFG.cosmos.endpoint -replace 'https://', '' -split '\.')[0]
+$ACCOUNT_RG = (az cosmosdb show --name $COSMOS_ACCOUNT --query resourceGroup -o tsv)
+Write-Host "Cosmos account: $COSMOS_ACCOUNT"
+Write-Host "Resource group: $ACCOUNT_RG"
+```
+
+**What to expect**: both lines show real values, not blanks. If
+`Resource group:` is empty, the account name from Step 2 is wrong —
+re-do Step 1 and Step 2.
+
+---
+
+#### Step 5 — Create the database
+
+```powershell
+az cosmosdb sql database create --account-name $COSMOS_ACCOUNT --resource-group $ACCOUNT_RG --name $CFG.cosmos.database --throughput 400
+```
+
+**What to expect**: JSON output describing the created database, OR a
+`(Conflict) ... already exists` error (that's also fine — means the
+database is already there).
+
+---
+
+#### Step 6 — Re-run bootstrap
+
+```powershell
+python scripts/bootstrap.py --config deploy.config.json --auto-fix
+```
+
+**What to expect**: STEP 1/8 (preflight) should now show `[OK] Cosmos DB`
+instead of `[FAIL]`. The script proceeds through STEPs 2–8 and finishes
+with role assignments. The `[FAIL] LibreOffice (optional)` line is
+expected and safe to ignore.
+
+If you see `Bootstrap complete.` at the end, you're done with this
+section. Continue to **Section 5c** (the 10-minute wait).
 
 ### 5b. Run bootstrap
 
