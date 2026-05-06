@@ -156,6 +156,25 @@ $FN  = $CFG.functionApp.name
 $PRINCIPAL = (az functionapp identity show -g $RG -n $FN --query principalId -o tsv)
 Write-Host "Function App MI: $PRINCIPAL"
 
+# Step 2 — Check what roles the MI has on the storage account
+$STORAGE_ID = $CFG.storage.accountResourceId
+az role assignment list --assignee $PRINCIPAL --scope $STORAGE_ID --query "[].{role:roleDefinitionName, scope:scope}" -o table
+
 
 # Step 3 — Assign Storage Blob Data Reader
 az role assignment create --assignee $PRINCIPAL --role "Storage Blob Data Reader" --scope $STORAGE_ID
+
+# Step 4 — Wait 5-10 min for propagation
+Start-Sleep -Seconds 600
+
+# Step 5 — Restart Function App so it picks up new tokens
+az functionapp restart -g $RG -n $FN
+Start-Sleep -Seconds 30
+
+# Step 6 — Reset and re-run indexer (existing records will be overwritten with correct page resolution)
+.\scripts\reset_indexer.ps1
+
+# Step 7 — Wait for indexer, then validate
+Start-Sleep -Seconds 120
+python scripts/smoke_test.py --config deploy.config.json --skip-run
+
