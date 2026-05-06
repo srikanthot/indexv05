@@ -207,14 +207,19 @@ re-do Step 2.
 
 ```powershell
 $COSMOS_ACCOUNT = ($CFG.cosmos.endpoint -replace 'https://', '' -split '\.')[0]
-$ACCOUNT_RG = (az cosmosdb show --name $COSMOS_ACCOUNT --query resourceGroup -o tsv)
+$ACCOUNT_RG = (az cosmosdb list --query "[?name=='$COSMOS_ACCOUNT'].resourceGroup" -o tsv)
 Write-Host "Cosmos account: $COSMOS_ACCOUNT"
 Write-Host "Resource group: $ACCOUNT_RG"
 ```
 
-**What to expect**: both lines show real values, not blanks. If
-`Resource group:` is empty, the account name from Step 2 is wrong —
-re-do Step 1 and Step 2.
+**What to expect**: both lines show real values, not blanks.
+
+If `Resource group:` is empty:
+1. Look back at Step 1's output and find the **Rg** column for your
+   Cosmos account.
+2. Set it manually: `$ACCOUNT_RG = "rg-pseg-tman-dev01"`  (replace with
+   the actual RG from your Step 1 table).
+3. Re-run the two `Write-Host` lines above to confirm.
 
 ---
 
@@ -227,6 +232,9 @@ az cosmosdb sql database create --account-name $COSMOS_ACCOUNT --resource-group 
 **What to expect**: JSON output describing the created database, OR a
 `(Conflict) ... already exists` error (that's also fine — means the
 database is already there).
+
+If you get `(--resource-group | -g) are required`, your `$ACCOUNT_RG`
+variable is empty — go back to Step 4 and set it manually.
 
 ---
 
