@@ -202,3 +202,8 @@ if ($j.analyzeResult) {
 }
 
 ?filter=record_type eq 'text' and physical_pdf_page ne null&select=chunk_id,physical_pdf_page,printed_page_label,text_bbox,callouts,page_resolution_method&$top=3
+
+
+$CFG = Get-Content deploy.config.json | ConvertFrom-Json
+az functionapp restart -g $CFG.functionApp.resourceGroup -n $CFG.functionApp.name
+Start-Sleep -Seconds 30
