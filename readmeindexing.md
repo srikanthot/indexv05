@@ -207,3 +207,19 @@ if ($j.analyzeResult) {
 $CFG = Get-Content deploy.config.json | ConvertFrom-Json
 az functionapp restart -g $CFG.functionApp.resourceGroup -n $CFG.functionApp.name
 Start-Sleep -Seconds 30
+
+
+const boxes = JSON.parse(record.text_bbox); // or figure_bbox / table_bbox
+boxes.forEach(b => drawRect(b.page, b.x_in*72, b.y_in*72, b.w_in*72, b.h_in*72));
+
+
+Highlighting from the index — quick guide:
+
+Pick the bbox field by record_type: text_bbox for text, figure_bbox for diagrams, table_bbox for tables/table_rows. Each is a JSON string — parse it to get a list of {page, x_in, y_in, w_in, h_in} entries (one per page the chunk spans).
+
+Coordinates are in inches from the top-left. Multiply each value by 72 to convert to PDF points (PDF.js / Acrobat units). Draw the rectangle on the page given by the entry's page field (1-based physical PDF page).
+
+
+const boxes = JSON.parse(record.text_bbox); // or figure_bbox / table_bbox
+boxes.forEach(b => drawRect(b.page, b.x_in*72, b.y_in*72, b.w_in*72, b.h_in*72));
+Use highlight_text as a fallback (plain-text search in the PDF text layer) when bbox is empty.
