@@ -4,11 +4,18 @@ shape-table custom skill.
 Runs once per enriched_table item produced by process-document. Builds
 the index-projection-ready record (chunk_id, chunk, chunk_for_semantic,
 headers, page span, table_caption, etc.).
+
+Field parity: emits the same cover-metadata + ops fields that text
+records emit (document_revision, effective_date, document_number,
+embedding_version, last_indexed_at) so frontend filters work
+uniformly across all record types.
 """
 
+import datetime
 import json
 from typing import Any
 
+from .config import optional_env
 from .ids import (
     SKILL_VERSION,
     chunk_content_hash,
@@ -19,6 +26,20 @@ from .ids import (
     table_row_chunk_id,
 )
 from .text_utils import build_highlight_text
+
+
+def _now_iso() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _embedding_version() -> str:
+    return optional_env("EMBEDDING_MODEL_VERSION", "text-embedding-ada-002")
+
+
+def _approx_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return max(0, (len(text) + 3) // 4)
 
 
 def _build_semantic(record: dict[str, Any]) -> str:
@@ -110,6 +131,16 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     # so a query like "200A 4-wire 277/480V conductor" hits the row
     # directly via BM25 + vector search, without the LLM having to
     # traverse the full markdown grid.
+
+    # Cover metadata + ops fields used by BOTH row records and the
+    # parent table record below. Compute once. Imported lazily so we
+    # don't pull in the heavyweight page_label module at function-app
+    # cold start unless this skill is actually invoked.
+    from .page_label import cover_metadata_for_pdf
+    cover_meta = cover_metadata_for_pdf(source_path)
+    embedding_ver = _embedding_version()
+    indexed_at = _now_iso()
+
     raw_rows = data.get("table_rows") or []
     row_records: list[dict[str, Any]] = []
     for raw_row in raw_rows:
@@ -169,6 +200,14 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             "table_row_index": row_index,
             "source_file": source_file,
             "source_path": source_path,
+            # Cover metadata + ops fields -- parity with text records.
+            "document_revision": cover_meta["document_revision"],
+            "effective_date": cover_meta["effective_date"],
+            "document_number": cover_meta["document_number"],
+            "embedding_version": embedding_ver,
+            "last_indexed_at": indexed_at,
+            "chunk_token_count": _approx_token_count(row_text),
+            "language": "en",
             "processing_status": "ok",
             "skill_version": SKILL_VERSION,
         })
@@ -179,6 +218,8 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     # returns the prior text_vector). Saves the AOAI call on every table
     # whose content didn't change between runs.
     content_hash = chunk_content_hash(markdown, length=16)
+    # cover_meta, embedding_ver, indexed_at already computed above
+    # (before the row-records loop). Reused here for the parent record.
 
     return {
         "chunk_id": chunk_id,
@@ -208,6 +249,14 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "table_caption": caption,
         "source_file": source_file,
         "source_path": source_path,
+        # Cover metadata + ops fields -- parity with text records.
+        "document_revision": cover_meta["document_revision"],
+        "effective_date": cover_meta["effective_date"],
+        "document_number": cover_meta["document_number"],
+        "embedding_version": embedding_ver,
+        "last_indexed_at": indexed_at,
+        "chunk_token_count": _approx_token_count(markdown),
+        "language": "en",
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
         # List of pre-built per-row records ready for indexProjection.

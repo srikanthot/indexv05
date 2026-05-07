@@ -396,6 +396,25 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "skill_version": SKILL_VERSION,
     }
 
+    # Cover metadata + ops fields — parity with text records so frontend
+    # filters work uniformly across all record types. Imported lazily
+    # to avoid pulling page_label at function-app cold start.
+    try:
+        from .page_label import cover_metadata_for_pdf
+        cover_meta = cover_metadata_for_pdf(source_path)
+    except Exception:
+        cover_meta = {"document_revision": "", "effective_date": "", "document_number": ""}
+    import datetime as _dt
+    from .config import optional_env as _opt_env
+    base_record["document_revision"] = cover_meta["document_revision"]
+    base_record["effective_date"] = cover_meta["effective_date"]
+    base_record["document_number"] = cover_meta["document_number"]
+    base_record["embedding_version"] = _opt_env(
+        "EMBEDDING_MODEL_VERSION", "text-embedding-ada-002"
+    )
+    base_record["last_indexed_at"] = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    base_record["language"] = "en"
+
     def _finalize(record: dict[str, Any]) -> dict[str, Any]:
         """Stamp highlight_text + figures_referenced_normalized onto every
         return path so the record carries:
