@@ -359,21 +359,60 @@ _SECTION_INDEX_CACHE_MAX = 20
 _CACHE_LOCK = threading.Lock()
 
 
+_FAILURE_TTL_SECONDS = 30.0  # cache None for 30s, then retry
+
+# Failure-time tracker so we can implement a time-bounded retry.
+_ANALYSIS_FAILURE_AT: dict[str, float] = {}
+
+
 def _analysis_for(source_path: str) -> dict[str, Any] | None:
     """Fetch and cache the raw DI analyzeResult for a PDF.
 
     Returned shape is the analyzeResult itself (so callers can read
     `paragraphs`, `pages`, `sections`, etc. uniformly without the
     top-level `analyzeResult` wrapper).
+
+    Critical fix (2026-05-07): a failed fetch is no longer cached
+    indefinitely. Previously a transient cache-fetch failure on the
+    first call (timeout, race, cold-start blob throttle) would store
+    None for the source_path and EVERY subsequent call from the same
+    function-app instance would return None instantly without retrying.
+    With Sprint 6's parity additions, diagrams/tables now also call
+    this helper -- so a single failed fetch during diagram processing
+    would poison the cache and text-record processing would all fall
+    to "missing".
+
+    Behavior now:
+      - Successful results: cached indefinitely (until LRU eviction).
+      - Failures: cached as None with a 30-second TTL. After 30s the
+        cached None expires and the next call retries. This both:
+          * prevents thundering herd retries from many parallel chunks
+            on the same source_path (within the 30s window)
+          * recovers automatically if the failure was transient
+        Tests using synthetic URLs that always fail are unaffected
+        because they typically run < 30s and the cached None persists
+        for the duration of the test.
     """
     if not source_path:
         return None
+    import time as _time
+    now = _time.time()
     # Short critical section: dict lookup + move_to_end. The actual blob
     # fetch happens outside the lock so we don't hold it across I/O.
     with _CACHE_LOCK:
         if source_path in _ANALYSIS_CACHE:
-            _ANALYSIS_CACHE.move_to_end(source_path)
-            return _ANALYSIS_CACHE[source_path]
+            cached = _ANALYSIS_CACHE[source_path]
+            if cached is not None:
+                _ANALYSIS_CACHE.move_to_end(source_path)
+                return cached
+            # Cached None: check TTL. If still within failure window,
+            # return None without re-fetching. If TTL expired, drop
+            # the stale entry and fall through to retry.
+            failed_at = _ANALYSIS_FAILURE_AT.get(source_path, 0.0)
+            if now - failed_at < _FAILURE_TTL_SECONDS:
+                return None
+            _ANALYSIS_CACHE.pop(source_path, None)
+            _ANALYSIS_FAILURE_AT.pop(source_path, None)
     try:
         analyze = fetch_cached_analysis(source_path)
         result = None
@@ -386,6 +425,16 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
         result = None
     with _CACHE_LOCK:
         _ANALYSIS_CACHE[source_path] = result
+        if result is None:
+            # Track failure timestamp for TTL-based retry.
+            _ANALYSIS_FAILURE_AT[source_path] = now
+            logging.warning(
+                "page_label: _analysis_for returned None for %s "
+                "(will retry after %ds)",
+                (source_path or "")[-60:], int(_FAILURE_TTL_SECONDS),
+            )
+        else:
+            _ANALYSIS_FAILURE_AT.pop(source_path, None)
         # Evict oldest while over capacity. While loop in case multiple
         # concurrent insertions all overshot before we grabbed the lock.
         while len(_ANALYSIS_CACHE) > _SECTION_INDEX_CACHE_MAX:
