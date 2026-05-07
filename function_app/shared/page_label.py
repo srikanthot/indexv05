@@ -162,6 +162,33 @@ from .text_utils import build_highlight_text
 
 ROMAN_RE = re.compile(r"\b([ivxlcdm]{1,6})\b", re.IGNORECASE)
 PAGE_PREFIX_RE = re.compile(r"\bpage\s+([A-Za-z0-9\-\.]{1,8})\b", re.IGNORECASE)
+
+
+# Validates a candidate page label looks like a real page number, not a
+# random word. Real page labels:
+#   "215" / "12" — pure digits
+#   "5-7" / "18.33" — chapter-prefixed numerics
+#   "A-12" / "TOC-3" — letter-prefixed numerics
+#   "iv" / "xiii" — roman numerals
+# Words like "refers", "Cover", "Notes", "the", etc. are rejected.
+# Without this validation, the label heuristics overmatch on body text
+# words that happen to follow "page " (e.g. "page refers to N").
+_LABEL_VALID_RE = re.compile(
+    r"^("
+    r"[ivxlcdm]+"                                # roman numerals (e.g. iv, xiii)
+    r"|[A-Z]{0,4}[\-\.]?\d{1,4}([\-\.]\d{1,4}){0,2}"  # 215, 5-7, A-12, TOC-3
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_label(s: str) -> bool:
+    """True if `s` looks like a real page label (digits, chapter-prefixed,
+    or roman). Used to reject obvious false positives like 'refers' or
+    'Cover' that the loose heuristics might otherwise return."""
+    if not s:
+        return False
+    return bool(_LABEL_VALID_RE.fullmatch(s.strip()))
 DASH_NUM_RE = re.compile(
     r"^[\-\u2013\u2014\s]*("
     r"[A-Za-z]{1,3}[\-\.]\d{1,4}"   # A-7, B.4
@@ -487,7 +514,10 @@ def _printed_label_for_page(source_path: str, physical_page: int | None) -> str 
         return None
 
     # First pass: pageNumber-role paragraphs on this physical page are
-    # the canonical source. If DI tagged any, trust them.
+    # the canonical source. If DI tagged any, trust them — but still
+    # validate the content matches a real page-label shape. DI sometimes
+    # mis-tags arbitrary text with role=pageNumber; without validation
+    # we'd return arbitrary words ("refers", "Cover") as printed labels.
     for para in paragraphs:
         role = (para.get("role") or "").lower()
         if role != "pagenumber":
@@ -495,7 +525,7 @@ def _printed_label_for_page(source_path: str, physical_page: int | None) -> str 
         for region in para.get("boundingRegions") or []:
             if region.get("pageNumber") == physical_page:
                 content = (para.get("content") or "").strip()
-                if content:
+                if content and _is_valid_label(content):
                     return content
 
     # Second pass: scan pageFooter / pageHeader paragraphs on this page.
@@ -1004,24 +1034,30 @@ def _extract_label(text: str) -> str | None:
         return None
     text = _strip_di_markers(text)
 
+    # Each tier validates with _is_valid_label() before returning. Without
+    # this validation, PAGE_PREFIX_RE happily captures words like "refers"
+    # from body text such as "this page refers to..." and emits them as
+    # the printed_page_label.
     for line in _candidate_lines(text):
         m = PAGE_PREFIX_RE.search(line)
-        if m:
+        if m and _is_valid_label(m.group(1)):
             return m.group(1)
 
     for line in _candidate_lines(text):
         m = TOC_LIKE_RE.search(line)
         if m:
-            return f"{m.group(1).upper()}-{m.group(2)}"
+            label = f"{m.group(1).upper()}-{m.group(2)}"
+            if _is_valid_label(label):
+                return label
 
     for line in _candidate_lines(text):
         m = SECTION_DASH_RE.search(line)
-        if m:
+        if m and _is_valid_label(m.group(1)):
             return m.group(1)
 
     for line in _candidate_lines(text):
         m = DASH_NUM_RE.match(line)
-        if m:
+        if m and _is_valid_label(m.group(1)):
             return m.group(1)
 
     for line in _candidate_lines(text):

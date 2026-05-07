@@ -148,16 +148,47 @@ _MARKDOWN_TABLE_BLOCK_RE = re.compile(
     re.MULTILINE,
 )
 
+# HTML table fragments that DI sometimes emits inside markdown when the
+# table is too complex to render as a clean pipe-table. We see chunks
+# with `<td>$260.00</td><td>$1,070.00</td>` etc. -- noise tokens that
+# pollute the embedding vector. Strip the whole table section
+# (`<table>...</table>` if present) as well as orphaned `<td>...</td>`
+# / `<tr>...</tr>` runs.
+_HTML_TABLE_BLOCK_RE = re.compile(
+    r"<table[\s\S]*?</table\s*>",
+    re.IGNORECASE,
+)
+_HTML_TABLE_FRAGMENT_RE = re.compile(
+    r"(?:<(?:tr|td|th|thead|tbody|tfoot)[^>]*>[\s\S]*?</(?:tr|td|th|thead|tbody|tfoot)\s*>\s*){2,}",
+    re.IGNORECASE,
+)
+
 
 def _strip_inline_tables(text: str) -> str:
-    """Remove markdown pipe-table blocks from text. Preserves a marker
-    line (`[Table omitted from embedding — indexed separately as
-    record_type='table'/'table_row']`) so the embedding still knows a
-    table appeared at this point in the chunk's flow."""
-    if not text or "|" not in text:
+    """Remove markdown pipe-table blocks AND HTML table fragments from
+    text. Preserves a marker line so the embedding still knows a table
+    appeared at this point in the chunk's flow.
+
+    Both forms covered:
+      - Markdown pipe-tables (`| col | col |\n| --- | --- |\n| v | v |`)
+        -- DI's standard format
+      - HTML <table>/<td>/<tr> fragments -- DI emits these for complex
+        tables that don't fit the pipe-table format. Without stripping,
+        the embedding sees `<td>$260.00</td>` style noise.
+    """
+    if not text:
         return text
     placeholder = "\n[Table omitted from embedding -- indexed separately]\n"
-    return _MARKDOWN_TABLE_BLOCK_RE.sub(placeholder, text)
+    out = text
+    if "|" in out:
+        out = _MARKDOWN_TABLE_BLOCK_RE.sub(placeholder, out)
+    if "<" in out and ("</td>" in out.lower() or "</tr>" in out.lower()
+                       or "</table>" in out.lower()):
+        # Full <table>...</table> first (most precise), then orphan
+        # <tr>/<td> sequences.
+        out = _HTML_TABLE_BLOCK_RE.sub(placeholder, out)
+        out = _HTML_TABLE_FRAGMENT_RE.sub(placeholder, out)
+    return out
 
 
 def _build_text_string(data: dict[str, Any]) -> str:
