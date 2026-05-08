@@ -223,3 +223,10 @@ Coordinates are in inches from the top-left. Multiply each value by 72 to conver
 const boxes = JSON.parse(record.text_bbox); // or figure_bbox / table_bbox
 boxes.forEach(b => drawRect(b.page, b.x_in*72, b.y_in*72, b.w_in*72, b.h_in*72));
 Use highlight_text as a fallback (plain-text search in the PDF text layer) when bbox is empty.
+
+
+$url = "https://srch02-pseg-tman-dev01.search.azure.us/indexes/techmanuals-v07-index/docs/$count?api-version=2024-07-01"
+while ($true) {
+    Invoke-RestMethod -Uri $url -Headers @{"api-key"="<your-search-admin-key>"}
+    Start-Sleep -Seconds 30
+}
