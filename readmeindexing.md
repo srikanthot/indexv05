@@ -230,3 +230,14 @@ while ($true) {
     Invoke-RestMethod -Uri $url -Headers @{"api-key"="<your-search-admin-key>"}
     Start-Sleep -Seconds 30
 }
+
+
+$searchUrl = "https://srch02-pseg-tman-dev01.search.azure.us"
+$indexName = "techmanuals-v07-index"
+$apiKey = "PASTE_YOUR_KEY_HERE"
+
+while ($true) {
+    $count = Invoke-RestMethod -Uri "$searchUrl/indexes/$indexName/docs/`$count?api-version=2024-07-01" -Headers @{"api-key"=$apiKey}
+    Write-Host "$(Get-Date -Format 'HH:mm:ss') -> $count records in index"
+    Start-Sleep -Seconds 30
+}
