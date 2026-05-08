@@ -175,7 +175,7 @@ def _apply_sas_if_needed(url: str) -> str:
 
 
 def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
-                         max_retries: int = 2) -> httpx.Response | None:
+                         max_retries: int = 1) -> httpx.Response | None:
     """
     GET helper that retries on HTTP 429 (rate-limited). On other transient
     errors (timeout, connection reset) we let the caller decide; this helper
@@ -259,7 +259,7 @@ def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:
                  cache_url, "yes" if headers.get("Authorization") else "no")
 
     try:
-        resp = _http_get_with_retry(fetch_url, headers, timeout_s=120.0)
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=20.0)
         if resp is None:
             logging.warning("fetch_cached_analysis: _http_get_with_retry returned None for %s", cache_url)
             return None
@@ -341,7 +341,7 @@ def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
     headers = _storage_auth_headers()
 
     try:
-        resp = _http_get_with_retry(fetch_url, headers, timeout_s=120.0)
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=20.0)
         if resp is None:
             return None
         if resp.status_code == 200:

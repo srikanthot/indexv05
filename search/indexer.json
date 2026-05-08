@@ -4,7 +4,7 @@
   "targetIndexName": "<INDEX_NAME>",
   "skillsetName": "<SKILLSET_NAME>",
   "schedule": {
-    "interval": "PT15M",
+    "interval": "PT5M",
     "startTime": "2020-01-01T00:00:00Z"
   },
   "parameters": {
