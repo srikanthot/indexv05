@@ -39,17 +39,24 @@ def get_client():
     api_version = optional_env("AOAI_API_VERSION", "2024-12-01-preview")
     endpoint = required_env("AOAI_ENDPOINT")
 
+    # 60-second hard timeout on AOAI calls. Default in the openai SDK is
+    # 600s (10 min); under load that lets a hanging chat/vision request
+    # consume the entire function-host worker timeout and cascade-kill
+    # other in-flight calls. 60s is well above p99 for our prompts
+    # (vision ~3-15s, summary ~5-20s).
     if use_managed_identity():
         return AzureOpenAI(
             api_version=api_version,
             azure_endpoint=endpoint,
             azure_ad_token_provider=bearer_token_provider(AOAI_SCOPE),
+            timeout=60.0,
         )
 
     return AzureOpenAI(
         api_key=required_env("AOAI_API_KEY"),
         api_version=api_version,
         azure_endpoint=endpoint,
+        timeout=60.0,
     )
 
 

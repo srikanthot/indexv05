@@ -364,6 +364,25 @@ _FAILURE_TTL_SECONDS = 30.0  # cache None for 30s, then retry
 # Failure-time tracker so we can implement a time-bounded retry.
 _ANALYSIS_FAILURE_AT: dict[str, float] = {}
 
+# Per-source_path fetch locks. When a chunk-batch from the same PDF
+# arrives in parallel (the indexer fans 100+ chunks out per PDF), the
+# original implementation let every thread hit storage at once -- 100
+# concurrent GETs on the same 60KB blob caused storage queueing and
+# every fetch ran into its 120s timeout. With per-PDF locks, exactly
+# ONE thread fetches per source_path; the rest wait briefly and read
+# the populated cache, eliminating the thundering-herd hang.
+_FETCH_LOCKS: dict[str, threading.Lock] = {}
+_FETCH_LOCKS_GUARD = threading.Lock()
+
+
+def _get_fetch_lock(source_path: str) -> threading.Lock:
+    with _FETCH_LOCKS_GUARD:
+        lock = _FETCH_LOCKS.get(source_path)
+        if lock is None:
+            lock = threading.Lock()
+            _FETCH_LOCKS[source_path] = lock
+        return lock
+
 
 def _analysis_for(source_path: str) -> dict[str, Any] | None:
     """Fetch and cache the raw DI analyzeResult for a PDF.
@@ -397,8 +416,7 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
         return None
     import time as _time
     now = _time.time()
-    # Short critical section: dict lookup + move_to_end. The actual blob
-    # fetch happens outside the lock so we don't hold it across I/O.
+    # Fast path: cache hit with no per-PDF lock contention.
     with _CACHE_LOCK:
         if source_path in _ANALYSIS_CACHE:
             cached = _ANALYSIS_CACHE[source_path]
@@ -406,39 +424,55 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
                 _ANALYSIS_CACHE.move_to_end(source_path)
                 return cached
             # Cached None: check TTL. If still within failure window,
-            # return None without re-fetching. If TTL expired, drop
-            # the stale entry and fall through to retry.
+            # return None without re-fetching.
             failed_at = _ANALYSIS_FAILURE_AT.get(source_path, 0.0)
             if now - failed_at < _FAILURE_TTL_SECONDS:
                 return None
-            _ANALYSIS_CACHE.pop(source_path, None)
-            _ANALYSIS_FAILURE_AT.pop(source_path, None)
-    try:
-        analyze = fetch_cached_analysis(source_path)
-        result = None
-        if analyze:
-            result = analyze.get("analyzeResult") if isinstance(analyze, dict) else None
-            result = result or analyze
-    except Exception as exc:
-        logging.warning("page_label: failed to fetch DI cache for %s: %s",
-                        source_path, exc)
-        result = None
-    with _CACHE_LOCK:
-        _ANALYSIS_CACHE[source_path] = result
-        if result is None:
-            # Track failure timestamp for TTL-based retry.
-            _ANALYSIS_FAILURE_AT[source_path] = now
-            logging.warning(
-                "page_label: _analysis_for returned None for %s "
-                "(will retry after %ds)",
-                (source_path or "")[-60:], int(_FAILURE_TTL_SECONDS),
-            )
-        else:
-            _ANALYSIS_FAILURE_AT.pop(source_path, None)
-        # Evict oldest while over capacity. While loop in case multiple
-        # concurrent insertions all overshot before we grabbed the lock.
-        while len(_ANALYSIS_CACHE) > _SECTION_INDEX_CACHE_MAX:
-            _ANALYSIS_CACHE.popitem(last=False)
+            # TTL expired -- fall through to fetch (under per-PDF lock).
+    # Slow path: serialize fetches per source_path so 100 parallel chunks
+    # don't all hit storage at once. The first thread fetches; others
+    # wait briefly then read the populated cache.
+    fetch_lock = _get_fetch_lock(source_path)
+    with fetch_lock:
+        # Re-check cache: while we waited on the per-PDF lock, the
+        # designated fetcher may have already populated it.
+        with _CACHE_LOCK:
+            if source_path in _ANALYSIS_CACHE:
+                cached = _ANALYSIS_CACHE[source_path]
+                if cached is not None:
+                    _ANALYSIS_CACHE.move_to_end(source_path)
+                    return cached
+                failed_at = _ANALYSIS_FAILURE_AT.get(source_path, 0.0)
+                if now - failed_at < _FAILURE_TTL_SECONDS:
+                    return None
+                _ANALYSIS_CACHE.pop(source_path, None)
+                _ANALYSIS_FAILURE_AT.pop(source_path, None)
+        try:
+            analyze = fetch_cached_analysis(source_path)
+            result = None
+            if analyze:
+                result = analyze.get("analyzeResult") if isinstance(analyze, dict) else None
+                result = result or analyze
+        except Exception as exc:
+            logging.warning("page_label: failed to fetch DI cache for %s: %s",
+                            source_path, exc)
+            result = None
+        with _CACHE_LOCK:
+            _ANALYSIS_CACHE[source_path] = result
+            if result is None:
+                # Track failure timestamp for TTL-based retry.
+                _ANALYSIS_FAILURE_AT[source_path] = now
+                logging.warning(
+                    "page_label: _analysis_for returned None for %s "
+                    "(will retry after %ds)",
+                    (source_path or "")[-60:], int(_FAILURE_TTL_SECONDS),
+                )
+            else:
+                _ANALYSIS_FAILURE_AT.pop(source_path, None)
+            # Evict oldest while over capacity. While loop in case multiple
+            # concurrent insertions all overshot before we grabbed the lock.
+            while len(_ANALYSIS_CACHE) > _SECTION_INDEX_CACHE_MAX:
+                _ANALYSIS_CACHE.popitem(last=False)
     return result
 
 
