@@ -54,6 +54,9 @@
         { "name": "enriched_figures", "targetName": "enriched_figures" },
         { "name": "enriched_tables", "targetName": "enriched_tables" },
         { "name": "pdf_total_pages", "targetName": "pdf_total_pages" },
+        { "name": "document_revision", "targetName": "document_revision" },
+        { "name": "effective_date", "targetName": "effective_date" },
+        { "name": "document_number", "targetName": "document_number" },
         { "name": "processing_status", "targetName": "doc_processing_status" },
         { "name": "skill_version", "targetName": "doc_skill_version" }
       ]
