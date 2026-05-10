@@ -78,6 +78,32 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
     if precomputed is not None:
         logging.info("using pre-computed output for %s", source_file)
         precomputed["skill_version"] = SKILL_VERSION
+        # Backfill cover-metadata fields for output.json files generated
+        # before the cover_meta plumbing was added. Without this, downstream
+        # skills (shape-table, analyze-diagram, build-doc-summary) would
+        # each call cover_metadata_for_pdf themselves -> 4x DI cache fetches
+        # per chunk -> indexer 2hr quota burn. Compute once here, propagate.
+        needs_cover_meta = (
+            "document_revision" not in precomputed
+            or "effective_date" not in precomputed
+            or "document_number" not in precomputed
+        )
+        if needs_cover_meta:
+            from .page_label import cover_metadata_for_pdf
+            cover_meta = cover_metadata_for_pdf(source_path)
+            precomputed["document_revision"] = cover_meta["document_revision"]
+            precomputed["effective_date"] = cover_meta["effective_date"]
+            precomputed["document_number"] = cover_meta["document_number"]
+            for fig in precomputed.get("enriched_figures") or []:
+                if isinstance(fig, dict):
+                    fig.setdefault("document_revision", cover_meta["document_revision"])
+                    fig.setdefault("effective_date", cover_meta["effective_date"])
+                    fig.setdefault("document_number", cover_meta["document_number"])
+            for tbl in precomputed.get("enriched_tables") or []:
+                if isinstance(tbl, dict):
+                    tbl.setdefault("document_revision", cover_meta["document_revision"])
+                    tbl.setdefault("effective_date", cover_meta["effective_date"])
+                    tbl.setdefault("document_number", cover_meta["document_number"])
         return precomputed
 
     # Check for pre-analyzed DI cache (written by scripts/preanalyze.py).
@@ -107,6 +133,18 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
     # record without re-fetching the cache.
     pages_array = analyze.get("pages") or []
     pdf_total_pages = len(pages_array) if pages_array else None
+
+    # Compute cover metadata ONCE here and propagate through enriched_*
+    # arrays + top-level output. Without this, every shape-table /
+    # analyze-diagram / build-doc-summary skill invocation would call
+    # cover_metadata_for_pdf(source_path) -> _analysis_for() -> blob
+    # fetch, multiplying the DI cache load by 4x and pushing per-PDF
+    # processing past the indexer's 2hr execution quota.
+    from .page_label import cover_metadata_for_pdf
+    cover_meta = cover_metadata_for_pdf(source_path)
+    document_revision = cover_meta["document_revision"]
+    effective_date = cover_meta["effective_date"]
+    document_number = cover_meta["document_number"]
 
     sections_index = build_section_index(analyze)
 
@@ -169,6 +207,9 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
             "source_path": source_path,
             "parent_id": parent_id,
             "pdf_total_pages": pdf_total_pages,
+            "document_revision": document_revision,
+            "effective_date": effective_date,
+            "document_number": document_number,
         })
 
     enriched_tables: list[dict[str, Any]] = []
@@ -201,6 +242,9 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
             "source_path": source_path,
             "parent_id": parent_id,
             "pdf_total_pages": pdf_total_pages,
+            "document_revision": document_revision,
+            "effective_date": effective_date,
+            "document_number": document_number,
         })
 
     if skipped_no_polygon:
@@ -234,6 +278,9 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         "enriched_figures": enriched_figures,
         "enriched_tables": enriched_tables,
         "pdf_total_pages": pdf_total_pages,
+        "document_revision": document_revision,
+        "effective_date": effective_date,
+        "document_number": document_number,
         "processing_status": status,
         "di_figure_count": di_figure_count,
         "figures_kept_count": figures_kept,

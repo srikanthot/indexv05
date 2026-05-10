@@ -143,7 +143,10 @@
         { "name": "source_file", "source": "/document/enriched_figures/*/source_file" },
         { "name": "source_path", "source": "/document/enriched_figures/*/source_path" },
         { "name": "parent_id", "source": "/document/enriched_figures/*/parent_id" },
-        { "name": "pdf_total_pages", "source": "/document/enriched_figures/*/pdf_total_pages" }
+        { "name": "pdf_total_pages", "source": "/document/enriched_figures/*/pdf_total_pages" },
+        { "name": "document_revision", "source": "/document/enriched_figures/*/document_revision" },
+        { "name": "effective_date", "source": "/document/enriched_figures/*/effective_date" },
+        { "name": "document_number", "source": "/document/enriched_figures/*/document_number" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "dgm_chunk_id" },
@@ -207,7 +210,10 @@
         { "name": "source_file", "source": "/document/enriched_tables/*/source_file" },
         { "name": "source_path", "source": "/document/enriched_tables/*/source_path" },
         { "name": "parent_id", "source": "/document/enriched_tables/*/parent_id" },
-        { "name": "pdf_total_pages", "source": "/document/enriched_tables/*/pdf_total_pages" }
+        { "name": "pdf_total_pages", "source": "/document/enriched_tables/*/pdf_total_pages" },
+        { "name": "document_revision", "source": "/document/enriched_tables/*/document_revision" },
+        { "name": "effective_date", "source": "/document/enriched_tables/*/effective_date" },
+        { "name": "document_number", "source": "/document/enriched_tables/*/document_number" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "tbl_chunk_id" },
@@ -310,7 +316,10 @@
         { "name": "source_path", "source": "/document/metadata_storage_path" },
         { "name": "markdown_text", "source": "/document/markdownDocument/*/content" },
         { "name": "section_titles", "source": "/document/markdownDocument/*/sections/h1" },
-        { "name": "pdf_total_pages", "source": "/document/pdf_total_pages" }
+        { "name": "pdf_total_pages", "source": "/document/pdf_total_pages" },
+        { "name": "document_revision", "source": "/document/document_revision" },
+        { "name": "effective_date", "source": "/document/effective_date" },
+        { "name": "document_number", "source": "/document/document_number" }
       ],
       "outputs": [
         { "name": "chunk_id", "targetName": "sum_chunk_id" },

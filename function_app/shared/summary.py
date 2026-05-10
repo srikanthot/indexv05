@@ -59,10 +59,20 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     parent_id = parent_id_for(source_path, source_file)
     chunk_id = summary_chunk_id(source_path, source_file)
 
-    # Document-level metadata from the cover page. Imported lazily to
-    # avoid pulling in page_label's heavyweight imports at module load.
-    from .page_label import cover_metadata_for_pdf
-    cover_meta = cover_metadata_for_pdf(source_path)
+    # Document-level metadata from the cover page. Read from input data
+    # (process-document injects these once per PDF as top-level fields);
+    # fall back to cover_metadata_for_pdf only when process-document didn't
+    # supply them (older cached output.json from before the plumbing-through
+    # change).
+    cover_meta = {
+        "document_revision": safe_str(data.get("document_revision")),
+        "effective_date": safe_str(data.get("effective_date")),
+        "document_number": safe_str(data.get("document_number")),
+    }
+    if not (cover_meta["document_revision"] or cover_meta["effective_date"]
+            or cover_meta["document_number"]):
+        from .page_label import cover_metadata_for_pdf
+        cover_meta = cover_metadata_for_pdf(source_path)
 
     if not primary_text:
         return {
