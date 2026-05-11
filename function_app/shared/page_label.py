@@ -693,29 +693,17 @@ def _parse_date(text: str) -> str:
     return ""
 
 
-def cover_metadata_for_pdf(source_path: str) -> dict[str, str]:
-    """Extract document-level metadata from the cover/title page of a
-    PDF: revision identifier, effective date (ISO format), document
-    number. Returns a dict with three string fields, each '' when not
-    extractable.
+def cover_metadata_from_analyze(result: dict[str, Any] | None) -> dict[str, str]:
+    """Pure extraction: given a DI analyzeResult dict, return cover
+    metadata. No I/O. Used by preanalyze.py (which already has the
+    analyzeResult in hand) AND by cover_metadata_for_pdf below.
 
-    Why this matters: PSEG technical manuals are revised over decades.
-    The chatbot must be able to filter retrieval to the current revision
-    of a manual; the LLM cannot tell a 1998 manual from a 2024 manual
-    by inspecting page text alone. Surfacing these as filterable index
-    fields lets the orchestrator say "only consider chunks where
-    effective_date >= '2020-01'".
-
-    Strategy: scan all paragraphs whose `boundingRegions[*].pageNumber`
-    is in {1, 2, 3} (cover pages — many manuals push real metadata to
-    page 2 or 3 with a logo/blank cover) and run revision/date/doc-
-    number regexes over each. Earliest match wins for revision (cover
-    is more authoritative than continuation pages); first-match for
-    date and doc-number too.
+    Surfacing this without the blob-fetch wrapper means preanalyze can
+    write cover_meta into output.json directly during phase_output,
+    so the function-app skill chain at indexer time never has to
+    backfill -- which on huge PDFs took 10-30 minutes per skill call
+    and was blowing through the function-host timeout.
     """
-    if not source_path:
-        return {"document_revision": "", "effective_date": "", "document_number": ""}
-    result = _analysis_for(source_path)
     if not result:
         return {"document_revision": "", "effective_date": "", "document_number": ""}
     paragraphs = result.get("paragraphs") or []
@@ -757,6 +745,32 @@ def cover_metadata_for_pdf(source_path: str) -> dict[str, str]:
         "effective_date": effective_date,
         "document_number": document_number,
     }
+
+
+def cover_metadata_for_pdf(source_path: str) -> dict[str, str]:
+    """Extract document-level metadata from the cover/title page of a
+    PDF: revision identifier, effective date (ISO format), document
+    number. Returns a dict with three string fields, each '' when not
+    extractable.
+
+    Why this matters: PSEG technical manuals are revised over decades.
+    The chatbot must be able to filter retrieval to the current revision
+    of a manual; the LLM cannot tell a 1998 manual from a 2024 manual
+    by inspecting page text alone. Surfacing these as filterable index
+    fields lets the orchestrator say "only consider chunks where
+    effective_date >= '2020-01'".
+
+    Strategy: scan all paragraphs whose `boundingRegions[*].pageNumber`
+    is in {1, 2, 3} (cover pages — many manuals push real metadata to
+    page 2 or 3 with a logo/blank cover) and run revision/date/doc-
+    number regexes over each. Earliest match wins for revision (cover
+    is more authoritative than continuation pages); first-match for
+    date and doc-number too.
+    """
+    if not source_path:
+        return {"document_revision": "", "effective_date": "", "document_number": ""}
+    result = _analysis_for(source_path)
+    return cover_metadata_from_analyze(result)
 
 
 def _ocr_min_confidence_for_pages(source_path: str, pages: list[int] | None) -> float | None:
