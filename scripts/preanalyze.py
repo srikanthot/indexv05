@@ -1425,6 +1425,7 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
 
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
         from shared.ids import SKILL_VERSION, parent_id_for
+        from shared.page_label import cover_metadata_from_analyze
         from shared.sections import build_section_index, extract_surrounding_text, find_section_for_page
         from shared.tables import extract_table_records
 
@@ -1444,6 +1445,19 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         # process_document.py emits in the live-DI fallback path.
         pages_array = result.get("pages") or []
         pdf_total_pages = len(pages_array) if pages_array else None
+
+        # Cover metadata extracted ONCE here from the in-memory DI result
+        # and propagated through every enriched_figure / enriched_table +
+        # top-level output. Without this, the function-app's process-
+        # document skill at indexer time would have to backfill these
+        # fields by re-fetching and re-parsing the DI cache -- which on
+        # huge PDFs (20+ MB cache) blew past the 30-min function timeout
+        # and cascade-killed every in-flight skill invocation. Computing
+        # here is essentially free (the analyze result is already loaded).
+        cover_meta = cover_metadata_from_analyze(result)
+        document_revision = cover_meta["document_revision"]
+        effective_date = cover_meta["effective_date"]
+        document_number = cover_meta["document_number"]
 
         enriched_figures = []
         # Concat with PyMuPDF supplement so synthetic figures appear in
@@ -1515,6 +1529,13 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 # resolves cleanly. Without it, the indexer logs a warning
                 # per figure -- ~167 warnings on a typical PSEG manual.
                 "pdf_total_pages": pdf_total_pages,
+                # Cover metadata propagated so analyze-diagram can stamp
+                # document_revision / effective_date / document_number on
+                # the emitted diagram record. Without these on input, the
+                # skill's fallback was the slow path that timed out.
+                "document_revision": document_revision,
+                "effective_date": effective_date,
+                "document_number": document_number,
             }
 
             vision_blob = f"_dicache/{pdf_name}.vision.{fig_id}.json"
@@ -1592,6 +1613,11 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 # enriched_figures item above. Without this, every
                 # shape-table skill invocation logs a warning.
                 "pdf_total_pages": pdf_total_pages,
+                # Cover metadata propagated to shape-table input -- same
+                # rationale as enriched_figures above.
+                "document_revision": document_revision,
+                "effective_date": effective_date,
+                "document_number": document_number,
             })
 
         # Read DI-missed-image warnings (written during _do_crops). When
@@ -1613,6 +1639,12 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         output = {
             "enriched_figures": enriched_figures,
             "enriched_tables": enriched_tables,
+            "pdf_total_pages": pdf_total_pages,
+            # Top-level cover_meta so build-doc-summary can read it from
+            # /document/document_revision (no per-item enriched_* path).
+            "document_revision": document_revision,
+            "effective_date": effective_date,
+            "document_number": document_number,
             "processing_status": output_status,
             "di_missed_image_pages": di_warnings.get("di_missed_image_pages", 0),
             "di_missed_image_count": di_warnings.get("di_missed_image_count", 0),
