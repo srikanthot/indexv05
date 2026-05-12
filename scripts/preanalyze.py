@@ -467,6 +467,24 @@ def list_cache_blobs(cfg: dict) -> list[str]:
 
 _BLOB_RETRY_ATTEMPTS = 3
 _BLOB_RETRY_BASE_DELAY = 2.0
+# Cap on the Retry-After value we'll honor from the server. Avoids a
+# malicious or mis-configured Retry-After header stalling preanalyze for
+# minutes per blob.
+_BLOB_RETRY_AFTER_CAP = 30.0
+
+
+def _retry_after_seconds(resp: "httpx.Response | None", default_s: float) -> float:
+    """Parse the server's Retry-After hint; cap to _BLOB_RETRY_AFTER_CAP.
+    Falls back to `default_s` when absent or unparseable."""
+    if resp is None:
+        return default_s
+    ra = resp.headers.get("Retry-After", "") if hasattr(resp, "headers") else ""
+    if not ra:
+        return default_s
+    try:
+        return min(max(float(ra), 1.0), _BLOB_RETRY_AFTER_CAP)
+    except (TypeError, ValueError):
+        return default_s
 
 
 def blob_exists(cfg: dict, name: str) -> bool:
@@ -480,6 +498,7 @@ def blob_exists(cfg: dict, name: str) -> bool:
 
     last_exc: Exception | None = None
     for attempt in range(_BLOB_RETRY_ATTEMPTS):
+        resp = None
         try:
             headers = _storage_auth_header("HEAD", container, name)
             resp = _storage_client.head(url, headers=headers)
@@ -495,7 +514,7 @@ def blob_exists(cfg: dict, name: str) -> bool:
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
         if attempt < _BLOB_RETRY_ATTEMPTS - 1:
-            time.sleep(_BLOB_RETRY_BASE_DELAY * (attempt + 1))
+            time.sleep(_retry_after_seconds(resp, _BLOB_RETRY_BASE_DELAY * (attempt + 1)))
     raise RuntimeError(f"blob HEAD failed after {_BLOB_RETRY_ATTEMPTS} attempts: {last_exc}")
 
 
@@ -506,6 +525,7 @@ def fetch_blob(cfg: dict, name: str) -> bytes:
 
     last_exc: Exception | None = None
     for attempt in range(_BLOB_RETRY_ATTEMPTS):
+        resp = None
         try:
             headers = _storage_auth_header("GET", container, name)
             resp = _storage_client.get(url, headers=headers)
@@ -518,7 +538,7 @@ def fetch_blob(cfg: dict, name: str) -> bytes:
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
         if attempt < _BLOB_RETRY_ATTEMPTS - 1:
-            time.sleep(_BLOB_RETRY_BASE_DELAY * (attempt + 1))
+            time.sleep(_retry_after_seconds(resp, _BLOB_RETRY_BASE_DELAY * (attempt + 1)))
     raise RuntimeError(f"blob GET failed after {_BLOB_RETRY_ATTEMPTS} attempts: {last_exc}")
 
 
@@ -530,6 +550,7 @@ def upload_blob(cfg: dict, name: str, data: bytes) -> None:
 
     last_exc: Exception | None = None
     for attempt in range(_BLOB_RETRY_ATTEMPTS):
+        resp = None
         try:
             extra = {"x-ms-blob-type": "BlockBlob"}
             headers = _storage_auth_header("PUT", container, name,
@@ -548,7 +569,7 @@ def upload_blob(cfg: dict, name: str, data: bytes) -> None:
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
         if attempt < _BLOB_RETRY_ATTEMPTS - 1:
-            time.sleep(_BLOB_RETRY_BASE_DELAY * (attempt + 1))
+            time.sleep(_retry_after_seconds(resp, _BLOB_RETRY_BASE_DELAY * (attempt + 1)))
     raise RuntimeError(f"blob PUT failed after {_BLOB_RETRY_ATTEMPTS} attempts: {last_exc}")
 
 
@@ -1527,11 +1548,20 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             cap = figure.get("caption") or {}
             caption = (cap.get("content") or "").strip()
 
-            # Load crop bbox (but NOT image_b64 -- keep output.json small)
+            # Load crop bbox (but NOT image_b64 -- keep output.json small).
+            # Narrow exception scope so transient storage failures don't
+            # silently emit bbox-less figures (UI cannot draw highlight
+            # rectangle). A genuine JSON-malformed cache file is a real
+            # data problem the operator should see -- treat the bbox as
+            # empty and log; let httpx errors propagate so the run fails
+            # and the operator re-runs that PDF rather than producing a
+            # broken output.json.
             try:
                 crop_data = json.loads(fetch_blob(cfg, crop_blob))
                 bbox = crop_data.get("bbox", {})
-            except Exception:
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                print(f"    warn: crop bbox parse failed for {pdf_name} fig {fig_id}: {exc}",
+                      flush=True)
                 bbox = {}
 
             section = find_section_for_page(sections_index, page)
@@ -1573,6 +1603,16 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
 
             vision_blob = f"_dicache/{pdf_name}.vision.{fig_id}.json"
             vision_result: dict = {}
+            # Narrow exception scope. The previous bare `except Exception: pass`
+            # silently demoted figures to has_diagram=False whenever the
+            # vision blob fetch failed transiently -- the figure would
+            # then be cached as a "skipped" record in output.json and the
+            # operator had no signal that vision had actually succeeded
+            # but the blob read failed. Now: JSON-malformed blobs are
+            # logged-and-skipped (real data corruption the operator
+            # should know about); transient httpx/runtime errors from
+            # fetch_blob propagate up so the run aborts and can be
+            # re-tried, rather than silently producing a broken output.json.
             try:
                 if blob_exists(cfg, vision_blob):
                     cached = json.loads(fetch_blob(cfg, vision_blob))
@@ -1580,8 +1620,9 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                     # logic) have an "_error" key -- treat as no useful result.
                     if isinstance(cached, dict) and "_error" not in cached:
                         vision_result = cached
-            except Exception:
-                pass
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                print(f"    warn: vision-blob parse failed for {pdf_name} fig {fig_id}: {exc}",
+                      flush=True)
 
             v_category = (vision_result.get("category") or "unknown").strip().lower()
             v_description = (vision_result.get("description") or "").strip()

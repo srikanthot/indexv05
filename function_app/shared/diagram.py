@@ -158,7 +158,13 @@ def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
         from PIL import Image
         if raw is None:
             raw = base64.b64decode(image_b64)
-        img = Image.open(BytesIO(raw)).convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+        # Image.open is lazy; the file handle stays open until close().
+        # Use a context manager so the underlying BytesIO + PIL state are
+        # released deterministically. Without this, on 200+ figures per PDF
+        # × 50 PDFs we accumulated thousands of un-closed PIL Image objects
+        # waiting on GC, growing worker memory across the multi-hour run.
+        with Image.open(BytesIO(raw)) as src:
+            img = src.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
         pixels = list(img.getdata())  # 72 grayscale ints
         bits = []
         for row in range(8):
@@ -482,20 +488,21 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         })
 
     # ── Image triage: skip tiny crops ──
-    try:
-        raw_png = base64.b64decode(image_b64)
-        if len(raw_png) < MIN_CROP_BYTES:
-            logging.info("triage skip (tiny %d bytes) for %s/%s", len(raw_png), source_file, figure_id)
-            return _finalize({
-                **base_record,
-                "has_diagram": False,
-                "diagram_description": "",
-                "diagram_category": "decorative",
-                "figure_ref": "",
-                "processing_status": "skipped_tiny",
-            })
-    except Exception:
-        pass
+    # Reuse raw_bytes from the _decode_b64_once call above instead of
+    # decoding again. On a 5MB crop × 500 figures/PDF the redundant decode
+    # was ~100s of CPU on the critical path. Fall back to a fresh decode
+    # only if raw_bytes is None (decode failed earlier).
+    raw_png = raw_bytes if raw_bytes is not None else _decode_b64_once(image_b64)
+    if raw_png is not None and len(raw_png) < MIN_CROP_BYTES:
+        logging.info("triage skip (tiny %d bytes) for %s/%s", len(raw_png), source_file, figure_id)
+        return _finalize({
+            **base_record,
+            "has_diagram": False,
+            "diagram_description": "",
+            "diagram_category": "decorative",
+            "figure_ref": "",
+            "processing_status": "skipped_tiny",
+        })
 
     # ── Fast path: pre-computed vision result from preanalyze.py ──
     if source_path and figure_id:
@@ -571,9 +578,18 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 "processing_status": "cache_hit_phash",
             })
 
+    # Narrowed exception scope: bare `except Exception` here swallowed
+    # AAD/credential failures (azure.core ClientAuthenticationError,
+    # openai.AuthenticationError) silently, emitting empty diagram records
+    # with processing_status="vision_error:..." that then poison the
+    # search_cache (cache filter requires status='ok' to retry). A partial
+    # AAD outage would index ~all figures as empty. Now: catch only
+    # transient API/network/decode errors; let auth, config, and
+    # unexpected SDK errors propagate so the skill envelope reports a
+    # per-record error that counts toward maxFailedItems.
     try:
         result = _call_vision(image_b64, _build_user_text(data))
-    except Exception as exc:
+    except (TimeoutError, json.JSONDecodeError) as exc:
         return _finalize({
             **base_record,
             "has_diagram": False,
@@ -582,6 +598,27 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": "",
             "processing_status": f"vision_error:{type(exc).__name__}",
         })
+    except Exception as exc:
+        # OpenAI SDK exceptions: catch the transient family (rate limit,
+        # connection, timeout, server) by name without importing the
+        # symbols (so unit tests without `openai` installed still pass).
+        exc_name = type(exc).__name__
+        transient = {
+            "APIError", "APIConnectionError", "APITimeoutError",
+            "RateLimitError", "InternalServerError", "ServiceUnavailableError",
+        }
+        if exc_name in transient or isinstance(exc, __import__("httpx").HTTPError):
+            return _finalize({
+                **base_record,
+                "has_diagram": False,
+                "diagram_description": "",
+                "diagram_category": "unknown",
+                "figure_ref": "",
+                "processing_status": f"vision_error:{exc_name}",
+            })
+        # Auth / config / unknown — propagate so the skill error envelope
+        # surfaces the failure to the indexer.
+        raise
 
     category = (result.get("category") or "unknown").strip().lower()
     if category not in VALID_CATEGORIES:

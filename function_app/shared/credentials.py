@@ -53,7 +53,22 @@ def bearer_token_provider(scope: str) -> Callable[[], str]:
 
 
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}
-_TOKEN_CACHE_LOCK = threading.Lock()
+# Per-scope lock so a slow IMDS fetch for one scope doesn't block other
+# scopes' token acquisitions. The previous single global lock meant a
+# worker needing DI + Storage + Search tokens concurrently serialized on
+# one mutex; under IMDS retry (up to ~3.5s with 0.5/1/2 backoff) every
+# parallel skill waited on whichever scope happened to refresh first.
+_TOKEN_LOCKS: dict[str, threading.Lock] = {}
+_TOKEN_LOCKS_GUARD = threading.Lock()
+
+
+def _scope_lock(scope: str) -> threading.Lock:
+    with _TOKEN_LOCKS_GUARD:
+        lock = _TOKEN_LOCKS.get(scope)
+        if lock is None:
+            lock = threading.Lock()
+            _TOKEN_LOCKS[scope] = lock
+        return lock
 
 
 def bearer_token(scope: str) -> str:
@@ -78,7 +93,7 @@ def bearer_token(scope: str) -> str:
         # Refresh proactively at 5-min-before-expiry mark.
         if expires_at > now + 300:
             return token
-    with _TOKEN_CACHE_LOCK:
+    with _scope_lock(scope):
         cached = _TOKEN_CACHE.get(scope)
         # Refresh `now` under the lock in case we blocked a long time.
         now = time.time()
