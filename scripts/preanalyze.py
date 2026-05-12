@@ -795,13 +795,25 @@ def _is_pdf_done(cfg: dict, pdf_name: str) -> bool:
     except Exception:
         return False  # unreadable output.json -> re-run
 
+    # PRIMARY signal: processing_status. phase_output sets this to "ok"
+    # (or "di_missed_images" / "partial_vision") only AFTER the output
+    # was assembled cleanly. If it's any of those, preanalyze completed
+    # for this PDF regardless of whether DI's figure count is non-zero.
+    # This is what catches the legit "DI saw figures, triage rejected
+    # them all" case (decorative borders, table edges, page-number
+    # graphics, etc.) — common for PDFs that are tables+text only.
+    status = out.get("processing_status") or ""
+    if status in ("ok", "di_missed_images", "partial_vision"):
+        return True
+
+    # Fallback: older output.json files predating processing_status.
     enriched_count = len(out.get("enriched_figures") or [])
     if enriched_count > 0:
         return True
 
-    # Zero enriched figures. Verify against DI cache: if DI also reported
-    # zero figures, output.json is legitimately done. If DI had figures,
-    # this is a partial-state carryover from a crashed run.
+    # Zero enriched figures and no processing_status. Verify against DI
+    # cache: if DI also reported zero figures, output.json is legitimately
+    # done. If DI had figures, this is a partial-state carryover.
     di_name = f"_dicache/{pdf_name}.di.json"
     if not blob_exists(cfg, di_name):
         return True  # DI cache gone; trust output.json
@@ -1866,6 +1878,27 @@ def status_report(cfg: dict) -> None:
         di_figure_count_cache[pdf_name] = n
         return n
 
+    # Read output.json's `processing_status` for PDFs that look ambiguous.
+    # If processing_status is "ok" / "di_missed_images" / "partial_vision",
+    # phase_output completed cleanly -- accept as done even if crops == 0
+    # (means DI's figures were all triaged out, e.g. decorative borders).
+    output_status_cache: dict[str, str | None] = {}
+
+    def _output_processing_status(pdf_name: str) -> str | None:
+        if pdf_name in output_status_cache:
+            return output_status_cache[pdf_name]
+        out_blob = f"_dicache/{pdf_name}.output.json"
+        if out_blob not in cache_set:
+            output_status_cache[pdf_name] = None
+            return None
+        try:
+            out = json.loads(fetch_blob(cfg, out_blob))
+            s = out.get("processing_status") if isinstance(out, dict) else None
+        except Exception:
+            s = None
+        output_status_cache[pdf_name] = s
+        return s
+
     total_done_pdfs = 0
     total_partial = 0
     total_legit_zero_figs = 0
@@ -1876,22 +1909,37 @@ def status_report(cfg: dict) -> None:
         vision = vision_count.get(pdf, 0)
 
         # Classify state: done, partial (output without crops), or missing.
-        # Two paths to "done": output.json with crops, OR output.json with
-        # zero crops AND DI itself reported zero figures (legit no-figure PDF).
+        # Paths to "done":
+        #   (a) output.json + crops present (typical happy path)
+        #   (b) output.json with zero crops AND DI itself reported zero
+        #       figures (legit no-figure PDF — 1-2 page forms, etc.)
+        #   (c) output.json with zero crops, DI reported figures, BUT
+        #       output.json's processing_status is "ok"/"di_missed_images"/
+        #       "partial_vision" — means DI's "figures" were all decorative
+        #       and triage correctly rejected them. Common for table+text
+        #       PDFs where DI flags borders/headers as figures.
         if output_ok and crops == 0 and di_ok:
-            di_figs = _di_figure_count(pdf)
-            if di_figs == 0:
-                state = "done"  # legitimately no figures
+            out_status = _output_processing_status(pdf)
+            if out_status in ("ok", "di_missed_images", "partial_vision"):
+                # phase_output completed cleanly -- accept as done.
+                state = "done"
                 total_done_pdfs += 1
                 total_legit_zero_figs += 1
-            elif di_figs is None:
-                # Couldn't read DI cache -- fall back to old behavior
-                state = "PARTIAL"
-                total_partial += 1
             else:
-                # DI had figures but we didn't crop them = real partial
-                state = "PARTIAL"
-                total_partial += 1
+                di_figs = _di_figure_count(pdf)
+                if di_figs == 0:
+                    state = "done"  # legitimately no figures
+                    total_done_pdfs += 1
+                    total_legit_zero_figs += 1
+                elif di_figs is None:
+                    # Couldn't read DI cache -- fall back to old behavior
+                    state = "PARTIAL"
+                    total_partial += 1
+                else:
+                    # DI had figures, no crops, processing_status missing
+                    # or indicates a real failure = real partial
+                    state = "PARTIAL"
+                    total_partial += 1
         elif output_ok:
             state = "done"
             total_done_pdfs += 1
