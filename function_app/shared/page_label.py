@@ -355,7 +355,7 @@ PAGE_BREAK_MARKER_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
 # wrong section data on subsequent lookups for that worker.
 _SECTION_INDEX_CACHE: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
 _ANALYSIS_CACHE: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
-_SECTION_INDEX_CACHE_MAX = 20
+_SECTION_INDEX_CACHE_MAX = 5
 _CACHE_LOCK = threading.Lock()
 
 
