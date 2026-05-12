@@ -1569,6 +1569,10 @@ check("ocr_min_confidence: equals page-5 minimum (0.62)",
 # Chunk on a page with no word-confidence data -> field is None.
 _pl_mod._ANALYSIS_CACHE[_OCR_KEY]["pages"][0]["words"] = []
 _pl_mod._ANALYSIS_CACHE[_OCR_KEY]["pages"][1]["words"] = []
+# Invalidate derived cache too — _derived_for memoizes the min_conf_by_page
+# computed from the words array, so mutating words without invalidating
+# the derived cache leaves a stale value behind.
+_pl_mod._DERIVED_CACHE.pop(_OCR_KEY, None)
 result_no_conf = process_page_label({
     "page_text": ocr_chunk,
     "section_content": ocr_chunk,

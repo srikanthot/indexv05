@@ -403,11 +403,18 @@ def _derived_for(source_path: str) -> dict[str, Any]:
     """Return derived per-PDF structures, building once and caching.
 
     Without this, process_page_label scanned the full paragraphs[] array
-    of the DI cache 6+ times PER CHUNK (cover_metadata_for_pdf,
-    _printed_label_for_page × 2, _footnotes_for_pages,
-    _ocr_min_confidence_for_pages, _text_bbox_for_chunk). On huge PDFs
-    (10K paragraphs, 500 chunks) that's 30M+ iterations. With this cache
-    each chunk gets O(1) dict lookups instead.
+    of the DI cache 6+ times PER CHUNK. On huge PDFs (10K paragraphs,
+    500 chunks) that's 30M+ iterations + 5M+ regex calls.
+    With this cache each chunk gets O(1) dict lookups instead.
+
+    Cached structures:
+      - cover_meta: dict (document_revision, effective_date, document_number)
+      - min_conf_by_page: {page_num: float|None}
+      - paragraphs_by_page: {page_num: [para,...]}
+      - pagenumber_by_page: {page_num: [para with role=pageNumber]}
+      - pagefurniture_by_page: {page_num: [para with role in pageFooter/pageHeader]}
+      - text_bbox_paragraphs: [(content, content_norm, page, bbox), ...]
+        — paragraphs ≥40 chars, pre-normalized, for _text_bbox_for_chunk
     """
     with _CACHE_LOCK:
         cached = _DERIVED_CACHE.get(source_path)
@@ -422,6 +429,7 @@ def _derived_for(source_path: str) -> dict[str, Any]:
         "paragraphs_by_page": {},
         "pagenumber_by_page": {},
         "pagefurniture_by_page": {},
+        "text_bbox_paragraphs": [],
     }
     if result:
         # Cover metadata — built once, reused across every chunk.
@@ -436,7 +444,12 @@ def _derived_for(source_path: str) -> dict[str, Any]:
         paras_by_page: dict[int, list[dict[str, Any]]] = {}
         pgnum_by_page: dict[int, list[dict[str, Any]]] = {}
         pgfurn_by_page: dict[int, list[dict[str, Any]]] = {}
+        # text_bbox candidates: pre-normalized + bbox extracted ONCE.
+        # _text_bbox_for_chunk used to call _normalize_text on every
+        # paragraph EVERY chunk (5M regex calls per huge PDF).
+        bbox_candidates: list[tuple[str, str, int, tuple[float, float, float, float]]] = []
         for para in paragraphs:
+            content = (para.get("content") or "").strip()
             for region in (para.get("boundingRegions") or []):
                 pn = region.get("pageNumber")
                 if isinstance(pn, int) and pn > 0:
@@ -446,10 +459,19 @@ def _derived_for(source_path: str) -> dict[str, Any]:
                         pgnum_by_page.setdefault(pn, []).append(para)
                     elif role in ("pagefooter", "pageheader"):
                         pgfurn_by_page.setdefault(pn, []).append(para)
+                    # Pre-normalize + extract bbox once for text_bbox lookup
+                    if content and len(content) >= 40:
+                        norm = _normalize_text(content)
+                        if norm and len(norm) >= 40:
+                            polygon = region.get("polygon") or []
+                            bb = _bbox_from_polygon(polygon)
+                            if bb is not None:
+                                bbox_candidates.append((content, norm, pn, bb))
                     break  # first region's page is sufficient
         derived["paragraphs_by_page"] = paras_by_page
         derived["pagenumber_by_page"] = pgnum_by_page
         derived["pagefurniture_by_page"] = pgfurn_by_page
+        derived["text_bbox_paragraphs"] = bbox_candidates
         # Per-page min OCR confidence — scanning words ONCE here instead
         # of every chunk × every page.
         di_pages = result.get("pages") or []
@@ -706,44 +728,31 @@ def _printed_label_for_page(source_path: str, physical_page: int | None) -> str 
     """
     if physical_page is None or not source_path:
         return None
-    result = _analysis_for(source_path)
-    if not result:
-        return None
-    paragraphs = result.get("paragraphs") or []
-    if not paragraphs:
-        return None
+    # Use pre-indexed paragraphs by page (built once per source_path) to
+    # avoid scanning all 10K+ paragraphs of a huge DI cache on every
+    # chunk. Was 2 full paragraph passes per call × 2 calls (start/end)
+    # × hundreds of chunks per PDF = 4 × pdf_chunks × all_paragraphs.
+    derived = _derived_for(source_path)
+    pagenumber_paras = derived["pagenumber_by_page"].get(physical_page, [])
+    pagefurniture_paras = derived["pagefurniture_by_page"].get(physical_page, [])
 
-    # First pass: pageNumber-role paragraphs on this physical page are
-    # the canonical source. If DI tagged any, trust them — but still
-    # validate the content matches a real page-label shape. DI sometimes
-    # mis-tags arbitrary text with role=pageNumber; without validation
-    # we'd return arbitrary words ("refers", "Cover") as printed labels.
-    for para in paragraphs:
-        role = (para.get("role") or "").lower()
-        if role != "pagenumber":
-            continue
-        for region in para.get("boundingRegions") or []:
-            if region.get("pageNumber") == physical_page:
-                content = (para.get("content") or "").strip()
-                if content and _is_valid_label(content):
-                    return content
+    # First pass: pageNumber-role paragraphs are the canonical source.
+    # Validate against the printed-label shape (DI sometimes mis-tags
+    # arbitrary text with role=pageNumber).
+    for para in pagenumber_paras:
+        content = (para.get("content") or "").strip()
+        if content and _is_valid_label(content):
+            return content
 
-    # Second pass: scan pageFooter / pageHeader paragraphs on this page.
-    # These often look like "Chapter 5 — Meters | 5-7" or similar; run
-    # the printed-label heuristic over their text.
-    for para in paragraphs:
-        role = (para.get("role") or "").lower()
-        if role not in ("pagefooter", "pageheader"):
+    # Second pass: pageFooter / pageHeader on this page often look like
+    # "Chapter 5 — Meters | 5-7"; extract label via heuristic.
+    for para in pagefurniture_paras:
+        content = (para.get("content") or "").strip()
+        if not content:
             continue
-        for region in para.get("boundingRegions") or []:
-            if region.get("pageNumber") == physical_page:
-                content = (para.get("content") or "").strip()
-                if not content:
-                    continue
-                label = _extract_label(content)
-                if label:
-                    return label
-                break
+        label = _extract_label(content)
+        if label:
+            return label
 
     return None
 
@@ -910,25 +919,21 @@ def _ocr_min_confidence_for_pages(source_path: str, pages: list[int] | None) -> 
     page_set = {p for p in pages if isinstance(p, int)}
     if not page_set:
         return None
-    result = _analysis_for(source_path)
-    if not result:
+    # Use pre-indexed min-confidence-by-page (computed once per PDF)
+    # instead of scanning all words on all pages every chunk. For a
+    # 1000-page OCR'd PDF with ~1000 words/page, this was 1M+ word
+    # accesses per chunk × hundreds of chunks per PDF.
+    derived = _derived_for(source_path)
+    min_by_page = derived["min_conf_by_page"]
+    if not min_by_page:
         return None
-    di_pages = result.get("pages") or []
-    if not di_pages:
-        return None
-
     min_conf: float | None = None
-    for page in di_pages:
-        pn = page.get("pageNumber")
-        if not isinstance(pn, int) or pn not in page_set:
+    for pn in page_set:
+        c = min_by_page.get(pn)
+        if c is None:
             continue
-        for word in page.get("words") or []:
-            conf = word.get("confidence")
-            if not isinstance(conf, (int, float)):
-                continue
-            c = float(conf)
-            if min_conf is None or c < min_conf:
-                min_conf = c
+        if min_conf is None or c < min_conf:
+            min_conf = c
     return round(min_conf, 4) if min_conf is not None else None
 
 
@@ -953,32 +958,29 @@ def _footnotes_for_pages(source_path: str, pages: list[int] | None) -> list[str]
     page_set = {p for p in pages if isinstance(p, int)}
     if not page_set:
         return []
-    result = _analysis_for(source_path)
-    if not result:
-        return []
-    paragraphs = result.get("paragraphs") or []
-    if not paragraphs:
-        return []
-
+    # Use per-page paragraph index instead of scanning ALL paragraphs.
+    # For huge PDFs, the chunk usually covers 1-3 pages; this drops the
+    # per-call cost from O(total_paragraphs) to O(paragraphs_on_chunk_pages).
+    derived = _derived_for(source_path)
+    paras_by_page = derived["paragraphs_by_page"]
     out: list[str] = []
-    for para in paragraphs:
-        role = (para.get("role") or "").lower()
-        if role != "footnote":
-            continue
-        on_target_page = False
-        for region in para.get("boundingRegions") or []:
-            pn = region.get("pageNumber")
-            if isinstance(pn, int) and pn in page_set:
-                on_target_page = True
-                break
-        if not on_target_page:
-            continue
-        content = (para.get("content") or "").strip()
-        if content:
-            # Cap each footnote at 500 chars so a single long footnote
-            # can't blow up the embedding string. Full content remains
-            # in the raw DI cache for ops debugging.
-            out.append(content[:500])
+    seen: set[int] = set()  # paragraph identity (id() not stable across deserializes; use index)
+    for pn in page_set:
+        for idx, para in enumerate(paras_by_page.get(pn, [])):
+            # Avoid emitting the same paragraph twice if it spans pages.
+            key = id(para)
+            if key in seen:
+                continue
+            role = (para.get("role") or "").lower()
+            if role != "footnote":
+                continue
+            seen.add(key)
+            content = (para.get("content") or "").strip()
+            if content:
+                # Cap each footnote at 500 chars so one long footnote
+                # can't blow up the embedding string. Full content remains
+                # in the raw DI cache for ops debugging.
+                out.append(content[:500])
     return out
 
 
@@ -1023,11 +1025,14 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
     """
     if not chunk_text or not source_path:
         return []
-    result = _analysis_for(source_path)
-    if not result:
-        return []
-    paragraphs = result.get("paragraphs") or []
-    if not paragraphs:
+    # Use pre-normalized + pre-bbox-extracted paragraph candidates from
+    # the per-PDF derived cache. Was calling _normalize_text on EVERY
+    # paragraph EVERY chunk (5M regex calls per huge PDF), plus running
+    # _bbox_from_polygon on every region. Now both are computed once
+    # per PDF at derived-cache build time, and per-chunk work is just
+    # substring matching against the cached normalized strings.
+    candidates = _derived_for(source_path)["text_bbox_paragraphs"]
+    if not candidates:
         return []
 
     chunk_norm = _normalize_text(chunk_text)
@@ -1035,38 +1040,18 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
         return []
 
     bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
-    for para in paragraphs:
-        content = (para.get("content") or "").strip()
-        # Guard 1: minimum content length. TOC lines, page footers, and
-        # bare index entries are typically <40 chars and they're the
-        # primary source of cross-page false matches.
-        if not content or len(content) < 40:
-            continue
-        para_norm = _normalize_text(content)
-        if len(para_norm) < 40:
-            continue
-        # Guard 2: 120-char head probe (was 60). Doubling the probe length
-        # halves the false-match rate on common technical-manual phrasings.
+    for content, para_norm, page, bb in candidates:
+        # Guard 1: minimum content length already enforced at derive time.
+        # Guard 2: 120-char head probe.
         probe = para_norm[:120]
         if probe not in chunk_norm:
             continue
-        # Guard 3: second-window verification for long paragraphs. A TOC
-        # entry that copies the section title's first sentence will pass
-        # guard 2 but fail here because TOC entries don't carry body
-        # continuation text.
+        # Guard 3: second-window verification for long paragraphs.
         if len(para_norm) >= 200:
             second = para_norm[100:200]
             if second and second not in chunk_norm:
                 continue
-        for region in para.get("boundingRegions") or []:
-            page = region.get("pageNumber")
-            polygon = region.get("polygon") or []
-            if not isinstance(page, int):
-                continue
-            bb = _bbox_from_polygon(polygon)
-            if bb is None:
-                continue
-            bboxes_by_page.setdefault(page, []).append(bb)
+        bboxes_by_page.setdefault(page, []).append(bb)
 
     out: list[dict[str, Any]] = []
     for page in sorted(bboxes_by_page):
