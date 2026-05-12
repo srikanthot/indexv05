@@ -132,23 +132,17 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     # directly via BM25 + vector search, without the LLM having to
     # traverse the full markdown grid.
 
-    # Cover metadata + ops fields used by BOTH row records and the
-    # parent table record below. Read from input data (process-document
-    # injects these once per PDF and propagates through enriched_tables);
-    # falling back to cover_metadata_for_pdf only if process-document
-    # didn't supply them (older cached output.json from before the
-    # plumbing-through change). The fallback is a single fetch per
-    # function-process per source_path due to the per-PDF dedup lock
-    # in page_label._analysis_for.
+    # Cover metadata. Read from input data only -- process-document /
+    # preanalyze always supply these fields (empty string when the PDF
+    # has no cover metadata to extract). Previously had a fallback to
+    # cover_metadata_for_pdf when all three were empty, but that fired
+    # on every chunk of every PDF without cover metadata and burned
+    # 14-22 min per call doing a redundant 23 MB DI cache fetch.
     cover_meta = {
         "document_revision": safe_str(data.get("document_revision")),
         "effective_date": safe_str(data.get("effective_date")),
         "document_number": safe_str(data.get("document_number")),
     }
-    if not (cover_meta["document_revision"] or cover_meta["effective_date"]
-            or cover_meta["document_number"]):
-        from .page_label import cover_metadata_for_pdf
-        cover_meta = cover_metadata_for_pdf(source_path)
     embedding_ver = _embedding_version()
     indexed_at = _now_iso()
 

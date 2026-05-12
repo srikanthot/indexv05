@@ -396,24 +396,16 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "skill_version": SKILL_VERSION,
     }
 
-    # Cover metadata + ops fields — parity with text records so frontend
-    # filters work uniformly across all record types. Read from input
-    # data (process-document injects these once per PDF and propagates
-    # through enriched_figures); fall back to cover_metadata_for_pdf
-    # only when process-document didn't supply them (older cached
-    # output.json from before the plumbing-through change).
+    # Cover metadata. Read from input data only -- process-document /
+    # preanalyze always supply these fields (empty when not extractable).
+    # The previous "fallback to cover_metadata_for_pdf" branch was
+    # burning 14-22 min per call on PDFs without cover metadata,
+    # blowing past the 230s Azure WebApi skill timeout.
     cover_meta = {
         "document_revision": safe_str(data.get("document_revision")),
         "effective_date": safe_str(data.get("effective_date")),
         "document_number": safe_str(data.get("document_number")),
     }
-    if not (cover_meta["document_revision"] or cover_meta["effective_date"]
-            or cover_meta["document_number"]):
-        try:
-            from .page_label import cover_metadata_for_pdf
-            cover_meta = cover_metadata_for_pdf(source_path)
-        except Exception:
-            cover_meta = {"document_revision": "", "effective_date": "", "document_number": ""}
     import datetime as _dt
     from .config import optional_env as _opt_env
     base_record["document_revision"] = cover_meta["document_revision"]
