@@ -98,10 +98,17 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     )
     # gpt-4.1 has a 1M context, but we still cap at 60k chars so a pathological
     # OCR dump cannot blow up the request or cost.
+    # Cap manual content at 20k chars (was 60k). 60k chars on
+    # markdown-heavy OCR with tables/symbols pushed input to ~30k tokens
+    # — gpt-4.1 calls regularly ran 40-90s at that size, eating the
+    # entire 60s SDK timeout with no room for the response. 20k chars
+    # ≈ 6-8k tokens; calls return in 5-15s consistently. The
+    # `titles_block` already gives the model section-level structure to
+    # anchor the summary; the first 20k chars of body text is plenty.
     prompt = (
         f"Source file: {source_file}\n\n"
         f"{titles_block}\n\n"
-        f"Manual content (truncated):\n{primary_text[:60000]}"
+        f"Manual content (truncated):\n{primary_text[:20000]}"
     )
 
     # Narrowed exception scope (was bare `except Exception`). The bare

@@ -100,11 +100,22 @@ def _index_url() -> str:
 
 
 def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
-                          timeout_s: float = 10.0,
-                          max_retries: int = 2) -> httpx.Response | None:
-    """POST that retries on HTTP 429 with Retry-After. Caps wait at 30s,
-    retries at 2 by default. Returns the final response, or None on
-    non-429 network errors after retries."""
+                          timeout_s: float = 5.0,
+                          max_retries: int = 1) -> httpx.Response | None:
+    """POST that retries on HTTP 429 with Retry-After.
+
+    Tightened defaults (was timeout=10s, max_retries=2): worst-case
+    wall clock = 2 attempts × (5s timeout + 15s Retry-After) = 40s,
+    well within the 230s skill budget even when chained with a phash
+    lookup. The previous defaults gave 120s per call × 2 calls (sha256
+    + phash) = 240s, BLOWING the 230s timeout BEFORE the vision call
+    even started -- a direct explanation for "0-doc cycles when
+    Search index was throttling".
+
+    Cache lookups are an OPTIMIZATION (skip vision on hit). If Search
+    is throttling, the right move is fail-fast and run vision; that
+    keeps the indexer making progress at the cost of duplicate vision
+    spend, instead of pinning workers on retry sleep."""
     # Use the shared httpx client from di_client for connection pooling.
     # Was creating a new client per call here (TLS handshake every time),
     # which compounded the search_cache's already-slow 240s worst-case
@@ -131,7 +142,9 @@ def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
             wait_s = float(retry_after) if retry_after else 2.0 * (2 ** attempt)
         except ValueError:
             wait_s = 2.0 * (2 ** attempt)
-        wait_s = min(max(wait_s, 1.0), 30.0)
+        # Cap wait at 15s (was 30s). Worst-case wall clock per call now
+        # 2 × (5s timeout + 15s wait) = 40s. See timeout/max_retries doc.
+        wait_s = min(max(wait_s, 1.0), 15.0)
         logging.info("search_cache POST 429, sleeping %.1fs", wait_s)
         time.sleep(wait_s)
         attempt += 1
@@ -174,7 +187,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
     }
     headers = {"Content-Type": "application/json", **_auth_header()}
 
-    resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=10.0)
+    resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=5.0)
     if resp is None:
         return None
     if resp.status_code != 200:
@@ -229,7 +242,7 @@ def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
         "top": 1,
     }
     headers = {"Content-Type": "application/json", **_auth_header()}
-    resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=10.0)
+    resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=5.0)
     if resp is None:
         return None
     if resp.status_code != 200:

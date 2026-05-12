@@ -367,9 +367,16 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     # this both functions independently decoded the same 5MB string,
     # tripling decode CPU for every figure. For a PDF with 1500 figures,
     # this saves ~22GB of decode work.
+    #
+    # phash is computed LAZILY (filled with "" upfront, populated only
+    # when needed). _image_phash runs PIL Image.open + LANCZOS resize
+    # (~80-200ms per 5MB image). The precomputed-vision fast path needs
+    # img_hash for the chunk_id, but does NOT need phash. Deferring
+    # phash to the slow path (sha256 cache miss AND precomputed-vision
+    # miss) saves ~30-100s per PDF on precomputed-heavy workloads.
     raw_bytes = _decode_b64_once(image_b64)
     img_hash = _image_hash(image_b64, raw=raw_bytes)
-    img_phash = _image_phash(image_b64, raw=raw_bytes)
+    img_phash = ""  # lazily computed if/when we reach the phash cache lookup
     chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
 
     # Diagrams always live on a single physical page, so physical_pdf_pages
@@ -466,15 +473,14 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                     bbox_json = json.dumps([bbox], separators=(",", ":")) if bbox else ""
                 logging.info("fetched crop from cache for %s/%s", source_file, figure_id)
                 # Recompute hash + chunk_id + bbox_json because they were
-                # originally computed on empty image_b64. Decode b64 once,
-                # share across both hash functions.
+                # originally computed on empty image_b64. phash stays
+                # deferred (lazy) -- only computed if/when we reach the
+                # phash cache lookup, not for crop fetch alone.
                 raw_bytes = _decode_b64_once(image_b64)
                 img_hash = _image_hash(image_b64, raw=raw_bytes)
-                img_phash = _image_phash(image_b64, raw=raw_bytes)
                 chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
                 base_record["chunk_id"] = chunk_id
                 base_record["image_hash"] = img_hash
-                base_record["image_phash"] = img_phash
                 base_record["figure_bbox"] = bbox_json
 
     if not image_b64:
@@ -527,15 +533,12 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             if p_ocr_text:
                 full_desc = f"{p_description}\nLabels: {p_ocr_text}"
 
-            # Decode b64 once for both hashes (shared with raw_png below).
-            raw_bytes = _decode_b64_once(image_b64)
-            img_hash = _image_hash(image_b64, raw=raw_bytes)
-            img_phash = _image_phash(image_b64, raw=raw_bytes)
-            chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
-            base_record["chunk_id"] = chunk_id
-            base_record["image_hash"] = img_hash
-            base_record["image_phash"] = img_phash
-
+            # img_hash + chunk_id already computed at top of function;
+            # base_record already carries them. phash stays "" on this
+            # path -- not needed for cross-PDF dedup of precomputed
+            # records (the FIRST occurrence's record carries phash from
+            # the slow path; subsequent records are findable via the
+            # primary sha256 cache).
             logging.info("using precomputed vision for %s/%s", source_file, figure_id)
             return _finalize({
                 **base_record,
@@ -566,6 +569,13 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     # manual; for nameplates and other context-independent figures
     # that's fine, but for figures whose meaning depends on the
     # surrounding manual it can be misleading. Evaluate per corpus.
+    #
+    # phash is computed lazily HERE (was eager at top of function).
+    # Skipping it on the precomputed-vision / sha256-cache-hit paths
+    # saves ~80-200ms PIL work per figure × 200 figures = 30-50s/PDF.
+    if not img_phash:
+        img_phash = _image_phash(image_b64, raw=raw_bytes)
+        base_record["image_phash"] = img_phash
     if img_phash:
         cached_phash = lookup_existing_by_phash(img_phash)
         if cached_phash:
@@ -633,8 +643,9 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
 
     ocr_text = safe_str(result.get("ocr_text")).strip()
 
+    is_useful = bool(result.get("is_useful"))
     has_diagram = (
-        bool(result.get("is_useful"))
+        is_useful
         and category in USEFUL_CATEGORIES
         and bool(description)
     )
@@ -643,11 +654,31 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     if ocr_text:
         full_description = f"{description}\nLabels: {ocr_text}"
 
+    # Three distinct outcomes -- DON'T conflate "decorative" with
+    # "empty description":
+    #   - has_diagram=True  -> "ok"        (cached, never re-run)
+    #   - is_useful=True but description="" (content-filter near-miss):
+    #     -> "vision_empty" (NOT cached; next indexer run retries)
+    #   - is_useful=False (decorative/logo/photo) or category not in
+    #     USEFUL_CATEGORIES -> "skipped_decorative" (intentional skip,
+    #     no retry needed)
+    # The previous code conflated #2 with #3, silently caching empty
+    # descriptions as skipped_decorative -- which the search_cache
+    # filter (status='ok') refused to retry, so every indexer run
+    # produced the SAME empty record. This is the "same vision errors
+    # repeating across every figure of every document" symptom.
+    if has_diagram:
+        status = "ok"
+    elif is_useful and category in USEFUL_CATEGORIES and not description:
+        status = "vision_empty"
+    else:
+        status = "skipped_decorative"
+
     return _finalize({
         **base_record,
         "has_diagram": has_diagram,
         "diagram_description": full_description,
         "diagram_category": category,
         "figure_ref": figure_ref,
-        "processing_status": "ok" if has_diagram else "skipped_decorative",
+        "processing_status": status,
     })

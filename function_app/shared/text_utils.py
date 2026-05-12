@@ -48,8 +48,15 @@ _PAGE_BREAK_MARKER_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
 
 _MD_HEADER_RE = re.compile(r"^\s*#{1,6}\s*", re.MULTILINE)
 _MD_LIST_RE = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
-_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", re.DOTALL)
+# Bound the inner span to {1,500} chars (was unbounded `.+?`). With
+# re.DOTALL and `.+?`, a stray unbalanced `**` or `*` in OCR'd math
+# would force the engine to extend the lazy match across the entire
+# remaining text trying every close position -- catastrophic on a
+# 2000+ char chunk. The {1,500} bound caps backtrack work at 500
+# steps per match attempt. Real bold/italic spans are short (a phrase,
+# a number, a word) -- 500 is generous.
+_MD_BOLD_RE = re.compile(r"\*\*([^*\n]{1,500}?)\*\*", re.DOTALL)
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)([^*\n]{1,500}?)(?<!\*)\*(?!\*)", re.DOTALL)
 
 # Smart quotes / dashes / other typographic substitutions. Kept as a
 # table because the alternatives (regex + lookup function) are slower
