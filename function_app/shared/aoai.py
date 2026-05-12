@@ -44,12 +44,26 @@ def get_client():
     # consume the entire function-host worker timeout and cascade-kill
     # other in-flight calls. 60s is well above p99 for our prompts
     # (vision ~3-15s, summary ~5-20s).
+    #
+    # CRITICAL: max_retries=0. The openai SDK default is 2 retries with
+    # exponential backoff PLUS honoring Retry-After (which AOAI sets to
+    # 60s on 429). That means a single throttled call can hang for up to
+    # 60s call + 60s wait + 60s call + 60s wait + 60s call = ~5 min
+    # WALL CLOCK before either succeeding or failing. Multiplied across
+    # 200 figures per PDF = 16+ hours of vision retries on a quota-
+    # throttled period, blowing every 230s Azure WebApi skill timeout
+    # and pinning function-app workers for the entire indexer cycle.
+    # The Azure AI Search indexer ALREADY retries failed records itself
+    # (maxFailedItemsPerBatch is the real budget). Fail fast here and
+    # let the indexer's higher-level retry coordinate -- it spreads the
+    # work over a longer window without locking up a function worker.
     if use_managed_identity():
         return AzureOpenAI(
             api_version=api_version,
             azure_endpoint=endpoint,
             azure_ad_token_provider=bearer_token_provider(AOAI_SCOPE),
             timeout=60.0,
+            max_retries=0,
         )
 
     return AzureOpenAI(
@@ -57,6 +71,7 @@ def get_client():
         api_version=api_version,
         azure_endpoint=endpoint,
         timeout=60.0,
+        max_retries=0,
     )
 
 

@@ -5,6 +5,7 @@ One summary record per parent document. Concise (300-500 words).
 Used for high-recall, doc-level retrieval and as a routing signal.
 """
 
+import json
 from typing import Any
 
 from .aoai import chat_deployment, get_client
@@ -103,6 +104,16 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         f"Manual content (truncated):\n{primary_text[:60000]}"
     )
 
+    # Narrowed exception scope (was bare `except Exception`). The bare
+    # form silently emitted an empty summary with status="summary_error:..."
+    # for every record — INCLUDING permanent AAD / quota / config errors.
+    # The skill returned "success" with empty content, so the indexer
+    # never retried; every PDF got indexed with an empty summary and the
+    # operator had no signal in indexer telemetry. Now: catch only
+    # transient API/network/decode errors; auth and config errors
+    # propagate so the skill envelope reports per-record errors that
+    # count toward maxFailedItemsPerBatch and surface in the indexer
+    # dashboard.
     try:
         client = get_client()
         resp = client.chat.completions.create(
@@ -120,9 +131,27 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         )
         summary_text = (resp.choices[0].message.content or "").strip()
         status = "ok"
-    except Exception as exc:
+    except (TimeoutError, json.JSONDecodeError) as exc:
         summary_text = ""
         status = f"summary_error:{type(exc).__name__}"
+    except Exception as exc:
+        exc_name = type(exc).__name__
+        transient = {
+            "APIError", "APIConnectionError", "APITimeoutError",
+            "RateLimitError", "InternalServerError", "ServiceUnavailableError",
+        }
+        try:
+            import httpx as _httpx
+            is_http = isinstance(exc, _httpx.HTTPError)
+        except ImportError:
+            is_http = False
+        if exc_name in transient or is_http:
+            summary_text = ""
+            status = f"summary_error:{exc_name}"
+        else:
+            # Auth / config / unknown — propagate so the skill envelope
+            # surfaces the failure to the indexer.
+            raise
 
     semantic = (
         f"Source: {source_file}\n"
