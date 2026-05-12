@@ -327,6 +327,48 @@ def fetch_cached_crop(blob_url: str, figure_id: str) -> dict[str, Any] | None:
         return None
 
 
+def fetch_cached_sections(blob_url: str) -> list[dict[str, Any]] | None:
+    """
+    Fetch pre-built section_index from sidecar blob.
+    Blob path: <container>/_dicache/<filename>.pdf.sections.json
+
+    Returns the section list on hit, None on miss. The section_index is
+    expensive to build at function-app runtime for huge PDFs (3-5 min
+    on documents with 2700+ sections, blowing past the 230s WebApi skill
+    timeout). preanalyze.py builds and uploads this sidecar so the skill
+    chain loads pre-built data in ~1 sec instead.
+    """
+    sections_url = _build_cache_url(blob_url, "sections.json")
+    if not sections_url:
+        return None
+    fetch_url = _apply_sas_if_needed(sections_url)
+    headers = _storage_auth_headers()
+
+    try:
+        resp = _http_get_with_retry(fetch_url, headers, timeout_s=20.0)
+        if resp is None:
+            return None
+        if resp.status_code == 200:
+            logging.info("sections sidecar hit: %s (size=%d bytes)",
+                         sections_url, len(resp.content))
+            return json.loads(resp.content)
+        if resp.status_code == 404:
+            return None
+        logging.warning(
+            "sections sidecar fetch unexpected status %d for %s: %s",
+            resp.status_code, sections_url, resp.text[:200],
+        )
+        return None
+    except json.JSONDecodeError as exc:
+        logging.warning("sections sidecar JSON decode failed for %s: %s",
+                        sections_url, exc)
+        return None
+    except Exception as exc:
+        logging.warning("sections sidecar fetch error for %s: %s",
+                        sections_url, exc)
+        return None
+
+
 def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
     """
     Check if a pre-computed process-document output exists.

@@ -1430,6 +1430,25 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         from shared.tables import extract_table_records
 
         sections_index = build_section_index(result)
+
+        # Persist section_index as a sidecar blob so the function-app
+        # skill chain at indexer time can load it in ~1 sec instead of
+        # rebuilding from the 23 MB DI cache (which takes 30 sec - 3 min
+        # for huge PDFs and was blowing past Azure's 230s WebApi skill
+        # timeout). This is the only way to keep extract_page_label
+        # within budget for documents with 2700+ sections.
+        try:
+            sections_blob = f"_dicache/{pdf_name}.sections.json"
+            sections_bytes = json.dumps(
+                sections_index, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            upload_blob(cfg, sections_blob, sections_bytes)
+            print(f"  ok-sections  {pdf_name} ({len(sections_index)} sections, "
+                  f"{len(sections_bytes) // 1024} KiB)", flush=True)
+        except Exception as exc:
+            print(f"  warn: sections sidecar upload failed for {pdf_name}: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
         account = _account_name(cfg)
         container = cfg["storage"]["pdfContainerName"]
         source_path = f"https://{account}.blob.{_storage_endpoint_suffix}/{container}/{pdf_name}"
