@@ -389,6 +389,34 @@ _FETCH_LOCKS_GUARD = threading.Lock()
 # Eviction follows the same LRU bound as _ANALYSIS_CACHE.
 _DERIVED_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 
+# Build-serialization locks: separate from _FETCH_LOCKS (which is held
+# while _analysis_for fetches the DI cache). If _derived_for or
+# _sections_for reused _FETCH_LOCKS and then called _analysis_for inside,
+# we'd deadlock on the same source_path. Separate lock dicts prevent that.
+_DERIVED_BUILD_LOCKS: dict[str, threading.Lock] = {}
+_DERIVED_LOCKS_GUARD = threading.Lock()
+
+_SECTIONS_BUILD_LOCKS: dict[str, threading.Lock] = {}
+_SECTIONS_LOCKS_GUARD = threading.Lock()
+
+
+def _get_derived_build_lock(source_path: str) -> threading.Lock:
+    with _DERIVED_LOCKS_GUARD:
+        lock = _DERIVED_BUILD_LOCKS.get(source_path)
+        if lock is None:
+            lock = threading.Lock()
+            _DERIVED_BUILD_LOCKS[source_path] = lock
+        return lock
+
+
+def _get_sections_build_lock(source_path: str) -> threading.Lock:
+    with _SECTIONS_LOCKS_GUARD:
+        lock = _SECTIONS_BUILD_LOCKS.get(source_path)
+        if lock is None:
+            lock = threading.Lock()
+            _SECTIONS_BUILD_LOCKS[source_path] = lock
+        return lock
+
 
 def _get_fetch_lock(source_path: str) -> threading.Lock:
     with _FETCH_LOCKS_GUARD:
@@ -416,83 +444,93 @@ def _derived_for(source_path: str) -> dict[str, Any]:
       - text_bbox_paragraphs: [(content, content_norm, page, bbox), ...]
         — paragraphs ≥40 chars, pre-normalized, for _text_bbox_for_chunk
     """
+    # Fast path: cache hit, no per-PDF lock needed.
     with _CACHE_LOCK:
         cached = _DERIVED_CACHE.get(source_path)
         if cached is not None:
             _DERIVED_CACHE.move_to_end(source_path)
             return cached
-    # Build outside lock (one thread per source_path due to fetch_lock dedup).
-    result = _analysis_for(source_path)
-    derived: dict[str, Any] = {
-        "cover_meta": {"document_revision": "", "effective_date": "", "document_number": ""},
-        "min_conf_by_page": {},
-        "paragraphs_by_page": {},
-        "pagenumber_by_page": {},
-        "pagefurniture_by_page": {},
-        "text_bbox_paragraphs": [],
-    }
-    if result:
-        # Cover metadata — built once, reused across every chunk.
-        try:
-            derived["cover_meta"] = cover_metadata_from_analyze(result)
-        except Exception as exc:
-            logging.warning("page_label: cover_meta build failed for %s: %s",
-                            source_path, exc)
-        # Index paragraphs by their physical_pdf_page (from boundingRegions[0])
-        # so per-chunk lookups become O(paras_on_page) instead of O(all_paras).
-        paragraphs = result.get("paragraphs") or []
-        paras_by_page: dict[int, list[dict[str, Any]]] = {}
-        pgnum_by_page: dict[int, list[dict[str, Any]]] = {}
-        pgfurn_by_page: dict[int, list[dict[str, Any]]] = {}
-        # text_bbox candidates: pre-normalized + bbox extracted ONCE.
-        # _text_bbox_for_chunk used to call _normalize_text on every
-        # paragraph EVERY chunk (5M regex calls per huge PDF).
-        bbox_candidates: list[tuple[str, str, int, tuple[float, float, float, float]]] = []
-        for para in paragraphs:
-            content = (para.get("content") or "").strip()
-            for region in (para.get("boundingRegions") or []):
-                pn = region.get("pageNumber")
-                if isinstance(pn, int) and pn > 0:
-                    paras_by_page.setdefault(pn, []).append(para)
-                    role = (para.get("role") or "").lower()
-                    if role == "pagenumber":
-                        pgnum_by_page.setdefault(pn, []).append(para)
-                    elif role in ("pagefooter", "pageheader"):
-                        pgfurn_by_page.setdefault(pn, []).append(para)
-                    # Pre-normalize + extract bbox once for text_bbox lookup
-                    if content and len(content) >= 40:
-                        norm = _normalize_text(content)
-                        if norm and len(norm) >= 40:
-                            polygon = region.get("polygon") or []
-                            bb = _bbox_from_polygon(polygon)
-                            if bb is not None:
-                                bbox_candidates.append((content, norm, pn, bb))
-                    break  # first region's page is sufficient
-        derived["paragraphs_by_page"] = paras_by_page
-        derived["pagenumber_by_page"] = pgnum_by_page
-        derived["pagefurniture_by_page"] = pgfurn_by_page
-        derived["text_bbox_paragraphs"] = bbox_candidates
-        # Per-page min OCR confidence — scanning words ONCE here instead
-        # of every chunk × every page.
-        di_pages = result.get("pages") or []
-        min_by_page: dict[int, float | None] = {}
-        for page in di_pages:
-            pn = page.get("pageNumber")
-            if not isinstance(pn, int) or pn <= 0:
-                continue
-            min_conf: float | None = None
-            for word in (page.get("words") or []):
-                conf = word.get("confidence")
-                if isinstance(conf, (int, float)):
-                    if min_conf is None or conf < min_conf:
-                        min_conf = float(conf)
-            min_by_page[pn] = min_conf
-        derived["min_conf_by_page"] = min_by_page
-    with _CACHE_LOCK:
-        _DERIVED_CACHE[source_path] = derived
-        while len(_DERIVED_CACHE) > _SECTION_INDEX_CACHE_MAX:
-            _DERIVED_CACHE.popitem(last=False)
-    return derived
+    # Slow path: serialize per source_path so 100 parallel chunks don't
+    # each rebuild the derived structure (10K paragraph iteration + 10K
+    # _normalize_text calls). Only one thread builds; others wait briefly
+    # and read the populated cache.
+    build_lock = _get_derived_build_lock(source_path)
+    with build_lock:
+        # Re-check cache: while we waited, the designated builder may
+        # have populated it.
+        with _CACHE_LOCK:
+            cached = _DERIVED_CACHE.get(source_path)
+            if cached is not None:
+                _DERIVED_CACHE.move_to_end(source_path)
+                return cached
+        result = _analysis_for(source_path)
+        derived: dict[str, Any] = {
+            "cover_meta": {"document_revision": "", "effective_date": "", "document_number": ""},
+            "min_conf_by_page": {},
+            "paragraphs_by_page": {},
+            "pagenumber_by_page": {},
+            "pagefurniture_by_page": {},
+            "text_bbox_paragraphs": [],
+        }
+        if result:
+            # Cover metadata — built once, reused across every chunk.
+            try:
+                derived["cover_meta"] = cover_metadata_from_analyze(result)
+            except Exception as exc:
+                logging.warning("page_label: cover_meta build failed for %s: %s",
+                                source_path, exc)
+            # Index paragraphs by their physical_pdf_page (from boundingRegions[0])
+            # so per-chunk lookups become O(paras_on_page) instead of O(all_paras).
+            paragraphs = result.get("paragraphs") or []
+            paras_by_page: dict[int, list[dict[str, Any]]] = {}
+            pgnum_by_page: dict[int, list[dict[str, Any]]] = {}
+            pgfurn_by_page: dict[int, list[dict[str, Any]]] = {}
+            # text_bbox candidates: pre-normalized + bbox extracted ONCE.
+            bbox_candidates: list[tuple[str, str, int, tuple[float, float, float, float]]] = []
+            for para in paragraphs:
+                content = (para.get("content") or "").strip()
+                for region in (para.get("boundingRegions") or []):
+                    pn = region.get("pageNumber")
+                    if isinstance(pn, int) and pn > 0:
+                        paras_by_page.setdefault(pn, []).append(para)
+                        role = (para.get("role") or "").lower()
+                        if role == "pagenumber":
+                            pgnum_by_page.setdefault(pn, []).append(para)
+                        elif role in ("pagefooter", "pageheader"):
+                            pgfurn_by_page.setdefault(pn, []).append(para)
+                        # Pre-normalize + extract bbox once for text_bbox lookup
+                        if content and len(content) >= 40:
+                            norm = _normalize_text(content)
+                            if norm and len(norm) >= 40:
+                                polygon = region.get("polygon") or []
+                                bb = _bbox_from_polygon(polygon)
+                                if bb is not None:
+                                    bbox_candidates.append((content, norm, pn, bb))
+                        break  # first region's page is sufficient
+            derived["paragraphs_by_page"] = paras_by_page
+            derived["pagenumber_by_page"] = pgnum_by_page
+            derived["pagefurniture_by_page"] = pgfurn_by_page
+            derived["text_bbox_paragraphs"] = bbox_candidates
+            # Per-page min OCR confidence — once per PDF.
+            di_pages = result.get("pages") or []
+            min_by_page: dict[int, float | None] = {}
+            for page in di_pages:
+                pn = page.get("pageNumber")
+                if not isinstance(pn, int) or pn <= 0:
+                    continue
+                min_conf: float | None = None
+                for word in (page.get("words") or []):
+                    conf = word.get("confidence")
+                    if isinstance(conf, (int, float)):
+                        if min_conf is None or conf < min_conf:
+                            min_conf = float(conf)
+                min_by_page[pn] = min_conf
+            derived["min_conf_by_page"] = min_by_page
+        with _CACHE_LOCK:
+            _DERIVED_CACHE[source_path] = derived
+            while len(_DERIVED_CACHE) > _SECTION_INDEX_CACHE_MAX:
+                _DERIVED_CACHE.popitem(last=False)
+        return derived
 
 
 def _analysis_for(source_path: str) -> dict[str, Any] | None:
@@ -590,54 +628,57 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
 def _sections_for(source_path: str) -> list[dict[str, Any]]:
     if not source_path:
         return []
+    # Fast path: cache hit.
     with _CACHE_LOCK:
         cached = _SECTION_INDEX_CACHE.get(source_path)
         if cached is not None:
             _SECTION_INDEX_CACHE.move_to_end(source_path)
             return cached
-
-    # FAST PATH: try pre-built section_index sidecar first. preanalyze.py
-    # builds this offline (no timeout pressure) and uploads to
-    # _dicache/<file>.sections.json. Loading + parsing the sidecar is
-    # ~1 sec for huge PDFs vs 30 sec - 3 min for building live from
-    # the DI cache. This is the only way to keep extract_page_label
-    # within the 230s Azure WebApi skill timeout on huge documents.
-    sections: list[dict[str, Any]] = []
-    try:
-        from .di_client import fetch_cached_sections
-        sidecar = fetch_cached_sections(source_path)
-        if sidecar is not None and isinstance(sidecar, list):
-            sections = sidecar
-            logging.info(
-                "page_label: loaded %d sections from sidecar for %s",
-                len(sections), (source_path or "")[-60:],
-            )
-    except Exception as exc:
-        logging.warning("page_label: sidecar load failed for %s: %s",
-                        source_path, exc)
-
-    # FALLBACK: build live from DI cache if sidecar missing/empty.
-    # Slow path; only fires when preanalyze hasn't been re-run with the
-    # sidecar-emitting version yet.
-    if not sections:
-        result = _analysis_for(source_path)
-        if result:
-            try:
-                sections = build_section_index(result)
+    # Slow path: per-PDF lock so 100 parallel chunks don't all rebuild
+    # section_index when sidecar is missing. build_section_index takes
+    # 3-5 min on 2700+-section PDFs; 100 concurrent builds = worker death.
+    build_lock = _get_sections_build_lock(source_path)
+    with build_lock:
+        # Re-check cache: while we waited, the designated builder may
+        # have populated it.
+        with _CACHE_LOCK:
+            cached = _SECTION_INDEX_CACHE.get(source_path)
+            if cached is not None:
+                _SECTION_INDEX_CACHE.move_to_end(source_path)
+                return cached
+        # FAST PATH: pre-built sidecar from preanalyze.
+        sections: list[dict[str, Any]] = []
+        try:
+            from .di_client import fetch_cached_sections
+            sidecar = fetch_cached_sections(source_path)
+            if sidecar is not None and isinstance(sidecar, list):
+                sections = sidecar
                 logging.info(
-                    "page_label: built %d sections live (sidecar miss) for %s",
+                    "page_label: loaded %d sections from sidecar for %s",
                     len(sections), (source_path or "")[-60:],
                 )
-            except Exception as exc:
-                logging.warning("page_label: failed to build sections for %s: %s",
-                                source_path, exc)
-                sections = []
-
-    with _CACHE_LOCK:
-        _SECTION_INDEX_CACHE[source_path] = sections
-        while len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
-            _SECTION_INDEX_CACHE.popitem(last=False)
-    return sections
+        except Exception as exc:
+            logging.warning("page_label: sidecar load failed for %s: %s",
+                            source_path, exc)
+        # FALLBACK: build live from DI cache if sidecar missing/empty.
+        if not sections:
+            result = _analysis_for(source_path)
+            if result:
+                try:
+                    sections = build_section_index(result)
+                    logging.info(
+                        "page_label: built %d sections live (sidecar miss) for %s",
+                        len(sections), (source_path or "")[-60:],
+                    )
+                except Exception as exc:
+                    logging.warning("page_label: failed to build sections for %s: %s",
+                                    source_path, exc)
+                    sections = []
+        with _CACHE_LOCK:
+            _SECTION_INDEX_CACHE[source_path] = sections
+            while len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
+                _SECTION_INDEX_CACHE.popitem(last=False)
+        return sections
 
 
 def _pdf_total_pages_for(source_path: str) -> int | None:
