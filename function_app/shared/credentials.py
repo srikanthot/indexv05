@@ -64,9 +64,12 @@ def bearer_token(scope: str) -> str:
     200 figures × 2 (crop + vision) = 400 token fetches per document,
     or 20-120s of pure auth overhead on the critical path.
 
-    With this cache, MSAL is hit once per scope per hour. The token is
-    refreshed when within 5 minutes of expiry. Thread-safe via lock,
-    but the fast path (cache hit, plenty of TTL) is lock-free.
+    Retries: IMDS (the Managed Identity endpoint) occasionally returns
+    transient 500s under load. MSAL has NO built-in retry for these.
+    Without our wrapper retry, any single IMDS hiccup turns into a
+    per-record skill failure that counts toward maxFailedItems and
+    pushes us closer to indexer abort. 3 retries with exponential
+    backoff (0.5s, 1s, 2s) covers all observed transient cases.
     """
     cached = _TOKEN_CACHE.get(scope)
     now = time.time()
@@ -77,10 +80,23 @@ def bearer_token(scope: str) -> str:
             return token
     with _TOKEN_CACHE_LOCK:
         cached = _TOKEN_CACHE.get(scope)
+        # Refresh `now` under the lock in case we blocked a long time.
+        now = time.time()
         if cached is not None:
             token, expires_at = cached
             if expires_at > now + 300:
                 return token
-        tok = get_credential().get_token(scope)
-        _TOKEN_CACHE[scope] = (tok.token, float(tok.expires_on))
-        return tok.token
+        # Retry IMDS transient failures (500/503/timeouts).
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                tok = get_credential().get_token(scope)
+                _TOKEN_CACHE[scope] = (tok.token, float(tok.expires_on))
+                return tok.token
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+        # Exhausted retries -- re-raise the last exception so the
+        # calling skill returns a structured error envelope.
+        raise last_exc if last_exc else RuntimeError("bearer_token failed")

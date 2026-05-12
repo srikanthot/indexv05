@@ -14,6 +14,7 @@ Features:
   a markdown grid.
 """
 
+import logging
 from typing import Any
 
 MAX_TABLE_CHARS = 3000
@@ -45,9 +46,26 @@ def _table_caption(table: dict[str, Any]) -> str:
     return (cap.get("content") or "").strip()
 
 
+_MAX_TABLE_ROWS = 5000
+_MAX_TABLE_COLS = 200
+
+
 def _table_to_grid(table: dict[str, Any]) -> list[list[str]]:
     rows = table.get("rowCount") or 0
     cols = table.get("columnCount") or 0
+    # Defensive caps: DI occasionally emits malformed tables with
+    # rowCount/columnCount in the thousands (mis-detected list as table).
+    # A 10000x100 table = 1M cells × 80 bytes ≈ 80MB of empty strings.
+    # 530 such tables × 80MB = 42GB, instant worker OOM. Reject early.
+    if rows > _MAX_TABLE_ROWS or cols > _MAX_TABLE_COLS:
+        logging.warning(
+            "_table_to_grid: rejecting table with %d rows × %d cols "
+            "(caps: %d × %d). Likely DI mis-detection.",
+            rows, cols, _MAX_TABLE_ROWS, _MAX_TABLE_COLS,
+        )
+        return []
+    if rows <= 0 or cols <= 0:
+        return []
     grid = [["" for _ in range(cols)] for _ in range(rows)]
     for cell in table.get("cells", []) or []:
         r = cell.get("rowIndex", 0)

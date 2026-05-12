@@ -39,7 +39,11 @@ from .credentials import (
 # .get/.post call), not on the client.
 _SHARED_CLIENT = httpx.Client(
     timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0),
-    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+    # 50 connections handles a worker servicing ~50 parallel skill calls,
+    # each potentially doing 2-3 blob GETs. 20 was too low; pool exhaustion
+    # under load caused PoolTimeout on the 21st+ caller. 50 gives headroom
+    # without bloating per-worker memory significantly (~1MB).
+    limits=httpx.Limits(max_connections=50, max_keepalive_connections=25),
 )
 
 
@@ -187,7 +191,7 @@ def _apply_sas_if_needed(url: str) -> str:
 
 
 def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
-                         max_retries: int = 1) -> httpx.Response | None:
+                         max_retries: int = 3) -> httpx.Response | None:
     """
     GET helper that retries on HTTP 429 (rate-limited). On other transient
     errors (timeout, connection reset) we let the caller decide; this helper

@@ -105,11 +105,15 @@ def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
     """POST that retries on HTTP 429 with Retry-After. Caps wait at 30s,
     retries at 2 by default. Returns the final response, or None on
     non-429 network errors after retries."""
+    # Use the shared httpx client from di_client for connection pooling.
+    # Was creating a new client per call here (TLS handshake every time),
+    # which compounded the search_cache's already-slow 240s worst-case
+    # backoff scenario.
+    from .di_client import _SHARED_CLIENT
     attempt = 0
     while True:
         try:
-            with httpx.Client(timeout=timeout_s) as client:
-                resp = client.post(url, json=json_body, headers=headers)
+            resp = _SHARED_CLIENT.post(url, json=json_body, headers=headers, timeout=timeout_s)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             if attempt >= max_retries:
                 logging.warning("hash cache POST network error after %d retries: %s",
