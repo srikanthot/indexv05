@@ -47,9 +47,18 @@ def get_credential():
 
 def bearer_token_provider(scope: str) -> Callable[[], str]:
     """Return a callable that produces bearer tokens for the given scope.
-    The Azure OpenAI SDK expects this shape for azure_ad_token_provider."""
-    from azure.identity import get_bearer_token_provider
-    return get_bearer_token_provider(get_credential(), scope)
+    The Azure OpenAI SDK expects this shape for azure_ad_token_provider.
+
+    CRITICAL: Routes through our local bearer_token() so the AOAI client
+    benefits from our `_TOKEN_CACHE` + 3-retry IMDS wrapper. The
+    azure-identity SDK's get_bearer_token_provider has its OWN cache and
+    has NO retry on IMDS transient 500s. Without this wrapper, AOAI
+    calls were the only auth path NOT protected by our IMDS retry --
+    explaining transient ClientAuthenticationError spikes during
+    vision bursts that produce "same errors repeating across every
+    figure of every document" in indexer telemetry.
+    """
+    return lambda: bearer_token(scope)
 
 
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}

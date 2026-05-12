@@ -1514,6 +1514,14 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         document_number = cover_meta["document_number"]
 
         enriched_figures = []
+        # Counters for vision-coverage health check (emitted at end of phase).
+        # If vision was killed mid-run, many figures will have no vision
+        # sidecar -- silently emitting them as has_diagram=False is a data-
+        # loss bug. Track and FAIL the phase if coverage is below threshold.
+        vision_total = 0       # figures that reached the vision-blob lookup
+        vision_present = 0     # figures whose vision sidecar existed and parsed
+        vision_missing = 0     # figures with NO vision sidecar at all
+        vision_errored = 0     # figures whose sidecar had _error marker
         # Concat with PyMuPDF supplement so synthetic figures appear in
         # output.json's enriched_figures and reach the index.
         figures = (result.get("figures", []) or []) + _load_figures_supplement(cfg, pdf_name)
@@ -1613,6 +1621,7 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             # should know about); transient httpx/runtime errors from
             # fetch_blob propagate up so the run aborts and can be
             # re-tried, rather than silently producing a broken output.json.
+            vision_total += 1
             try:
                 if blob_exists(cfg, vision_blob):
                     cached = json.loads(fetch_blob(cfg, vision_blob))
@@ -1620,9 +1629,15 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                     # logic) have an "_error" key -- treat as no useful result.
                     if isinstance(cached, dict) and "_error" not in cached:
                         vision_result = cached
+                        vision_present += 1
+                    else:
+                        vision_errored += 1
+                else:
+                    vision_missing += 1
             except (json.JSONDecodeError, KeyError, TypeError) as exc:
                 print(f"    warn: vision-blob parse failed for {pdf_name} fig {fig_id}: {exc}",
                       flush=True)
+                vision_errored += 1
 
             v_category = (vision_result.get("category") or "unknown").strip().lower()
             v_description = (vision_result.get("description") or "").strip()
@@ -1710,6 +1725,29 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         if di_warnings.get("di_missed_image_pages"):
             output_status = "di_missed_images"
 
+        # Vision-coverage health check. If MORE than 10% of figures had
+        # no vision sidecar at all (not just errored, but never written),
+        # phase_vision was almost certainly killed mid-run. Refuse to
+        # silently bake those figures into the index as has_diagram=False
+        # -- the operator needs to re-run --phase vision before --phase
+        # output. This stops the "30% of figures silently missing" data-
+        # loss pattern that's been hard to debug from the index side.
+        if vision_total > 0:
+            miss_pct = (vision_missing / vision_total) * 100
+            if miss_pct > 10.0:
+                msg = (
+                    f"vision coverage too low: {vision_missing}/{vision_total} "
+                    f"figures ({miss_pct:.1f}%) have NO vision sidecar. "
+                    f"Run preanalyze.py --phase vision --force --pdf {pdf_name} "
+                    f"before --phase output."
+                )
+                return f"  FAIL-output  {pdf_name}: VisionCoverage: {msg}"
+            if vision_missing > 0 or vision_errored > 0:
+                print(f"    warn: vision coverage {vision_present}/{vision_total} "
+                      f"(missing={vision_missing}, errored={vision_errored}) for {pdf_name}",
+                      flush=True)
+                output_status = "partial_vision"
+
         output = {
             "enriched_figures": enriched_figures,
             "enriched_tables": enriched_tables,
@@ -1722,6 +1760,10 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             "processing_status": output_status,
             "di_missed_image_pages": di_warnings.get("di_missed_image_pages", 0),
             "di_missed_image_count": di_warnings.get("di_missed_image_count", 0),
+            "vision_coverage_total": vision_total,
+            "vision_coverage_present": vision_present,
+            "vision_coverage_missing": vision_missing,
+            "vision_coverage_errored": vision_errored,
             "skill_version": SKILL_VERSION,
         }
         output_bytes = json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

@@ -401,7 +401,22 @@ def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
         if resp is None:
             return None
         if resp.status_code == 200:
-            logging.info("pre-computed output hit: %s", output_url)
+            # Defensive size cap. output.json should be metadata only
+            # (paths, bboxes, captions, section text) -- typical size
+            # is 1-5 MB. A 200 MB file would block the worker for 5-15s
+            # in json.loads alone, eating budget the 230s skill timeout
+            # depends on. Refuse to parse oversized blobs and emit a
+            # loud error so the operator knows to inspect output.json.
+            body_size = len(resp.content)
+            if body_size > 50_000_000:
+                logging.error(
+                    "pre-computed output too large (%d bytes > 50 MB) for %s. "
+                    "Re-run preanalyze.py --phase output --force; output.json "
+                    "should not contain image_b64 bodies.",
+                    body_size, output_url,
+                )
+                return None
+            logging.info("pre-computed output hit: %s (%d bytes)", output_url, body_size)
             return json.loads(resp.content)
         if resp.status_code == 404:
             return None

@@ -284,8 +284,12 @@ def _is_glossary_chunk(text: str, h1: str, h2: str, h3: str) -> bool:
 # by a page reference. We don't want these polluting top-of-results, so we
 # stamp them with processing_status="toc_like" instead of "ok" and let the
 # UI / query layer filter on processing_status.
+# Bounded `.+?` -> `.{4,200}?` so the lazy prefix can't extend across
+# the entire line on pathological inputs (URLs, version strings, dotted
+# namespaces). Combined with cap on trailing token, runs in linear time
+# even on long lines.
 TOC_LEADER_LINE_RE = re.compile(
-    r".+?(?:\s*\.\s*){3,}\s*[\dA-Z][\w\-\.]{0,8}\s*$",
+    r"^.{4,200}?(?:\.\s*){3,}\s*[\dA-Z][\w\-\.]{0,8}\s*$",
 )
 
 # Relaxed variant: a line that ENDS with a page-pointer (e.g. "18-3", "215",
@@ -362,7 +366,17 @@ PAGE_BREAK_MARKER_RE = re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE)
 # wrong section data on subsequent lookups for that worker.
 _SECTION_INDEX_CACHE: "OrderedDict[str, list[dict[str, Any]]]" = OrderedDict()
 _ANALYSIS_CACHE: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
-_SECTION_INDEX_CACHE_MAX = 5
+# Bumped 5 -> 32. Audit 2026-05-12 found that on a 50-PDF indexer batch
+# with chunks interleaved across PDFs (the normal case under
+# degreeOfParallelism > 1), the bound-5 caches evicted constantly:
+# PDF #6's first chunk evicted PDF #1, then PDF #1's NEXT chunk rebuilt
+# the derived structures (full paragraph scan), evicting PDF #2, etc.
+# Net effect: the per-PDF "build once" optimization degraded to "build
+# every chunk". Bound of 32 fits one full batch in memory; each cached
+# entry is ~30-100MB (paragraphs_by_page etc.), so worst-case ~3.2GB
+# memory budget — acceptable on Premium plan workers (~14GB). Drop
+# to a smaller value if Consumption-plan workers are the deploy target.
+_SECTION_INDEX_CACHE_MAX = 32
 _CACHE_LOCK = threading.Lock()
 
 
@@ -379,13 +393,18 @@ _ANALYSIS_FAILURE_AT: dict[str, float] = {}
 # ONE thread fetches per source_path; the rest wait briefly and read
 # the populated cache, eliminating the thundering-herd hang.
 #
-# Use OrderedDict + a max bound so the lock-dict doesn't accumulate
-# entries for every PDF the worker has ever seen. Caps are well above
-# _SECTION_INDEX_CACHE_MAX so we never evict a lock that's actively in
-# use by a thread mid-fetch.
-_LOCK_DICT_MAX = 64
-_FETCH_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
-_FETCH_LOCKS_GUARD = threading.Lock()
+# SHARDED FIXED-SIZE LOCK ARRAY (was OrderedDict with LRU eviction).
+# The LRU eviction had a SUBTLE RACE: when the dict evicted a lock that
+# a thread was about to acquire, a new caller for the same source_path
+# would create a FRESH lock object, defeating mutual exclusion. Two
+# threads could then rebuild the same cache concurrently -- 30M+
+# paragraph iterations × 2, easily OOMing on huge PDFs. The fix is to
+# NEVER evict a lock; use a fixed-size array indexed by
+# `hash(source_path) % _LOCK_SHARDS`. Two distinct PDFs may share a
+# lock (rare collision) but they only serialize -- never lose mutual
+# exclusion. Memory cost: 32 locks × 3 dicts × ~50 bytes = ~5 KB total.
+_LOCK_SHARDS = 32
+_FETCH_LOCKS: list[threading.Lock] = [threading.Lock() for _ in range(_LOCK_SHARDS)]
 
 # Per-PDF derived-structures cache. Per the deep audit on 2026-05-12,
 # process_page_label was scanning ALL paragraphs of the DI cache 6+ times
@@ -405,43 +424,29 @@ _DERIVED_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 # Build-serialization locks: separate from _FETCH_LOCKS (which is held
 # while _analysis_for fetches the DI cache). If _derived_for or
 # _sections_for reused _FETCH_LOCKS and then called _analysis_for inside,
-# we'd deadlock on the same source_path. Separate lock dicts prevent that.
-_DERIVED_BUILD_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
-_DERIVED_LOCKS_GUARD = threading.Lock()
-
-_SECTIONS_BUILD_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
-_SECTIONS_LOCKS_GUARD = threading.Lock()
+# we'd deadlock on the same source_path. Three independent shard arrays.
+_DERIVED_BUILD_LOCKS: list[threading.Lock] = [threading.Lock() for _ in range(_LOCK_SHARDS)]
+_SECTIONS_BUILD_LOCKS: list[threading.Lock] = [threading.Lock() for _ in range(_LOCK_SHARDS)]
 
 
-def _get_lock(store: "OrderedDict[str, threading.Lock]", key: str) -> threading.Lock:
-    """LRU-bounded lock factory. Returns the lock for `key`, creating it
-    if absent and pruning the oldest entries past _LOCK_DICT_MAX. The
-    cap is well above the cache LRU size so we never evict an entry whose
-    paired cache slot is still live."""
-    lock = store.get(key)
-    if lock is None:
-        lock = threading.Lock()
-        store[key] = lock
-        while len(store) > _LOCK_DICT_MAX:
-            store.popitem(last=False)
-    else:
-        store.move_to_end(key)
-    return lock
+def _lock_index(key: str) -> int:
+    """Deterministic shard index for a source_path. Python's built-in
+    `hash` is salted per-process but stable within a worker lifetime —
+    that's exactly what we need (don't care about cross-worker consistency
+    since each worker has its own lock array)."""
+    return hash(key) % _LOCK_SHARDS
 
 
 def _get_derived_build_lock(source_path: str) -> threading.Lock:
-    with _DERIVED_LOCKS_GUARD:
-        return _get_lock(_DERIVED_BUILD_LOCKS, source_path)
+    return _DERIVED_BUILD_LOCKS[_lock_index(source_path)]
 
 
 def _get_sections_build_lock(source_path: str) -> threading.Lock:
-    with _SECTIONS_LOCKS_GUARD:
-        return _get_lock(_SECTIONS_BUILD_LOCKS, source_path)
+    return _SECTIONS_BUILD_LOCKS[_lock_index(source_path)]
 
 
 def _get_fetch_lock(source_path: str) -> threading.Lock:
-    with _FETCH_LOCKS_GUARD:
-        return _get_lock(_FETCH_LOCKS, source_path)
+    return _FETCH_LOCKS[_lock_index(source_path)]
 
 
 def _derived_for(source_path: str) -> dict[str, Any]:
@@ -699,6 +704,18 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
                     logging.warning("page_label: failed to build sections for %s: %s",
                                     source_path, exc)
                     sections = []
+        # Pre-normalize headers and content ONCE here so per-chunk
+        # _find_section_start_page lookups become dict reads instead of
+        # 12M regex calls per PDF (4M sections × 3 headers × 500 chunks).
+        # Stamps `_h1n/_h2n/_h3n/_content_norm` on each section dict.
+        # _content_norm is capped to 400 chars to bound memory for very
+        # long sections; _find_section_start_page's probe is also 400.
+        _norm_ws = re.compile(r"\s+")
+        for s in sections:
+            s["_h1n"] = _norm_ws.sub(" ", (s.get("header_1") or "").strip())
+            s["_h2n"] = _norm_ws.sub(" ", (s.get("header_2") or "").strip())
+            s["_h3n"] = _norm_ws.sub(" ", (s.get("header_3") or "").strip())
+            s["_content_norm"] = _normalize_text(s.get("content") or "")[:400]
         with _CACHE_LOCK:
             _SECTION_INDEX_CACHE[source_path] = sections
             while len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
@@ -1194,24 +1211,37 @@ def _find_section_start_page(
                 return ps
         return None
 
-    # Normalize headers for comparison: the skillset's
-    # /document/markdownDocument/*/sections/h1..h3 and build_section_index's
-    # header_1..3 both trace back to DI paragraph content but may differ in
-    # whitespace, so we compare on normalized forms.
-    def _nh(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "").strip())
+    # Headers were pre-normalized into `_h1n/_h2n/_h3n` inside
+    # `_sections_for`. content was pre-normalized into `_content_norm`.
+    # Per-chunk lookup is now dict-read instead of regex-substitute.
+    # Audit 2026-05-12 measured 12M regex calls per huge PDF eliminated.
+    #
+    # Fallback: if a section dict was seeded directly into the cache
+    # (e.g., by a test or by an alternate build path) and lacks the
+    # `_h1n/...` fields, compute and stash them lazily so the section
+    # works on first access AND subsequent accesses are cached.
+    _norm_ws = re.compile(r"\s+")
+    def _ensure_norm(s: dict[str, Any]) -> None:
+        if "_h1n" not in s:
+            s["_h1n"] = _norm_ws.sub(" ", (s.get("header_1") or "").strip())
+            s["_h2n"] = _norm_ws.sub(" ", (s.get("header_2") or "").strip())
+            s["_h3n"] = _norm_ws.sub(" ", (s.get("header_3") or "").strip())
+            s["_content_norm"] = _normalize_text(s.get("content") or "")[:400]
 
-    h1 = _nh(header_1)
-    h2 = _nh(header_2)
-    h3 = _nh(header_3)
+    for s in sections:
+        _ensure_norm(s)
+
+    h1 = _norm_ws.sub(" ", (header_1 or "").strip())
+    h2 = _norm_ws.sub(" ", (header_2 or "").strip())
+    h3 = _norm_ws.sub(" ", (header_3 or "").strip())
 
     if h1 or h2 or h3:
         # Tier 1: full chain
         tier1 = [
             s for s in sections
-            if _nh(s.get("header_1") or "") == h1
-            and _nh(s.get("header_2") or "") == h2
-            and _nh(s.get("header_3") or "") == h3
+            if s["_h1n"] == h1
+            and s["_h2n"] == h2
+            and s["_h3n"] == h3
         ]
         p = _first_page(tier1)
         if p is not None:
@@ -1220,15 +1250,15 @@ def _find_section_start_page(
         if h1 or h2:
             tier2 = [
                 s for s in sections
-                if _nh(s.get("header_1") or "") == h1
-                and _nh(s.get("header_2") or "") == h2
+                if s["_h1n"] == h1
+                and s["_h2n"] == h2
             ]
             p = _first_page(tier2)
             if p is not None:
                 return p, "header_match"
         # Tier 3: h1 alone
         if h1:
-            tier3 = [s for s in sections if _nh(s.get("header_1") or "") == h1]
+            tier3 = [s for s in sections if s["_h1n"] == h1]
             p = _first_page(tier3)
             if p is not None:
                 return p, "header_match"
@@ -1244,7 +1274,8 @@ def _find_section_start_page(
     for i, s in enumerate(sections):
         if i >= 100:
             break
-        content = _normalize_text(s.get("content") or "")
+        # _content_norm was stamped above by _ensure_norm if not present.
+        content = s["_content_norm"]
         if not content:
             continue
         if probe_head and probe_head in content:
