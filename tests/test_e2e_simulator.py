@@ -93,7 +93,22 @@ if "httpx" not in sys.modules:
                 text = "stub"
                 content = b""
             return R()
+    class _FakeTimeout:
+        def __init__(self, *a, **kw): pass
+    class _FakeLimits:
+        def __init__(self, *a, **kw): pass
+    class _FakeHTTPError(Exception): pass
+    class _FakeTimeoutException(_FakeHTTPError): pass
+    class _FakeConnectError(_FakeHTTPError): pass
+    class _FakeRemoteProtocolError(_FakeHTTPError): pass
     fake_httpx.Client = _FakeClient
+    fake_httpx.Timeout = _FakeTimeout
+    fake_httpx.Limits = _FakeLimits
+    fake_httpx.HTTPError = _FakeHTTPError
+    fake_httpx.TimeoutException = _FakeTimeoutException
+    fake_httpx.ConnectError = _FakeConnectError
+    fake_httpx.RemoteProtocolError = _FakeRemoteProtocolError
+    fake_httpx.Response = type("Response", (), {})
     sys.modules["httpx"] = fake_httpx
 
 

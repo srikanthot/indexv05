@@ -56,7 +56,14 @@ _EQUIPMENT_ID_RE = re.compile(
     # 2-5 letters, hyphen, then alphanumeric chunks separated by hyphens.
     # Requires at least one digit somewhere in the right-hand portion to
     # avoid matching all-letter words ("NEMA-style").
-    r"\b[A-Z]{2,5}-(?:[A-Z0-9]{1,8}-){0,3}[A-Z0-9]*\d[A-Z0-9-]{0,8}\b"
+    #
+    # Bounded quantifiers throughout. The previous form had an unbounded
+    # `[A-Z0-9]*` followed by `\d[A-Z0-9-]{0,8}` — combined with the
+    # leading `(?:[A-Z0-9]{1,8}-){0,3}`, the regex engine could backtrack
+    # quadratically on hyphenated equipment-heavy chunks (typical PSEG
+    # manual paragraph). Tightening the trailing run to `{0,8}` makes the
+    # whole pattern linear-time in chunk length.
+    r"\b[A-Z]{2,5}-(?:[A-Z0-9]{1,8}-){0,3}[A-Z0-9]{0,8}\d[A-Z0-9-]{0,8}\b"
 )
 
 
@@ -371,7 +378,13 @@ _ANALYSIS_FAILURE_AT: dict[str, float] = {}
 # every fetch ran into its 120s timeout. With per-PDF locks, exactly
 # ONE thread fetches per source_path; the rest wait briefly and read
 # the populated cache, eliminating the thundering-herd hang.
-_FETCH_LOCKS: dict[str, threading.Lock] = {}
+#
+# Use OrderedDict + a max bound so the lock-dict doesn't accumulate
+# entries for every PDF the worker has ever seen. Caps are well above
+# _SECTION_INDEX_CACHE_MAX so we never evict a lock that's actively in
+# use by a thread mid-fetch.
+_LOCK_DICT_MAX = 64
+_FETCH_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
 _FETCH_LOCKS_GUARD = threading.Lock()
 
 # Per-PDF derived-structures cache. Per the deep audit on 2026-05-12,
@@ -393,38 +406,42 @@ _DERIVED_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 # while _analysis_for fetches the DI cache). If _derived_for or
 # _sections_for reused _FETCH_LOCKS and then called _analysis_for inside,
 # we'd deadlock on the same source_path. Separate lock dicts prevent that.
-_DERIVED_BUILD_LOCKS: dict[str, threading.Lock] = {}
+_DERIVED_BUILD_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
 _DERIVED_LOCKS_GUARD = threading.Lock()
 
-_SECTIONS_BUILD_LOCKS: dict[str, threading.Lock] = {}
+_SECTIONS_BUILD_LOCKS: "OrderedDict[str, threading.Lock]" = OrderedDict()
 _SECTIONS_LOCKS_GUARD = threading.Lock()
+
+
+def _get_lock(store: "OrderedDict[str, threading.Lock]", key: str) -> threading.Lock:
+    """LRU-bounded lock factory. Returns the lock for `key`, creating it
+    if absent and pruning the oldest entries past _LOCK_DICT_MAX. The
+    cap is well above the cache LRU size so we never evict an entry whose
+    paired cache slot is still live."""
+    lock = store.get(key)
+    if lock is None:
+        lock = threading.Lock()
+        store[key] = lock
+        while len(store) > _LOCK_DICT_MAX:
+            store.popitem(last=False)
+    else:
+        store.move_to_end(key)
+    return lock
 
 
 def _get_derived_build_lock(source_path: str) -> threading.Lock:
     with _DERIVED_LOCKS_GUARD:
-        lock = _DERIVED_BUILD_LOCKS.get(source_path)
-        if lock is None:
-            lock = threading.Lock()
-            _DERIVED_BUILD_LOCKS[source_path] = lock
-        return lock
+        return _get_lock(_DERIVED_BUILD_LOCKS, source_path)
 
 
 def _get_sections_build_lock(source_path: str) -> threading.Lock:
     with _SECTIONS_LOCKS_GUARD:
-        lock = _SECTIONS_BUILD_LOCKS.get(source_path)
-        if lock is None:
-            lock = threading.Lock()
-            _SECTIONS_BUILD_LOCKS[source_path] = lock
-        return lock
+        return _get_lock(_SECTIONS_BUILD_LOCKS, source_path)
 
 
 def _get_fetch_lock(source_path: str) -> threading.Lock:
     with _FETCH_LOCKS_GUARD:
-        lock = _FETCH_LOCKS.get(source_path)
-        if lock is None:
-            lock = threading.Lock()
-            _FETCH_LOCKS[source_path] = lock
-        return lock
+        return _get_lock(_FETCH_LOCKS, source_path)
 
 
 def _derived_for(source_path: str) -> dict[str, Any]:
@@ -583,6 +600,11 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
     # wait briefly then read the populated cache.
     fetch_lock = _get_fetch_lock(source_path)
     with fetch_lock:
+        # Re-sample `now` AFTER acquiring fetch_lock. A late-arriving
+        # thread may have waited many seconds on this lock; the outer
+        # `now` would then under-count the elapsed-since-failure window,
+        # causing the TTL re-check to return None when it should retry.
+        now = _time.time()
         # Re-check cache: while we waited on the per-PDF lock, the
         # designated fetcher may have already populated it.
         with _CACHE_LOCK:
@@ -606,6 +628,9 @@ def _analysis_for(source_path: str) -> dict[str, Any] | None:
             logging.warning("page_label: failed to fetch DI cache for %s: %s",
                             source_path, exc)
             result = None
+        # Stamp the failure timestamp using the most recent wall clock so
+        # the TTL window starts from when the fetch actually failed.
+        now = _time.time()
         with _CACHE_LOCK:
             _ANALYSIS_CACHE[source_path] = result
             if result is None:

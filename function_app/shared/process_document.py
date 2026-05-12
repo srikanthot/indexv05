@@ -110,10 +110,17 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
     # If you see a PDF with `processing_status: needs_preanalyze_output`
     # in the index, run preanalyze.py --phase output --force for that
     # PDF to populate the missing output.json.
-    logging.warning(
+    #
+    # Elevated to ERROR (was WARNING): this path silently drops every
+    # figure and table from the indexed record. Operators were missing
+    # the WARNING in log noise and only discovering the data loss when
+    # users complained that diagrams weren't searchable. ERROR makes it
+    # impossible to miss in the indexer dashboard.
+    logging.error(
         "preanalyze output.json missing for %s; emitting empty enriched arrays "
-        "to avoid runtime build. Run preanalyze.py --phase output --force "
-        "and reset+run the indexer to populate full data.",
+        "(figures and tables WILL be DROPPED from the index for this PDF). "
+        "Run preanalyze.py --phase output --force and reset+run the indexer "
+        "to populate full data.",
         source_file,
     )
     return {
