@@ -94,25 +94,41 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         precomputed["skill_version"] = SKILL_VERSION
         return precomputed
 
-    # Check for pre-analyzed DI cache (written by scripts/preanalyze.py).
-    # Without it, a live DI call would time out on any large PDF and tie
-    # up a skill invocation for up to 230 seconds, so we fail fast and
-    # tell the operator what to do.
-    cache_data = fetch_cached_analysis(source_path)
-    if cache_data is None:
-        logging.warning(
-            "preanalyze cache missing for %s; skipping without calling live DI. "
-            "Run scripts/preanalyze.py --incremental then reset+run the indexer.",
-            source_file,
-        )
-        return {
-            "enriched_figures": [],
-            "enriched_tables": [],
-            "processing_status": "needs_preanalyze",
-            "skill_version": SKILL_VERSION,
-        }
-    logging.info("using cached DI result for %s", source_file)
-    analyze = cache_data["analyzeResult"]
+    # ALWAYS return fast — no slow live-build path. If output.json is
+    # missing, we return empty enriched arrays immediately. Downstream
+    # skills (analyze-diagram, shape-table) get no items to iterate over;
+    # text records from layout-skill still flow through extract-page-label
+    # and embed-text. The document gets partial indexing (text only) but
+    # process_document_route NEVER hangs.
+    #
+    # Previously this code path called fetch_cached_analysis (slow for
+    # 23 MB DI cache) + build_section_index + 500-figure sequential crop
+    # fetches, taking 4-28 minutes per call and blowing past Azure
+    # Search's 230s WebApi skill timeout. The indexer would retry and
+    # cascade-fail entire 2-hour cycles on these stuck PDFs.
+    #
+    # If you see a PDF with `processing_status: needs_preanalyze_output`
+    # in the index, run preanalyze.py --phase output --force for that
+    # PDF to populate the missing output.json.
+    logging.warning(
+        "preanalyze output.json missing for %s; emitting empty enriched arrays "
+        "to avoid runtime build. Run preanalyze.py --phase output --force "
+        "and reset+run the indexer to populate full data.",
+        source_file,
+    )
+    return {
+        "enriched_figures": [],
+        "enriched_tables": [],
+        "pdf_total_pages": None,
+        "document_revision": "",
+        "effective_date": "",
+        "document_number": "",
+        "processing_status": "needs_preanalyze_output",
+        "skill_version": SKILL_VERSION,
+    }
+    # ---- DEAD CODE BELOW (kept commented for reference) ----
+    # The slow live-build path is intentionally unreachable now.
+    analyze = {}
 
     # Total physical page count of the source PDF, derived from DI's
     # `pages[]` array. Embedded into every enriched figure / table dict
