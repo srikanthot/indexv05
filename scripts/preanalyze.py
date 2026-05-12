@@ -1993,6 +1993,12 @@ def main() -> None:
                          "no other preanalyze/reconcile is running. Required "
                          "with --status / --cleanup since those are read/audit "
                          "operations.")
+    ap.add_argument("--pdf", action="append", default=None, metavar="NAME",
+                    help="Process only the named PDF(s). Pass multiple times "
+                         "to target multiple PDFs (e.g. --pdf a.pdf --pdf b.pdf). "
+                         "Use the filename ONLY (no path). Useful for surgical "
+                         "recovery of specific PARTIAL-state PDFs without "
+                         "re-processing the whole batch.")
     args = ap.parse_args()
 
     # Bounds check user-facing knobs. AOAI TPM quotas cap useful parallelism
@@ -2057,6 +2063,33 @@ def _run_preanalyze_main(cfg: dict, args) -> None:
     print("Listing PDFs...")
     pdfs = list_pdfs(cfg)
     print(f"Found {len(pdfs)} PDFs")
+
+    # --pdf filter: surgical targeting of specific PDFs. Applied BEFORE
+    # the incremental check so the user can re-process specific PDFs
+    # regardless of cache state. When combined with --force, also clears
+    # any stale output.json so the full preanalyze pipeline runs cleanly.
+    if args.pdf:
+        requested = set(args.pdf)
+        missing = requested - set(pdfs)
+        if missing:
+            print(f"ERROR: requested PDFs not found in container: {sorted(missing)}")
+            print(f"Available PDFs (first 10): {sorted(pdfs)[:10]}")
+            return
+        pdfs = [p for p in pdfs if p in requested]
+        print(f"--pdf filter: targeting {len(pdfs)} PDF(s): {pdfs}")
+        # With --force, proactively clear stale output.json so phase_vision
+        # and phase_output don't short-circuit on the skip-output check.
+        # This is the fix for the PARTIAL-state heal that --incremental
+        # alone couldn't recover.
+        if args.force:
+            for p in pdfs:
+                stale = f"_dicache/{p}.output.json"
+                if blob_exists(cfg, stale):
+                    try:
+                        delete_blob(cfg, stale)
+                        print(f"  cleared stale output.json for {p}")
+                    except Exception as exc:
+                        print(f"  warning: could not delete stale output for {p}: {exc}")
 
     if args.incremental:
         before = len(pdfs)
