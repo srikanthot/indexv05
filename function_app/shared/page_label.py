@@ -484,16 +484,44 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
         if cached is not None:
             _SECTION_INDEX_CACHE.move_to_end(source_path)
             return cached
-    # Heavy work outside the lock.
-    result = _analysis_for(source_path)
+
+    # FAST PATH: try pre-built section_index sidecar first. preanalyze.py
+    # builds this offline (no timeout pressure) and uploads to
+    # _dicache/<file>.sections.json. Loading + parsing the sidecar is
+    # ~1 sec for huge PDFs vs 30 sec - 3 min for building live from
+    # the DI cache. This is the only way to keep extract_page_label
+    # within the 230s Azure WebApi skill timeout on huge documents.
     sections: list[dict[str, Any]] = []
-    if result:
-        try:
-            sections = build_section_index(result)
-        except Exception as exc:
-            logging.warning("page_label: failed to build sections for %s: %s",
-                            source_path, exc)
-            sections = []
+    try:
+        from .di_client import fetch_cached_sections
+        sidecar = fetch_cached_sections(source_path)
+        if sidecar is not None and isinstance(sidecar, list):
+            sections = sidecar
+            logging.info(
+                "page_label: loaded %d sections from sidecar for %s",
+                len(sections), (source_path or "")[-60:],
+            )
+    except Exception as exc:
+        logging.warning("page_label: sidecar load failed for %s: %s",
+                        source_path, exc)
+
+    # FALLBACK: build live from DI cache if sidecar missing/empty.
+    # Slow path; only fires when preanalyze hasn't been re-run with the
+    # sidecar-emitting version yet.
+    if not sections:
+        result = _analysis_for(source_path)
+        if result:
+            try:
+                sections = build_section_index(result)
+                logging.info(
+                    "page_label: built %d sections live (sidecar miss) for %s",
+                    len(sections), (source_path or "")[-60:],
+                )
+            except Exception as exc:
+                logging.warning("page_label: failed to build sections for %s: %s",
+                                source_path, exc)
+                sections = []
+
     with _CACHE_LOCK:
         _SECTION_INDEX_CACHE[source_path] = sections
         while len(_SECTION_INDEX_CACHE) > _SECTION_INDEX_CACHE_MAX:
