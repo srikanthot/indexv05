@@ -113,6 +113,10 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             ],
             temperature=0.1,
             max_tokens=900,
+            # Explicit per-call timeout. Without this the SDK can hang for
+            # its default 600s on a stuck socket, well past the 230s
+            # Azure WebApi skill timeout, leaving the worker tied up.
+            timeout=60.0,
         )
         summary_text = (resp.choices[0].message.content or "").strip()
         status = "ok"

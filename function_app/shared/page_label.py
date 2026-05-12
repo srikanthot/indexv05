@@ -374,6 +374,21 @@ _ANALYSIS_FAILURE_AT: dict[str, float] = {}
 _FETCH_LOCKS: dict[str, threading.Lock] = {}
 _FETCH_LOCKS_GUARD = threading.Lock()
 
+# Per-PDF derived-structures cache. Per the deep audit on 2026-05-12,
+# process_page_label was scanning ALL paragraphs of the DI cache 6+ times
+# PER CHUNK — for huge PDFs (10K paragraphs, 500 chunks) this was 30M+
+# paragraph iterations + 5M+ regex calls, easily blowing the 230s Azure
+# WebApi skill timeout. The fix: derive everything that's constant per
+# source_path ONCE on first call, then look up via dict access on
+# subsequent chunks. _DERIVED_CACHE holds:
+#   - cover_meta:           dict {document_revision, effective_date, document_number}
+#   - min_conf_by_page:     dict {page_number: float | None}
+#   - paragraphs_by_page:   dict {page_number: list[paragraph]}
+#   - pagenumber_by_page:   dict {page_number: list[paragraph] with role=pageNumber}
+#   - pagefurniture_by_page:dict {page_number: list[paragraph] with role in pageFooter/pageHeader}
+# Eviction follows the same LRU bound as _ANALYSIS_CACHE.
+_DERIVED_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+
 
 def _get_fetch_lock(source_path: str) -> threading.Lock:
     with _FETCH_LOCKS_GUARD:
@@ -382,6 +397,80 @@ def _get_fetch_lock(source_path: str) -> threading.Lock:
             lock = threading.Lock()
             _FETCH_LOCKS[source_path] = lock
         return lock
+
+
+def _derived_for(source_path: str) -> dict[str, Any]:
+    """Return derived per-PDF structures, building once and caching.
+
+    Without this, process_page_label scanned the full paragraphs[] array
+    of the DI cache 6+ times PER CHUNK (cover_metadata_for_pdf,
+    _printed_label_for_page × 2, _footnotes_for_pages,
+    _ocr_min_confidence_for_pages, _text_bbox_for_chunk). On huge PDFs
+    (10K paragraphs, 500 chunks) that's 30M+ iterations. With this cache
+    each chunk gets O(1) dict lookups instead.
+    """
+    with _CACHE_LOCK:
+        cached = _DERIVED_CACHE.get(source_path)
+        if cached is not None:
+            _DERIVED_CACHE.move_to_end(source_path)
+            return cached
+    # Build outside lock (one thread per source_path due to fetch_lock dedup).
+    result = _analysis_for(source_path)
+    derived: dict[str, Any] = {
+        "cover_meta": {"document_revision": "", "effective_date": "", "document_number": ""},
+        "min_conf_by_page": {},
+        "paragraphs_by_page": {},
+        "pagenumber_by_page": {},
+        "pagefurniture_by_page": {},
+    }
+    if result:
+        # Cover metadata — built once, reused across every chunk.
+        try:
+            derived["cover_meta"] = cover_metadata_from_analyze(result)
+        except Exception as exc:
+            logging.warning("page_label: cover_meta build failed for %s: %s",
+                            source_path, exc)
+        # Index paragraphs by their physical_pdf_page (from boundingRegions[0])
+        # so per-chunk lookups become O(paras_on_page) instead of O(all_paras).
+        paragraphs = result.get("paragraphs") or []
+        paras_by_page: dict[int, list[dict[str, Any]]] = {}
+        pgnum_by_page: dict[int, list[dict[str, Any]]] = {}
+        pgfurn_by_page: dict[int, list[dict[str, Any]]] = {}
+        for para in paragraphs:
+            for region in (para.get("boundingRegions") or []):
+                pn = region.get("pageNumber")
+                if isinstance(pn, int) and pn > 0:
+                    paras_by_page.setdefault(pn, []).append(para)
+                    role = (para.get("role") or "").lower()
+                    if role == "pagenumber":
+                        pgnum_by_page.setdefault(pn, []).append(para)
+                    elif role in ("pagefooter", "pageheader"):
+                        pgfurn_by_page.setdefault(pn, []).append(para)
+                    break  # first region's page is sufficient
+        derived["paragraphs_by_page"] = paras_by_page
+        derived["pagenumber_by_page"] = pgnum_by_page
+        derived["pagefurniture_by_page"] = pgfurn_by_page
+        # Per-page min OCR confidence — scanning words ONCE here instead
+        # of every chunk × every page.
+        di_pages = result.get("pages") or []
+        min_by_page: dict[int, float | None] = {}
+        for page in di_pages:
+            pn = page.get("pageNumber")
+            if not isinstance(pn, int) or pn <= 0:
+                continue
+            min_conf: float | None = None
+            for word in (page.get("words") or []):
+                conf = word.get("confidence")
+                if isinstance(conf, (int, float)):
+                    if min_conf is None or conf < min_conf:
+                        min_conf = float(conf)
+            min_by_page[pn] = min_conf
+        derived["min_conf_by_page"] = min_by_page
+    with _CACHE_LOCK:
+        _DERIVED_CACHE[source_path] = derived
+        while len(_DERIVED_CACHE) > _SECTION_INDEX_CACHE_MAX:
+            _DERIVED_CACHE.popitem(last=False)
+    return derived
 
 
 def _analysis_for(source_path: str) -> dict[str, Any] | None:
@@ -1684,7 +1773,11 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     # every text record so retrieval can filter by current revision /
     # effective date — critical for safety manuals that are rev'd
     # repeatedly and where stale guidance can be dangerous.
-    cover_meta = cover_metadata_for_pdf(source_path)
+    # NOTE: read from the per-PDF derived cache instead of re-scanning
+    # the full paragraphs[] array on every chunk. The previous direct
+    # cover_metadata_for_pdf(source_path) call was doing 10K+ paragraph
+    # iterations per chunk on huge PDFs.
+    cover_meta = _derived_for(source_path)["cover_meta"]
 
     # TOC / list-of-figures detection. UIs that want clean retrieval
     # filter on processing_status eq 'ok' and never see TOC fragments.

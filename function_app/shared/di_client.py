@@ -30,6 +30,18 @@ from .credentials import (
     use_managed_identity,
 )
 
+# Module-level shared HTTP client. Without this, every fetch_cached_*
+# call constructs a fresh httpx.Client(), paying TCP + TLS handshake on
+# each invocation (~50-150ms). For a PDF with 200 figures × 2 fetches
+# (crop + vision), that's 20-60s of pure handshake overhead per doc.
+# Shared client keeps the connection pool warm: subsequent requests on
+# the same host reuse the TLS session. Timeout is per-request (set on
+# .get/.post call), not on the client.
+_SHARED_CLIENT = httpx.Client(
+    timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0),
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
+
 
 def _endpoint() -> str:
     return required_env("DI_ENDPOINT").rstrip("/")
@@ -62,35 +74,35 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
     auth = _auth_headers()
     headers = {**auth, "Content-Type": "application/pdf"}
 
-    with httpx.Client(timeout=180.0) as client:
-        submit = client.post(url, headers=headers, content=pdf_bytes)
-        if submit.status_code not in (200, 202):
+    submit = _SHARED_CLIENT.post(url, headers=headers, content=pdf_bytes, timeout=180.0)
+    if submit.status_code not in (200, 202):
+        raise RuntimeError(
+            f"DI submit failed: {submit.status_code} {submit.text[:500]}"
+        )
+    op_loc = submit.headers.get("operation-location")
+    if not op_loc:
+        raise RuntimeError("DI submit missing operation-location header")
+
+    deadline = time.time() + timeout_s
+    backoff = 2.0
+    while time.time() < deadline:
+        # Re-fetch the auth header each poll so MI token refreshes are picked up.
+        # (bearer_token is now cached with TTL so this is a cheap dict lookup.)
+        poll = _SHARED_CLIENT.get(op_loc, headers=_auth_headers(), timeout=30.0)
+        if poll.status_code != 200:
             raise RuntimeError(
-                f"DI submit failed: {submit.status_code} {submit.text[:500]}"
+                f"DI poll failed: {poll.status_code} {poll.text[:500]}"
             )
-        op_loc = submit.headers.get("operation-location")
-        if not op_loc:
-            raise RuntimeError("DI submit missing operation-location header")
+        body = poll.json()
+        status = body.get("status")
+        if status == "succeeded":
+            return body.get("analyzeResult", {})
+        if status == "failed":
+            raise RuntimeError(f"DI analyze failed: {body}")
+        time.sleep(backoff)
+        backoff = min(backoff * 1.25, 8.0)
 
-        deadline = time.time() + timeout_s
-        backoff = 2.0
-        while time.time() < deadline:
-            # Re-fetch the auth header each poll so MI token refreshes are picked up.
-            poll = client.get(op_loc, headers=_auth_headers())
-            if poll.status_code != 200:
-                raise RuntimeError(
-                    f"DI poll failed: {poll.status_code} {poll.text[:500]}"
-                )
-            body = poll.json()
-            status = body.get("status")
-            if status == "succeeded":
-                return body.get("analyzeResult", {})
-            if status == "failed":
-                raise RuntimeError(f"DI analyze failed: {body}")
-            time.sleep(backoff)
-            backoff = min(backoff * 1.25, 8.0)
-
-        raise TimeoutError("DI analyze timed out")
+    raise TimeoutError("DI analyze timed out")
 
 
 def _split_blob_url(blob_url: str) -> tuple[str, str] | None:
@@ -187,8 +199,7 @@ def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
     attempt = 0
     while True:
         try:
-            with httpx.Client(timeout=timeout_s) as client:
-                resp = client.get(url, headers=headers)
+            resp = _SHARED_CLIENT.get(url, headers=headers, timeout=timeout_s)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             if attempt >= max_retries:
                 logging.warning("blob GET network error after %d retries: %s", attempt, exc)
@@ -228,13 +239,12 @@ def fetch_blob_bytes(blob_url: str) -> bytes:
     headers = _storage_auth_headers()
     fetch_url = _apply_sas_if_needed(blob_url)
 
-    with httpx.Client(timeout=180.0) as client:
-        resp = client.get(fetch_url, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"blob fetch failed: {resp.status_code} {resp.text[:200]}"
-            )
-        return resp.content
+    resp = _SHARED_CLIENT.get(fetch_url, headers=headers, timeout=180.0)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"blob fetch failed: {resp.status_code} {resp.text[:200]}"
+        )
+    return resp.content
 
 
 def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:

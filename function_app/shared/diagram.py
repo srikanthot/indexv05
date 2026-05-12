@@ -324,6 +324,10 @@ def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
         temperature=0.0,
         max_tokens=1500,
         response_format={"type": "json_object"},
+        # Explicit per-call timeout. Vision calls on stuck Gov Cloud
+        # sockets can hang up to the SDK default 600s, blowing past the
+        # 230s skill timeout and tying up function workers.
+        timeout=60.0,
     )
     return _extract_json(resp.choices[0].message.content or "{}")
 

@@ -9,6 +9,8 @@ azure-identity is imported lazily so unit tests and local key-only runs
 do not require the package to be installed.
 """
 
+import threading
+import time
 from collections.abc import Callable
 from functools import lru_cache
 
@@ -50,6 +52,35 @@ def bearer_token_provider(scope: str) -> Callable[[], str]:
     return get_bearer_token_provider(get_credential(), scope)
 
 
+_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+_TOKEN_CACHE_LOCK = threading.Lock()
+
+
 def bearer_token(scope: str) -> str:
-    """One-shot bearer token fetch for scopes we hit via raw httpx."""
-    return get_credential().get_token(scope).token
+    """Cached bearer token fetch for scopes we hit via raw httpx.
+
+    Without caching, every blob fetch / storage call paid 50-300ms (or
+    more on cold MSAL caches) to acquire a fresh token. On a PDF with
+    200 figures × 2 (crop + vision) = 400 token fetches per document,
+    or 20-120s of pure auth overhead on the critical path.
+
+    With this cache, MSAL is hit once per scope per hour. The token is
+    refreshed when within 5 minutes of expiry. Thread-safe via lock,
+    but the fast path (cache hit, plenty of TTL) is lock-free.
+    """
+    cached = _TOKEN_CACHE.get(scope)
+    now = time.time()
+    if cached is not None:
+        token, expires_at = cached
+        # Refresh proactively at 5-min-before-expiry mark.
+        if expires_at > now + 300:
+            return token
+    with _TOKEN_CACHE_LOCK:
+        cached = _TOKEN_CACHE.get(scope)
+        if cached is not None:
+            token, expires_at = cached
+            if expires_at > now + 300:
+                return token
+        tok = get_credential().get_token(scope)
+        _TOKEN_CACHE[scope] = (tok.token, float(tok.expires_on))
+        return tok.token
