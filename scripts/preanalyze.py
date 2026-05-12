@@ -317,23 +317,38 @@ def _parse_conn_str(conn_str: str) -> dict[str, str]:
 
 
 _storage_client: httpx.Client | None = None
-_storage_account_key: str = ""
 _storage_account_name: str = ""
 _storage_endpoint_suffix: str = ""
+_storage_credential = None
+_storage_token: str = ""
+_storage_token_expiry: float = 0.0
 
 
 def _init_storage(cfg: dict) -> None:
-    global _storage_client, _storage_account_key, _storage_account_name, _storage_endpoint_suffix
+    """Initialize HTTP client + AAD credential for storage. Uses AAD bearer
+    auth (via DefaultAzureCredential) instead of shared-key HMAC signing,
+    so it works when "Allow shared key access" is disabled on the storage
+    account (Azure security baseline default in many orgs) AND when the
+    deploy principal has data-plane RBAC but no key-listing permission.
+    The user's `az login` token is picked up automatically.
+    """
+    global _storage_client, _storage_account_name, _storage_endpoint_suffix
+    global _storage_credential
     if _storage_client is not None:
         return
     with _storage_init_lock:
         if _storage_client is not None:
             return
-        conn_str = _get_connection_string(cfg)
-        parts = _parse_conn_str(conn_str)
-        _storage_account_name = parts.get("AccountName", "")
-        _storage_account_key = parts.get("AccountKey", "")
-        _storage_endpoint_suffix = parts.get("EndpointSuffix", "core.windows.net")
+        _storage_account_name = _account_name(cfg)
+        # Endpoint suffix for the cloud (.usgovcloudapi.net for Gov, .net for commercial).
+        # Derive from the storage accountResourceId path; default to commercial.
+        rid = cfg["storage"].get("accountResourceId", "") or ""
+        if "usgovcloudapi" in rid or ".azure.us" in str(cfg.get("search", {}).get("endpoint", "")):
+            _storage_endpoint_suffix = "core.usgovcloudapi.net"
+        else:
+            _storage_endpoint_suffix = "core.windows.net"
+        from azure.identity import DefaultAzureCredential
+        _storage_credential = DefaultAzureCredential()
         ssl_verify: str | bool = os.environ.get("SSL_CERT_FILE") or True
         _storage_client = httpx.Client(
             timeout=httpx.Timeout(connect=30.0, write=600.0, read=600.0, pool=30.0),
@@ -341,42 +356,41 @@ def _init_storage(cfg: dict) -> None:
         )
 
 
+def _get_storage_token() -> str:
+    """Fetch (and cache) an AAD bearer token for Azure Storage. Token is
+    valid for 1 hour; refresh when within 60 sec of expiry. Thread-safe
+    via _storage_init_lock (acquired only on refresh)."""
+    global _storage_token, _storage_token_expiry
+    import time
+    now = time.time()
+    if _storage_token and _storage_token_expiry > now + 60:
+        return _storage_token
+    with _storage_init_lock:
+        if _storage_token and _storage_token_expiry > now + 60:
+            return _storage_token
+        # Storage AAD scope. Same for commercial and Gov clouds -- the
+        # endpoint differs (login.microsoftonline.us vs .com) but the
+        # scope literal is identical. DefaultAzureCredential picks the
+        # right authority from the user's az login context.
+        scope = "https://storage.azure.com/.default"
+        tok = _storage_credential.get_token(scope)
+        _storage_token = tok.token
+        _storage_token_expiry = float(tok.expires_on)
+        return _storage_token
+
+
 def _storage_auth_header(method: str, container: str, blob_name: str,
                           content_length: int = 0,
                           content_type: str = "",
                           extra_headers: dict[str, str] | None = None) -> dict[str, str]:
-    now = datetime.now(UTC).strftime("%a, %d %b %Y %H:%M:%S GMT")
-    x_ms_version = "2023-11-03"
-    x_ms_date = now
-
-    canon_headers_dict = {"x-ms-date": x_ms_date, "x-ms-version": x_ms_version}
-    if extra_headers:
-        for k, v in extra_headers.items():
-            if k.lower().startswith("x-ms-"):
-                canon_headers_dict[k.lower()] = v
-    canon_headers = "\n".join(f"{k}:{v}" for k, v in sorted(canon_headers_dict.items()))
-    # Canonical resource uses the URL-DECODED blob name. The URL itself
-    # is built with quote() in _blob_url() so spaces and special chars
-    # become %20 etc on the wire, which Azure decodes back to literal
-    # before signing. Keeping this side raw keeps signature in sync.
-    canon_resource = f"/{_storage_account_name}/{container}/{blob_name}"
-
-    string_to_sign = (
-        f"{method}\n\n\n"
-        f"{content_length if content_length else ''}\n"
-        f"\n{content_type}\n\n\n\n\n\n\n"
-        f"{canon_headers}\n{canon_resource}"
-    )
-
-    key_bytes = base64.b64decode(_storage_account_key)
-    sig = base64.b64encode(
-        hmac.new(key_bytes, string_to_sign.encode("utf-8"), hashlib.sha256).digest()
-    ).decode("ascii")
-
+    """Build AAD bearer auth headers for a storage REST call. Signature
+    kept for backward compatibility with all callers; the `method`,
+    `container`, `blob_name`, `content_length`, `content_type`,
+    `extra_headers` args are no longer used (AAD doesn't require
+    request-specific signing)."""
     return {
-        "Authorization": f"SharedKey {_storage_account_name}:{sig}",
-        "x-ms-date": x_ms_date,
-        "x-ms-version": x_ms_version,
+        "Authorization": f"Bearer {_get_storage_token()}",
+        "x-ms-version": "2023-11-03",
     }
 
 
