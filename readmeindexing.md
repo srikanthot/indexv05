@@ -70,3 +70,20 @@ def process_document_route(req: func.HttpRequest) -> func.HttpResponse:
 def shape_table(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("shape-table invoked")
     return handle_skill_request(req, process_table)
+
+
+    az storage blob show --account-name sapsegmandev01 --container-name techmanualsv07 --name "ED-ED-OHC.pdf" --auth-mode login --query "{name:name, lastModified:properties.lastModified}" -o table
+
+curl -X POST "https://srch02-pseg-tman-dev01.search.azure.us/indexers/psegtechmanuals-v01-indexer/reset?api-version=2024-05-01-preview" -H "Authorization: Bearer $TOKEN" -H "Content-Length: 0"
+
+curl -X POST "https://srch02-pseg-tman-dev01.search.azure.us/indexers/psegtechmanuals-v01-indexer/run?api-version=2024-05-01-preview" -H "Authorization: Bearer $TOKEN" -H "Content-Length: 0"
+
+
+az storage blob copy start --account-name sapsegmandev01 --destination-container techmanualsv07 --destination-blob "ED-ED-OHC.pdf" --source-uri "https://sapsegmandev01.blob.core.usgovcloudapi.net/techmanualsv07/ED-ED-OHC.pdf" --auth-mode login
+
+
+az storage blob show --account-name sapsegmandev01 --container-name techmanualsv07 --name "ED-ED-OHC.pdf" --auth-mode login --query "{name:name, lastModified:properties.lastModified}" -o table
+
+
+az storage blob show --account-name sapsegmandev01 --container-name techmanualsv07 --name "ED-ED-OHC.pdf" --auth-mode login --query "{name:name, lastModified:properties.lastModified}" -o table
+
