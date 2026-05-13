@@ -71,7 +71,7 @@
       "httpMethod": "POST",
       "timeout": "PT230S",
       "batchSize": 5,
-      "degreeOfParallelism": 6,
+      "degreeOfParallelism": 2,
       "inputs": [
         { "name": "page_text", "source": "/document/markdownDocument/*/pages/*" },
         { "name": "section_content", "source": "/document/markdownDocument/*/content" },
@@ -132,7 +132,7 @@
       "httpMethod": "POST",
       "timeout": "PT230S",
       "batchSize": 1,
-      "degreeOfParallelism": 6,
+      "degreeOfParallelism": 2,
       "inputs": [
         { "name": "image_b64", "source": "/document/enriched_figures/*/image_b64" },
         { "name": "figure_id", "source": "/document/enriched_figures/*/figure_id" },
@@ -197,7 +197,7 @@
       "httpMethod": "POST",
       "timeout": "PT230S",
       "batchSize": 5,
-      "degreeOfParallelism": 6,
+      "degreeOfParallelism": 2,
       "inputs": [
         { "name": "table_index", "source": "/document/enriched_tables/*/table_index" },
         { "name": "page_start", "source": "/document/enriched_tables/*/page_start" },
@@ -263,7 +263,7 @@
       "httpMethod": "POST",
       "timeout": "PT230S",
       "batchSize": 10,
-      "degreeOfParallelism": 6,
+      "degreeOfParallelism": 2,
       "inputs": [
         { "name": "mode", "source": "='text'" },
         { "name": "chunk", "source": "/document/markdownDocument/*/pages/*" },
@@ -289,7 +289,7 @@
       "httpMethod": "POST",
       "timeout": "PT230S",
       "batchSize": 10,
-      "degreeOfParallelism": 6,
+      "degreeOfParallelism": 2,
       "inputs": [
         { "name": "mode", "source": "='diagram'" },
         { "name": "diagram_description", "source": "/document/enriched_figures/*/dgm_description" },
