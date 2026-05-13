@@ -35,7 +35,7 @@ $Container = $cfg.storage.pdfContainerName
 $FailedPdfs = @(
   'ED-DC-CDS.pdf',
   'ED-DC-PEP.pdf',
-  'ED-DC-OHC.pdf',
+  'ED-ED-OHC.pdf',
   'ED-ED-OTC.pdf',
   'ED-ED-UGC.pdf',
   'ED-EM-MWM.pdf',
@@ -57,11 +57,18 @@ $StorageEndpoint = if ($SearchEp -match '\.azure\.us') {
 }
 
 # Step 1: Update blob metadata to bump lastModified
+# Locally relax ErrorActionPreference so one missing blob (typo etc.)
+# doesn't kill the whole script -- we want to process every blob we can
+# and report which ones failed at the end.
 $Stamp = Get-Date -Format 'yyyyMMddHHmmss'
 Write-Host "==> Step 1: bumping lastModified on $($FailedPdfs.Count) blobs (stamp=$Stamp)"
+$updated = @()
+$skipped = @()
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 foreach ($pdf in $FailedPdfs) {
   Write-Host "  - $pdf" -NoNewline
-  $result = az storage blob metadata update `
+  $null = az storage blob metadata update `
     --account-name $StorageAcct `
     --container-name $Container `
     --name $pdf `
@@ -69,16 +76,31 @@ foreach ($pdf in $FailedPdfs) {
     --auth-mode login 2>&1
   if ($LASTEXITCODE -eq 0) {
     Write-Host "  -> updated" -ForegroundColor Green
+    $updated += $pdf
   } else {
-    Write-Host "  -> FAILED" -ForegroundColor Red
-    Write-Host "     $result"
+    Write-Host "  -> FAILED (blob may not exist or you lack permission)" -ForegroundColor Yellow
+    $skipped += $pdf
   }
 }
+$ErrorActionPreference = $prevEAP
 
-# Step 2: Reset the failed items state for these specific docs
+if ($skipped.Count -gt 0) {
+  Write-Host ""
+  Write-Host "WARN: skipped $($skipped.Count) blob(s) -- continuing with the $($updated.Count) that updated:" -ForegroundColor Yellow
+  $skipped | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+}
+
+if ($updated.Count -eq 0) {
+  Write-Host ""
+  Write-Host "ERROR: no blobs were updated. Aborting before resetdocs/run." -ForegroundColor Red
+  exit 1
+}
+
+# Step 2: Reset the failed items state for these specific docs.
+# Only target blobs we actually managed to update.
 Write-Host ""
-Write-Host "==> Step 2: clearing failed items list for these docs"
-$BlobUrls = $FailedPdfs | ForEach-Object {
+Write-Host "==> Step 2: clearing failed items list for the $($updated.Count) updated docs"
+$BlobUrls = $updated | ForEach-Object {
   "https://${StorageAcct}.${StorageEndpoint}/${Container}/${_}"
 }
 
