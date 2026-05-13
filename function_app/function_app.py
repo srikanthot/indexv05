@@ -1,6 +1,7 @@
 import logging
 
 import azure.functions as func
+from shared.auto_heal import auto_heal_run
 from shared.diagram import process_diagram
 from shared.page_label import process_page_label
 from shared.process_document import process_document
@@ -10,6 +11,28 @@ from shared.skill_io import handle_skill_request
 from shared.summary import process_doc_summary
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+
+
+@app.timer_trigger(schedule="0 */30 * * * *", arg_name="timer", run_on_startup=False)
+def auto_heal_timer(timer: func.TimerRequest) -> None:
+    """Self-heal stuck blobs every 30 min.
+
+    Compares the index's `summary` record set against the blob container.
+    Any blob without a corresponding summary record AND last touched
+    > AUTO_HEAL_STUCK_AFTER_MIN minutes ago gets its metadata bumped
+    (forcing the indexer to see it as a fresh blob) and the indexer's
+    failed-items state is cleared for that blob.
+
+    This replaces the need to manually run force_reindex_blobs.ps1 in
+    production. Set AUTO_HEAL_ENABLED=true (default true) to enable.
+
+    Schedule: every 30 minutes (NCRONTAB: `0 */30 * * * *`).
+    """
+    logging.info("auto_heal: timer fired")
+    try:
+        auto_heal_run()
+    except Exception as exc:
+        logging.exception("auto_heal: unhandled error: %s", exc)
 
 
 @app.route(route="extract-page-label", methods=["POST"])

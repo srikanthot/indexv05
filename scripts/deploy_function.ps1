@@ -24,6 +24,9 @@ $diApi = $cfg.documentIntelligence.apiVersion; if (-not $diApi) { $diApi = '2024
 $prefix = $cfg.search.artifactPrefix; if (-not $prefix) { $prefix = 'mm-manuals' }
 $skillVersion = $cfg.skillVersion; if (-not $skillVersion) { $skillVersion = '1.0.0' }
 
+# Storage and indexer-name settings used by the auto_heal timer trigger.
+$storageAcctName = ($cfg.storage.accountResourceId -split '/')[-1]
+
 $settings = @(
   "AUTH_MODE=mi",
   "AOAI_ENDPOINT=$($cfg.azureOpenAI.endpoint)",
@@ -34,6 +37,12 @@ $settings = @(
   "DI_API_VERSION=$diApi",
   "SEARCH_ENDPOINT=$($cfg.search.endpoint)",
   "SEARCH_INDEX_NAME=$prefix-index",
+  "SEARCH_INDEXER_NAME=$prefix-indexer",
+  "STORAGE_ACCOUNT_NAME=$storageAcctName",
+  "STORAGE_CONTAINER_NAME=$($cfg.storage.pdfContainerName)",
+  "AUTO_HEAL_ENABLED=true",
+  "AUTO_HEAL_STUCK_AFTER_MIN=60",
+  "AUTO_HEAL_MAX_BLOBS_PER_RUN=20",
   "SKILL_VERSION=$skillVersion",
   # Python worker concurrency. Azure Functions Python defaults to 1 process
   # x 1 thread = no parallelism, which serializes every skill call through
