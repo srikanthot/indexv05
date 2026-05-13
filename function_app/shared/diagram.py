@@ -145,26 +145,76 @@ def _decode_b64_once(image_b64: str) -> bytes | None:
         return None
 
 
+# Skip phash entirely for crops larger than this (raw decoded bytes).
+# PIL.Image.open decompresses the full bitmap into memory; a 10MB PNG can
+# be 200+ MB uncompressed for a 50-megapixel image. With dop=6 across the
+# function app's worker processes, several concurrent calls processing
+# large images simultaneously have caused worker OOM crashes (HTTP 500
+# returned to indexer with no Python traceback, because the OS killed the
+# worker process). Skipping phash on huge images sacrifices cross-PDF
+# perceptual dedup for those specific figures, but keeps the worker alive.
+# 8 MB raw is well above any realistic PSEG figure crop -- crops in their
+# corpus are typically 100KB-2MB.
+_PHASH_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
+
+# Maximum pixels we'll allow PIL to decompress. PIL's default
+# MAX_IMAGE_PIXELS is ~90 megapixels and only emits a warning above that
+# (Image.DecompressionBombWarning). We override to RAISE
+# DecompressionBombError above 30MP, which is the upper bound for any
+# legitimate PDF figure crop. Anything bigger is either a bug in the
+# rendering or an adversarial input -- abort cleanly instead of OOM.
+_PHASH_MAX_PIXELS = 30_000_000  # 30 megapixels
+
+
 def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
     """Perceptual hash (dHash variant) over a grayscale 9x8 thumbnail.
 
     Pass `raw` if already decoded (e.g. from _decode_b64_once) to skip
     a redundant base64 decode. Same return semantics as before.
+
+    Memory-safety hardening (2026-05-13):
+      - Skip entirely if raw decoded bytes > _PHASH_MAX_BYTES
+      - Cap PIL's MAX_IMAGE_PIXELS at _PHASH_MAX_PIXELS (raises on overshoot)
+      - Catch MemoryError specifically and log loudly
+    Without this, large embedded images (50+ megapixel rasters in some
+    PDFs) caused worker process OOM crashes -- HTTP 500 to indexer with
+    no Python traceback.
     """
     if not image_b64 and raw is None:
         return ""
+    if raw is None:
+        try:
+            raw = base64.b64decode(image_b64)
+        except Exception:
+            return ""
+
+    # Hard size guard BEFORE PIL touches the bytes. PIL decompresses
+    # into memory eagerly; oversized images can blow the worker.
+    if len(raw) > _PHASH_MAX_BYTES:
+        logging.info(
+            "phash: skipping oversized image (%d bytes > %d limit)",
+            len(raw), _PHASH_MAX_BYTES,
+        )
+        return ""
+
     try:
         from io import BytesIO
         from PIL import Image
-        if raw is None:
-            raw = base64.b64decode(image_b64)
-        # Image.open is lazy; the file handle stays open until close().
-        # Use a context manager so the underlying BytesIO + PIL state are
-        # released deterministically. Without this, on 200+ figures per PDF
-        # × 50 PDFs we accumulated thousands of un-closed PIL Image objects
-        # waiting on GC, growing worker memory across the multi-hour run.
-        with Image.open(BytesIO(raw)) as src:
-            img = src.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+        # Tighten PIL's decompression-bomb defense locally for this call.
+        # PIL's default raises a warning at 90MP; we raise a hard error
+        # at 30MP -- well above any real PDF figure crop.
+        _prev_max = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = _PHASH_MAX_PIXELS
+        try:
+            # Image.open is lazy; the file handle stays open until close().
+            with Image.open(BytesIO(raw)) as src:
+                # Force size validation up front; raises DecompressionBombError
+                # if pixel count exceeds MAX_IMAGE_PIXELS.
+                src.load()
+                img = src.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+        finally:
+            Image.MAX_IMAGE_PIXELS = _prev_max
+
         pixels = list(img.getdata())  # 72 grayscale ints
         bits = []
         for row in range(8):
@@ -177,8 +227,15 @@ def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
         for b in bits:
             n = (n << 1) | b
         return f"{n:016x}"
+    except MemoryError as exc:
+        # The most common silent worker-killer. Log loudly so we have a
+        # trace before the worker potentially dies on the next allocation.
+        logging.error("phash: MemoryError on %d-byte image: %s", len(raw), exc)
+        return ""
     except Exception as exc:
-        logging.warning("phash failed: %s", exc)
+        # Includes PIL.Image.DecompressionBombError -- which is the new
+        # safe failure for oversized images that previously crashed the worker.
+        logging.warning("phash failed: %s: %s", type(exc).__name__, exc)
         return ""
 
 
@@ -492,6 +549,16 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": "",
             "processing_status": "no_image",
         })
+
+    # Trace breadcrumb so worker crashes leave a hint in App Insights about
+    # which figure was being processed. Each step in process_diagram logs
+    # a single info line so the LAST log line before a crash identifies
+    # the precise operation that killed the worker.
+    img_size = len(raw_bytes) if raw_bytes is not None else 0
+    logging.info(
+        "diagram start: src=%s fig=%s img_bytes=%d",
+        (source_file or "")[-40:], figure_id, img_size,
+    )
 
     # ── Image triage: skip tiny crops ──
     # Reuse raw_bytes from the _decode_b64_once call above instead of
