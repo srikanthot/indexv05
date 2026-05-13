@@ -44,7 +44,13 @@ _STORAGE_API_VERSION = "2024-08-04"
 
 
 def _is_enabled() -> bool:
-    return feature_enabled("AUTO_HEAL_ENABLED", default=True)
+    # AUTO_HEAL_ENABLED must be set to "true"/"1"/"yes" to enable.
+    # If unset OR set to anything else (including "false"), auto-heal stays off.
+    # We intentionally default to OFF rather than ON so a fresh deploy doesn't
+    # immediately start touching blobs before the operator has verified the
+    # rest of the system is healthy.
+    val = (optional_env("AUTO_HEAL_ENABLED", "") or "").strip().lower()
+    return val in ("true", "1", "yes", "on")
 
 
 def _stuck_threshold_min() -> int:
