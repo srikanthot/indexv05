@@ -22,3 +22,12 @@ curl -X POST "https://${FHOST}/api/process-document?code=${FKEY}" -H "Content-Ty
 
 # 6. Deploy search artifacts (auto-fires indexer)
 python scripts/deploy_search.py --config deploy.config.json
+
+
+$FUNC_APP = "azureindex-functionv05"
+$FUNC_RG  = "<your-rg>"
+$SUB = az account show --query id -o tsv
+
+az rest --method GET `
+  --uri "https://management.azure.us/subscriptions/$SUB/resourceGroups/$FUNC_RG/providers/Microsoft.Web/sites/$FUNC_APP/functions?api-version=2022-03-01" `
+  --query "value[].name" -o tsv
