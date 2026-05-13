@@ -9,8 +9,8 @@
   },
   "parameters": {
     "batchSize": 1,
-    "maxFailedItems": 200,
-    "maxFailedItemsPerBatch": 200,
+    "maxFailedItems": 1000,
+    "maxFailedItemsPerBatch": 1000,
     "configuration": {
       "dataToExtract": "contentAndMetadata",
       "parsingMode": "default",
