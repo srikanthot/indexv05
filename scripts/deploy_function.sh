@@ -39,6 +39,11 @@ SEARCH_PREFIX=$(jq -r '.search.artifactPrefix // "mm-manuals"' "$CONFIG")
 APPI_CONN=$(jq -r '.appInsights.connectionString // ""' "$CONFIG")
 SKILL_VERSION=$(jq -r '.skillVersion // "1.0.0"' "$CONFIG")
 
+# Storage and indexer-name settings used by the auto_heal timer trigger.
+STORAGE_ACCT_RESOURCE_ID=$(jq -r '.storage.accountResourceId // ""' "$CONFIG")
+STORAGE_ACCT_NAME="${STORAGE_ACCT_RESOURCE_ID##*/}"
+STORAGE_CONTAINER=$(jq -r '.storage.pdfContainerName // ""' "$CONFIG")
+
 SETTINGS=(
   "AUTH_MODE=mi"
   "AOAI_ENDPOINT=${AOAI_ENDPOINT}"
@@ -49,6 +54,12 @@ SETTINGS=(
   "DI_API_VERSION=${DI_API_VERSION}"
   "SEARCH_ENDPOINT=${SEARCH_ENDPOINT}"
   "SEARCH_INDEX_NAME=${SEARCH_PREFIX}-index"
+  "SEARCH_INDEXER_NAME=${SEARCH_PREFIX}-indexer"
+  "STORAGE_ACCOUNT_NAME=${STORAGE_ACCT_NAME}"
+  "STORAGE_CONTAINER_NAME=${STORAGE_CONTAINER}"
+  "AUTO_HEAL_ENABLED=true"
+  "AUTO_HEAL_STUCK_AFTER_MIN=60"
+  "AUTO_HEAL_MAX_BLOBS_PER_RUN=20"
   "SKILL_VERSION=${SKILL_VERSION}"
   # Python worker concurrency. Azure Functions Python defaults to 1 process
   # × 1 thread = no parallelism, which causes every skill call to serialize
