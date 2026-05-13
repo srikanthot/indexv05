@@ -34,7 +34,14 @@ $settings = @(
   "DI_API_VERSION=$diApi",
   "SEARCH_ENDPOINT=$($cfg.search.endpoint)",
   "SEARCH_INDEX_NAME=$prefix-index",
-  "SKILL_VERSION=$skillVersion"
+  "SKILL_VERSION=$skillVersion",
+  # Python worker concurrency. Azure Functions Python defaults to 1 process
+  # x 1 thread = no parallelism, which serializes every skill call through
+  # one worker -- guaranteeing 230s timeouts under indexer parallelism.
+  # 4 processes x 16 threads = 64 concurrent capacity, comfortably handling
+  # dop=6 across 5 per-record skills (30 max concurrent).
+  "FUNCTIONS_WORKER_PROCESS_COUNT=4",
+  "PYTHON_THREADPOOL_THREAD_COUNT=16"
 )
 if ($cfg.appInsights.connectionString) {
   $settings += "APPLICATIONINSIGHTS_CONNECTION_STRING=$($cfg.appInsights.connectionString)"

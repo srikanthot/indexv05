@@ -50,6 +50,13 @@ SETTINGS=(
   "SEARCH_ENDPOINT=${SEARCH_ENDPOINT}"
   "SEARCH_INDEX_NAME=${SEARCH_PREFIX}-index"
   "SKILL_VERSION=${SKILL_VERSION}"
+  # Python worker concurrency. Azure Functions Python defaults to 1 process
+  # × 1 thread = no parallelism, which causes every skill call to serialize
+  # through one worker -- guaranteeing 230s timeouts under any indexer
+  # parallelism. 4 processes × 16 threads = 64 concurrent capacity, which
+  # comfortably handles dop=6 across 5 per-record skills (30 max concurrent).
+  "FUNCTIONS_WORKER_PROCESS_COUNT=4"
+  "PYTHON_THREADPOOL_THREAD_COUNT=16"
 )
 
 # Only set App Insights if a connection string is provided.
