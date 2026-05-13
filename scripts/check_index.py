@@ -42,11 +42,20 @@ def coverage_report(cfg: dict, endpoint: str, index_name: str, headers: dict,
     print(f"  {len(blob_pdfs)} PDFs in blob\n")
 
     print("Querying index for source_file facet (PDFs with any record)...")
-    body = {"search": "*", "facet": "source_file,count:0", "top": 0, "count": True}
+    # Use "facets" (plural array) — Azure Search ignores singular "facet"
+    # in the JSON body and silently returns 0 results. count:200 returns up
+    # to 200 distinct source_file values (we have 56 PDFs, so 200 is plenty).
+    body = {"search": "*", "facets": ["source_file,count:200"], "top": 0, "count": True}
     resp = httpx.post(base, json=body, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        raise SystemExit(
+            f"facet query failed: HTTP {resp.status_code}\n{resp.text[:500]}"
+        )
     data = resp.json()
     total_chunks = data.get("@odata.count", 0)
-    facets = data.get("@odata.facets", {}).get("source_file", [])
+    # Facets live under "@search.facets", NOT "@odata.facets" (Azure Search
+    # uses two different prefixes in the same response).
+    facets = data.get("@search.facets", {}).get("source_file", [])
     started = {f["value"]: f["count"] for f in facets}
     print(f"  {total_chunks} total chunks across {len(started)} PDFs\n")
 
