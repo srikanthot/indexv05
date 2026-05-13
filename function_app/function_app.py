@@ -1,7 +1,6 @@
 import logging
 
 import azure.functions as func
-from shared.auto_heal import auto_heal_run
 from shared.diagram import process_diagram
 from shared.page_label import process_page_label
 from shared.process_document import process_document
@@ -9,6 +8,17 @@ from shared.process_table import process_table
 from shared.semantic import process_semantic_string
 from shared.skill_io import handle_skill_request
 from shared.summary import process_doc_summary
+
+# Defensive auto_heal import. If anything in shared/auto_heal.py fails to
+# import (missing dep, syntax error, etc.), we log it but keep the rest of
+# the function app working. Otherwise a single buggy module would prevent
+# all 6 indexer skills from being registered.
+try:
+    from shared.auto_heal import auto_heal_run
+    _AUTO_HEAL_AVAILABLE = True
+except Exception as _exc:
+    logging.exception("auto_heal: failed to import; timer disabled: %s", _exc)
+    _AUTO_HEAL_AVAILABLE = False
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -24,10 +34,13 @@ def auto_heal_timer(timer: func.TimerRequest) -> None:
     failed-items state is cleared for that blob.
 
     This replaces the need to manually run force_reindex_blobs.ps1 in
-    production. Set AUTO_HEAL_ENABLED=true (default true) to enable.
+    production. Set AUTO_HEAL_ENABLED=true to enable (default OFF).
 
     Schedule: every 30 minutes (NCRONTAB: `0 */30 * * * *`).
     """
+    if not _AUTO_HEAL_AVAILABLE:
+        logging.warning("auto_heal: module not loaded -- skipping")
+        return
     logging.info("auto_heal: timer fired")
     try:
         auto_heal_run()
