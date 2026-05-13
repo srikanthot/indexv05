@@ -21,8 +21,34 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "==> Publishing function code to ${FUNC_APP}"
 pushd "${REPO_ROOT}/function_app" >/dev/null
-func azure functionapp publish "${FUNC_APP}" --python
+# Capture output so we can scan for transient-failure markers that
+# `func` doesn't always reflect in its exit code (ServiceUnavailable,
+# GatewayTimeout 504, etc.). Bail out before App Settings update if
+# the publish actually failed -- the previous behavior silently moved
+# on and falsely reported "Function App ready" with old code still live.
+PUBLISH_LOG="$(mktemp)"
+set +e
+func azure functionapp publish "${FUNC_APP}" --python 2>&1 | tee "${PUBLISH_LOG}"
+PUBLISH_RC=${PIPESTATUS[0]}
+set -e
 popd >/dev/null
+
+if [[ $PUBLISH_RC -ne 0 ]] || \
+   grep -qE 'Error Uploading archive|ServiceUnavailable|GatewayTimeout|Connection Timed Out|Application Error|Deployment failed' "${PUBLISH_LOG}"; then
+  echo ""
+  echo "==> ABORT: function publish FAILED" >&2
+  echo "    Exit code: $PUBLISH_RC" >&2
+  echo "" >&2
+  echo "Common causes:" >&2
+  echo "  - Azure Functions Kudu transient issue. Wait 2-5 min, restart, retry." >&2
+  echo "  - 'az functionapp restart -n ${FUNC_APP} -g ${RG}' and retry." >&2
+  echo "  - Local Python version mismatch with function app." >&2
+  echo "" >&2
+  echo "NOT applying App Settings -- new code isn't live." >&2
+  rm -f "${PUBLISH_LOG}"
+  exit 1
+fi
+rm -f "${PUBLISH_LOG}"
 
 echo "==> Applying App Settings"
 

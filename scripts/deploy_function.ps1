@@ -14,8 +14,41 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Host "==> Publishing function code to $FuncApp"
 Push-Location (Join-Path $RepoRoot 'function_app')
-func azure functionapp publish $FuncApp --python --verbose
+# Capture both exit code and output. `func` doesn't always set $LASTEXITCODE
+# on transient upload failures (ServiceUnavailable, GatewayTimeout 504),
+# so we ALSO scan stderr/stdout for known failure markers. Either signal
+# aborts the deploy rather than silently continuing to "Function App ready".
+$publishOutput = & func azure functionapp publish $FuncApp --python --verbose 2>&1 | Tee-Object -Variable rawOut
+$publishExitCode = $LASTEXITCODE
 Pop-Location
+
+$publishText = ($publishOutput | Out-String)
+$failureMarkers = @(
+  'Error Uploading archive',
+  'ServiceUnavailable',
+  'GatewayTimeout',
+  'Connection Timed Out',
+  'Application Error',
+  'Deployment failed'
+)
+$failureHit = $failureMarkers | Where-Object { $publishText -match [regex]::Escape($_) }
+
+if ($publishExitCode -ne 0 -or $failureHit) {
+  Write-Host ""
+  Write-Host "==> ABORT: function publish FAILED" -ForegroundColor Red
+  if ($failureHit) {
+    Write-Host "    Detected failure marker(s): $($failureHit -join ', ')" -ForegroundColor Red
+  }
+  Write-Host "    Exit code: $publishExitCode" -ForegroundColor Red
+  Write-Host ""
+  Write-Host "Common causes (and fixes):" -ForegroundColor Yellow
+  Write-Host "  - Azure Functions Kudu is having a transient issue. Wait 2-5 min, restart the function app, retry."
+  Write-Host "  - Function app is restarting. Run 'az functionapp restart -n $FuncApp -g $Rg' and retry."
+  Write-Host "  - Local Python version mismatch with function app. The warning at the top of this output may matter."
+  Write-Host ""
+  Write-Host "NOT continuing with App Settings update because the new code isn't live." -ForegroundColor Red
+  throw "func azure functionapp publish failed (see output above)"
+}
 
 Write-Host "==> Applying App Settings"
 
