@@ -19,13 +19,24 @@ from typing import Any
 
 MAX_TABLE_CHARS = 3000
 
-# Row-record emission: only for tables in this row-count band. Below 5
-# rows the parent table record is enough; above 80 rows the parent has
-# too much content to be a useful retrieval anchor and per-row records
-# would dominate the index. The band keeps the index size proportional
-# to its retrieval value.
+# Row-record emission: emit per-row records for tables of meaningful size.
+#
+# Lower bound (5): below 5 rows the parent table record is enough; a 3-row
+# table doesn't add retrieval value as 3 separate row records.
+#
+# Upper bound (5000): matches _MAX_TABLE_ROWS, the defensive cap on DI's
+# rowCount. PSEG technical manuals (pricing schedules, conductor spec
+# tables, equipment rating tables) routinely have 100-500-row tables --
+# those rows ARE the high-value retrieval content (queries like
+# "200A 4-wire 277/480V conductor 4/0" need to hit the specific row).
+#
+# Audit 2026-05-13: previous cap of 80 was excluding 70,000+ row records
+# across the PSEG corpus, causing the index to come in at ~21K chunks
+# vs v04's 92K. Per-row emission for large tables is the right call for
+# technical-manual retrieval -- index size grows but the rows are
+# exactly the lookup keys the chatbot needs.
 ROW_RECORD_MIN_ROWS = 5
-ROW_RECORD_MAX_ROWS = 80
+ROW_RECORD_MAX_ROWS = 5000
 
 
 def _cell_text(cell: dict[str, Any]) -> str:
