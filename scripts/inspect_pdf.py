@@ -96,25 +96,32 @@ def estimate_time(counts: dict[str, int]) -> dict[str, float]:
     }
 
 
-def inspect(base: str, headers: dict, pdf: str) -> dict[str, int]:
+def gather_counts(base: str, headers: dict, pdf: str) -> dict[str, int]:
+    """Return record_type -> count for one PDF."""
+    counts: dict[str, int] = {}
+    for rt in RECORD_TYPES:
+        counts[rt] = query_count(
+            base, headers, f"source_file eq '{pdf}' and record_type eq '{rt}'"
+        )
+    return counts
+
+
+def inspect_single(base: str, headers: dict, pdf: str) -> None:
+    """Detailed single-PDF view."""
     print(f"\n{'=' * 70}")
     print(f"  {pdf}")
     print('=' * 70)
 
-    # Total
     total = query_count(base, headers, f"source_file eq '{pdf}'")
     print(f"\n  Total chunks in index:  {total:,}")
-
     if total == 0:
         print("\n  (no records — PDF has not been indexed yet)")
-        return {}
+        return
 
-    # Breakdown by record_type
+    counts = gather_counts(base, headers, pdf)
     print("\n  Breakdown by record_type:")
-    counts: dict[str, int] = {}
     for rt in RECORD_TYPES:
-        c = query_count(base, headers, f"source_file eq '{pdf}' and record_type eq '{rt}'")
-        counts[rt] = c
+        c = counts[rt]
         if c > 0:
             label = {
                 "text":      "Text chunks (paragraphs / sections)",
@@ -125,12 +132,10 @@ def inspect(base: str, headers: dict, pdf: str) -> dict[str, int]:
             }[rt]
             print(f"    {rt:12s}: {c:>7,}    {label}")
 
-    # Pages with content
     pages = query_distinct_pages(base, headers, pdf)
     if pages:
         print(f"\n  Distinct pages with text content:  {pages}")
 
-    # Time estimate
     times = estimate_time(counts)
     total_serial = sum(times.values())
     print("\n  Estimated time spent in AI skill calls (cumulative):")
@@ -143,10 +148,72 @@ def inspect(base: str, headers: dict, pdf: str) -> dict[str, int]:
         else:
             print(f"    {skill:22s}: {secs:>7.1f} sec")
     print(f"    {'-' * 50}")
-    print(f"    {'TOTAL (serial)':22s}: {total_serial:>7.0f} sec  ({total_serial/60:>5.1f} min)")
-    print(f"    {'TOTAL @ dop=2':22s}: {total_serial/2:>7.0f} sec  ({total_serial/120:>5.1f} min)")
+    print(f"    {'Total expected time':22s}: {total_serial:>7.0f} sec  ({total_serial/60:>5.1f} min)")
 
-    return counts
+
+def inspect_all(base: str, headers: dict, pdfs: list[str]) -> None:
+    """One big table covering every indexed PDF, with a TOTAL row at the bottom."""
+    # Column widths
+    name_w = max(38, max(len(p) for p in pdfs) + 1)
+
+    header = (
+        f"{'PDF':<{name_w}}"
+        f"{'text':>8}"
+        f"{'diagram':>9}"
+        f"{'table':>8}"
+        f"{'rows':>9}"
+        f"{'summary':>9}"
+        f"{'total':>9}"
+        f"{'time (min)':>12}"
+    )
+    sep = "-" * len(header)
+
+    print()
+    print(header)
+    print(sep)
+
+    grand: dict[str, int] = {rt: 0 for rt in RECORD_TYPES}
+    grand_total_chunks = 0
+    grand_total_secs = 0.0
+
+    for pdf in pdfs:
+        counts = gather_counts(base, headers, pdf)
+        total = sum(counts.values())
+        secs = sum(estimate_time(counts).values())
+
+        for rt in RECORD_TYPES:
+            grand[rt] += counts[rt]
+        grand_total_chunks += total
+        grand_total_secs += secs
+
+        print(
+            f"{pdf:<{name_w}}"
+            f"{counts['text']:>8,}"
+            f"{counts['diagram']:>9,}"
+            f"{counts['table']:>8,}"
+            f"{counts['table_row']:>9,}"
+            f"{counts['summary']:>9,}"
+            f"{total:>9,}"
+            f"{secs/60:>12.1f}"
+        )
+
+    print(sep)
+    print(
+        f"{'TOTAL (' + str(len(pdfs)) + ' PDFs)':<{name_w}}"
+        f"{grand['text']:>8,}"
+        f"{grand['diagram']:>9,}"
+        f"{grand['table']:>8,}"
+        f"{grand['table_row']:>9,}"
+        f"{grand['summary']:>9,}"
+        f"{grand_total_chunks:>9,}"
+        f"{grand_total_secs/60:>12.1f}"
+    )
+    print(sep)
+    print(
+        f"\nTotal expected time across all PDFs: "
+        f"{grand_total_secs:,.0f} sec  "
+        f"({grand_total_secs/60:,.1f} min  =  {grand_total_secs/3600:,.1f} hours)"
+    )
 
 
 def list_indexed_pdfs(base: str, headers: dict) -> list[str]:
@@ -186,10 +253,9 @@ def main() -> None:
     if args.all:
         pdfs = list_indexed_pdfs(base, headers)
         print(f"\nInspecting {len(pdfs)} indexed PDFs...")
-        for pdf in pdfs:
-            inspect(base, headers, pdf)
+        inspect_all(base, headers, pdfs)
     else:
-        inspect(base, headers, args.pdf)
+        inspect_single(base, headers, args.pdf)
 
 
 if __name__ == "__main__":
