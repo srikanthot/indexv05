@@ -2,17 +2,18 @@
 
 Production indexing pipeline that turns technical PDF manuals into a
 multimodal Azure AI Search index queryable by an AI assistant. Each
-manual produces four record types as peers in a single index:
+manual produces five record types as peers in a single index:
 
-| record_type | content                                              |
-|-------------|------------------------------------------------------|
-| `text`      | A chunk of body text with section headers and pages  |
-| `table`     | One table as markdown                                |
-| `diagram`   | One figure with a GPT-4 Vision description + OCR     |
-| `summary`   | One per-document summary                             |
+| `record_type` | Content |
+|---|---|
+| `text`      | A chunk of body text with section headers + page numbers |
+| `table`     | A full table rendered as markdown |
+| `table_row` | One row of a shaped table (5–80 row tables only) |
+| `diagram`   | One figure with a GPT-4 Vision description + OCR |
+| `summary`   | One per-document summary |
 
-All four record types are embedded with `text-embedding-ada-002` and
-returned with citation metadata (manual, page, headers, bbox).
+All record types are embedded with `text-embedding-ada-002` (1536 dim)
+and returned with citation metadata (manual, page, headers, bbox).
 
 This repository contains the **application layer** only: function code,
 search artifacts, deploy + operational scripts, tests, docs. Azure
@@ -20,12 +21,18 @@ infrastructure (Storage, Search, AOAI, DI, Function App, Cosmos DB,
 Application Insights) is provisioned out-of-band.
 
 > **Cloud:** Azure Government (`*.azure.us`). The codebase hardcodes
-> Government cloud scopes; do not deploy to commercial Azure without
-> auditing every script's authentication scope.
+> Government cloud scopes;
+
+> **Building a chatbot on top of this index?**
+> Read **[CHATBOT_INTEGRATION.md](CHATBOT_INTEGRATION.md)** — the full
+> hand-off spec for the engineer or LLM agent wiring chatbot retrieval.
+> It explains how to use every record type (text, diagram, table,
+> table_row, summary) and every field so the chatbot extracts the full
+> value of the index.
 
 ---
 
-## Architecture (one screen)
+## Architecture
 
 ```
                                                 ┌──────────────────┐
@@ -54,7 +61,7 @@ Application Insights) is provisioned out-of-band.
              ▼                              ▼            │
     ┌──────────────────────┐      ┌──────────────────────┴───┐
     │ Search Index         │      │ Cosmos DB                │
-    │ (4 record types)     │      │  - run history           │
+    │ (5 record types)     │      │  - run history           │
     │                      │      │  - per-PDF state         │
     └──────────────────────┘      └──────────────────────────┘
              ▲
@@ -62,9 +69,9 @@ Application Insights) is provisioned out-of-band.
         AI assistant / users
 ```
 
-Two stages on purpose: pre-analyze can take 5–60 minutes per large PDF.
-The Azure Search WebApi-skill timeout is 230 seconds. Doing slow work
-offline and caching the result keeps the indexer fast and reliable.
+Two stages on purpose: pre-analyze can take 5–60 minutes per large
+PDF. The Azure Search WebApi-skill timeout is 230 seconds. Doing slow
+work offline and caching the result keeps the indexer fast and reliable.
 
 ---
 
@@ -74,7 +81,7 @@ Provisioned by the infrastructure team (Bicep / Terraform / portal):
 
 - **Azure AI Search** — Standard tier or higher. System-assigned MI on.
 - **Azure Storage** account with the source-PDF container.
-  **Blob soft-delete must be enabled** (Data protection blade) so the
+  Blob soft-delete must be enabled (Data protection blade) so the
   indexer's deletion-detection policy works and accidental deletes are
   recoverable.
 - **Azure OpenAI** with deployments named per `deploy.config.json`:
@@ -85,7 +92,7 @@ Provisioned by the infrastructure team (Bicep / Terraform / portal):
 - **Azure Function App** — Linux, Python 3.11, Functions v4. MI on.
 - **Application Insights** — connection string written to function app settings.
 - **Cosmos DB** account with database `indexing` (containers are
-  auto-created on first run).
+  auto-created on first run; optional).
 
 Required role assignments are listed in [docs/SETUP.md §3](docs/SETUP.md#3-rbac).
 
@@ -102,26 +109,31 @@ Local prerequisites for running scripts manually:
 ```
 .
 ├── function_app/              Azure Function App (custom skills)
-│   ├── function_app.py        Entry point + HTTP routing
+│   ├── function_app.py        HTTP routing + auto-heal timer
 │   ├── host.json
 │   ├── requirements.txt
 │   └── shared/                Skill implementations + utilities
 │
-├── scripts/                   Operational tooling (runs from Jenkins or laptop)
+├── scripts/                   Operational tooling (Jenkins or laptop)
 │   ├── preanalyze.py          Stage 1: DI + Vision, populates _dicache/
 │   ├── reconcile.py           Detect added / edited / deleted PDFs
-│   ├── run_pipeline.py        End-to-end orchestrator (the one Jenkins runs)
-│   ├── check_index.py         Coverage + diagnostics, --write-status to Cosmos
-│   ├── cosmos_writer.py       Helper used by other scripts
+│   ├── run_pipeline.py        End-to-end orchestrator
+│   ├── check_index.py         Coverage + diagnostics
+│   ├── cosmos_writer.py       Cosmos DB persistence helper
 │   ├── deploy_search.py       Deploy index/skillset/datasource/indexer
 │   ├── deploy_function.sh     Deploy function app code (Linux)
 │   ├── deploy_function.ps1    Deploy function app code (Windows)
 │   ├── smoke_test.py          Post-deploy validation gate
-│   ├── reset_indexer.sh       Reset + run indexer (bash)
-│   ├── reset_indexer.ps1      Reset + run indexer (PowerShell)
-│   ├── diagnose.py            One-shot health probe (function app + indexer)
+│   ├── reset_indexer.{sh,ps1} Reset + run indexer
+│   ├── diagnose.py            Health probe (function app + indexer)
+│   ├── inspect_pdf.py         Per-PDF cache + index inspection
 │   ├── preflight.py           Pre-deploy environment validation
-│   └── assign_roles.ps1       One-time RBAC bootstrapper
+│   ├── assign_roles.{ps1,py}  One-time RBAC bootstrapper
+│   ├── bootstrap.py           Initial setup helper
+│   ├── reap_stale_rows.py     Cleanup stale index records
+│   ├── force_reindex_blobs.ps1  Force reindex of specific PDFs
+│   ├── rerun_failed_docs.ps1  Surgical retry of failed PDFs
+│   └── pipeline_lock.py       Cross-script pipeline lock
 │
 ├── search/                    Azure AI Search artifact templates
 │   ├── datasource.json
@@ -129,17 +141,16 @@ Local prerequisites for running scripts manually:
 │   ├── skillset.json
 │   └── indexer.json
 │
-├── tests/                     Pure-Python (no Azure deps)
+├── tests/                     Pure-Python tests
 │   ├── test_unit.py
 │   ├── test_e2e_simulator.py
-│   └── test_filename_spaces.py
+│   ├── test_filename_spaces.py
+│   └── test_techmanual_capture.py
 │
-├── docs/                      All documentation, in 3 mega-docs:
-│   ├── SETUP.md                  ARCHITECTURE + BOOTSTRAP + RBAC + JENKINS
-│   │                             + DASHBOARD_SPEC + SEARCH_INDEX_GUIDE
-│   ├── RUNBOOK.md                Daily operations + preanalyze guide +
-│   │                             validation + content capture + incidents
-│   └── SCENARIOS.md              511 scenarios (general + preanalyze + indexer)
+├── docs/
+│   ├── SETUP.md               One-time provisioning, RBAC, Jenkins, index reference
+│   ├── RUNBOOK.md             Day-to-day operations + incident response
+│   └── TROUBLESHOOTING.md     Copy-paste diagnostic commands
 │
 ├── Jenkinsfile.deploy         CI pipeline (push to main)
 ├── Jenkinsfile.run            CI pipeline (nightly cron + manual)
@@ -163,8 +174,10 @@ cp deploy.config.example.json deploy.config.json
 az cloud set --name AzureUSGovernment
 az login
 
-# 3. Deploy function app code (Linux)
-./scripts/deploy_function.sh deploy.config.json
+# 3. Deploy function app code
+./scripts/deploy_function.sh deploy.config.json     # Linux/Mac
+# or
+./scripts/deploy_function.ps1 deploy.config.json    # Windows
 
 # 4. Deploy search artifacts (index, skillset, datasource, indexer)
 python scripts/deploy_search.py --config deploy.config.json
@@ -212,10 +225,10 @@ from the Jenkins UI.
 | **Edit** a PDF | Re-upload (overwrite) | Reconcile purges old chunks; preanalyze regenerates cache; indexer reindexes the new content |
 | **Delete** a PDF | Delete from the blob container | Reconcile purges chunks + cache + Cosmos state |
 
-**Only PDFs are processed.** PowerPoint, Word, and Excel files in the
+Only PDFs are processed. PowerPoint, Word, and Excel files in the
 container are silently skipped. Convert to PDF before upload.
 
-**Filenames may contain spaces and most punctuation** — they are
+Filenames may contain spaces and most punctuation — they are
 URL-encoded automatically. Do not pre-encode.
 
 ---
@@ -241,8 +254,9 @@ Three sources of truth, in increasing reliability:
 
 ## When something breaks
 
-See [docs/RUNBOOK.md §5](docs/RUNBOOK.md#5-incident-response) for the top
-failure modes and recovery steps. Quick links:
+See [docs/RUNBOOK.md §5](docs/RUNBOOK.md#5-incident-response) and
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for recovery steps.
+Quick links:
 
 - Indexer timing out / 0 docs succeeded → preanalyze cache missing for
   some PDF. Run `preanalyze.py --status` then `--incremental`.
@@ -252,8 +266,7 @@ failure modes and recovery steps. Quick links:
   chunks; run the pipeline.
 
 For deeper architecture and configuration reference, see
-[docs/SETUP.md §1](docs/SETUP.md#1-architecture) and
-[docs/RUNBOOK.md](docs/RUNBOOK.md).
+[docs/SETUP.md](docs/SETUP.md).
 
 ---
 
@@ -266,8 +279,9 @@ python tests/test_filename_spaces.py
 ruff check function_app tests scripts
 ```
 
-GitHub Actions runs all four on every PR + push to `main`. Required
-checks should be enforced in branch protection.
+GitHub Actions runs all four on every PR + push to `main` via
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Required checks
+should be enforced in branch protection.
 
 The Jenkins deploy pipeline runs the same gate plus `smoke_test.py`
 post-deploy.
@@ -281,10 +295,9 @@ post-deploy.
 - The single embedded credential is the Function App key, present in
   the deployed skillset only. Rotated by re-running `deploy_search.py`
   after `az functionapp keys set`.
-- API keys (`AUTH_MODE=key`) remain supported for local development
-  only.
-- Per-environment `deploy.config.json` is excluded from git; it is
-  delivered to Jenkins via secret file credentials.
+- API keys (`AUTH_MODE=key`) remain supported for local development only.
+- Per-environment `deploy.config.json` is excluded from git; deliver
+  it to Jenkins via secret file credentials.
 - See [docs/SETUP.md §3](docs/SETUP.md#3-rbac) for the full role matrix.
 
 ---
