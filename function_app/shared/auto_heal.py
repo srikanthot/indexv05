@@ -18,11 +18,11 @@ Configuration (App Settings):
   AUTO_HEAL_ENABLED                  -- "true" to enable (default: true)
   AUTO_HEAL_STUCK_AFTER_MIN          -- minutes a blob must be stuck before healing (default: 60)
   AUTO_HEAL_MAX_BLOBS_PER_RUN        -- safety cap; don't try to heal more than N at once (default: 20)
-  SEARCH_ENDPOINT                    -- e.g. https://srch-foo.search.azure.us
-  SEARCH_INDEX_NAME                  -- e.g. psegtechmanuals-v01-index
-  SEARCH_INDEXER_NAME                -- e.g. psegtechmanuals-v01-indexer
-  STORAGE_ACCOUNT_NAME               -- e.g. sapsegmandev01
-  STORAGE_CONTAINER_NAME             -- e.g. techmanualsv07
+  SEARCH_ENDPOINT                    -- e.g. https://<search-service>.search.azure.us
+  SEARCH_INDEX_NAME                  -- name of the target Search index
+  SEARCH_INDEXER_NAME                -- name of the target Search indexer
+  STORAGE_ACCOUNT_NAME               -- storage account hosting the PDF container
+  STORAGE_CONTAINER_NAME             -- blob container holding source PDFs
 
 All Azure calls use the function app's managed identity. No keys needed.
 """
