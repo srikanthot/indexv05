@@ -5,7 +5,8 @@
  *   2. preanalyze.py --incremental
  *   3. wait for indexer to settle
  *   4. check_index.py --coverage --write-status
- *   5. write run summary to Cosmos DB
+ *   5. heal_until_done.py       loop force-reindex until 100% or give up
+ *   6. write run summary to Cosmos DB
  *
  * Trigger: nightly cron at 02:00 UTC + manual button.
  *
@@ -45,6 +46,21 @@ pipeline {
             defaultValue: '60',
             description: 'How long to wait for the indexer to settle (minutes)'
         )
+        booleanParam(
+            name: 'SKIP_HEAL_LOOP',
+            defaultValue: false,
+            description: 'Skip the heal-until-done loop after the main pipeline'
+        )
+        string(
+            name: 'HEAL_MAX_ITERATIONS',
+            defaultValue: '8',
+            description: 'Max iterations for the heal-until-done loop'
+        )
+        string(
+            name: 'HEAL_WAIT_MINUTES',
+            defaultValue: '30',
+            description: 'Per-iteration max-wait minutes for the heal loop'
+        )
     }
 
     triggers {
@@ -55,7 +71,7 @@ pipeline {
     options {
         timestamps()
         ansiColor('xterm')
-        timeout(time: 4, unit: 'HOURS')   // big PDF preanalyze can take a while
+        timeout(time: 10, unit: 'HOURS')  // preanalyze + 8 heal iterations worst case
         disableConcurrentBuilds()         // only one run at a time per env
     }
 
@@ -134,6 +150,20 @@ pipeline {
                         python scripts/run_pipeline.py ${args.join(' ')}
                     """
                 }
+            }
+        }
+
+        stage('Heal until done') {
+            when { expression { return !params.SKIP_HEAL_LOOP } }
+            steps {
+                sh """
+                    set -e
+                    . .venv/bin/activate
+                    python scripts/heal_until_done.py \\
+                        --config deploy.config.json \\
+                        --max-iterations ${params.HEAL_MAX_ITERATIONS} \\
+                        --wait-minutes ${params.HEAL_WAIT_MINUTES}
+                """
             }
         }
     }
