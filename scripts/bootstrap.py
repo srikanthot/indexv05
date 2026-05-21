@@ -1,26 +1,28 @@
 """
 One-command bootstrap for a fresh environment.
 
-Replaces the manual sequence of:
-  preflight.py → assign_roles.py → fix authOptions → fix network → wait
-  → create cosmos db → deploy_function → deploy_search → smoke_test
+Step list (idempotent — safe to re-run):
 
-This script auto-detects and (optionally) auto-fixes common environment
-issues that the architect's Bicep template doesn't always handle:
+  1. Preflight checks                        (preflight.py)
+  2. Detect Search auth + network issues     (auto-fix with --auto-fix)
+  3. Create Cosmos DB database if missing
+  4. Assign all RBAC roles (+ 300s wait)     (assign_roles.py)
+  5. Wait for RBAC propagation
+  6. Deploy Function App code                (deploy_function.sh/ps1)
+  7. Configure Function App app settings     (AUTO_HEAL_ENABLED=true + AOAI/DI/SEARCH env vars)
+  8. Deploy search artifacts                 (deploy_search.py, 5-attempt retry)
+  9. Smoke test                              (smoke_test.py)
 
-  1. RBAC roles not assigned    -> calls assign_roles.py
-  2. RBAC propagation lag        -> waits, retries on 403
-  3. Cosmos database missing     -> creates it
-  4. Search service in apiKeyOnly mode -> changes to aadOrApiKey  (with --auto-fix)
-  5. Search publicNetworkAccess: disabled -> enables it           (with --auto-fix)
-  6. Cosmos data-plane RBAC      -> grants role + waits 5+ min
-  7. Function app code missing   -> deploys it
-  8. Search artifacts missing    -> deploys them
-  9. Smoke test failure          -> reports clearly
+If you ALSO want preanalyze + indexer + heal loop in the same command,
+use scripts/deploy.py — it wraps bootstrap.py with the data pipeline.
 
 Usage:
     python scripts/bootstrap.py --config deploy.config.json
     python scripts/bootstrap.py --config deploy.config.json --auto-fix
+
+    # Skip specific phases (used by scripts/deploy.py to defer search
+    # artifacts until AFTER preanalyze runs):
+    python scripts/bootstrap.py --config deploy.config.json --skip-search-artifacts
     python scripts/bootstrap.py --config deploy.config.json --skip-cosmos
 
 Use --auto-fix when you have permission to change security settings on
@@ -141,6 +143,14 @@ def main() -> int:
                          "(use when Jenkins agent identity already has roles).")
     ap.add_argument("--skip-function-app", action="store_true",
                     help="Skip deploying function app code.")
+    ap.add_argument("--skip-app-settings", action="store_true",
+                    help="Skip configuring Function App app settings.")
+    ap.add_argument("--skip-search-artifacts", action="store_true",
+                    help="Skip deploying search index/skillset/indexer/datasource. "
+                         "Use when the caller wants to run preanalyze BEFORE the "
+                         "indexer fires (e.g. scripts/deploy.py wrapper).")
+    ap.add_argument("--skip-smoke-test", action="store_true",
+                    help="Skip the final smoke test.")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -291,36 +301,109 @@ def main() -> int:
             return 1
 
     # ============================================================
-    section("STEP 7 / 8 — Deploy search artifacts (5-attempt retry on 403)")
+    section("STEP 6.5 / 9 — Configure Function App app settings")
+    # ============================================================
+    # Sets every env var the skills read, including AUTO_HEAL_ENABLED.
+    # Without this, operators have to remember to run `az functionapp
+    # config appsettings set` separately for AUTO_HEAL_ENABLED, AOAI_*,
+    # DI_*, SEARCH_*, etc. — easy to forget, and the auto_heal timer
+    # silently no-ops until enabled.
+    if args.skip_app_settings:
+        print("  --skip-app-settings set; skipping")
+    else:
+        func_name = cfg["functionApp"]["name"]
+        aoai = cfg.get("azureOpenAI") or {}
+        di = cfg.get("documentIntelligence") or {}
+        search_cfg = cfg.get("search") or {}
+        storage_cfg = cfg.get("storage") or {}
+        prefix = search_cfg.get("artifactPrefix") or "mm-manuals"
+        storage_acct = (storage_cfg.get("accountResourceId") or "").rstrip("/").split("/")[-1]
+
+        settings = {
+            "AUTH_MODE": "mi",
+            "FUNCTIONS_WORKER_RUNTIME": "python",
+            "AOAI_ENDPOINT": (aoai.get("endpoint") or "").rstrip("/"),
+            "AOAI_API_VERSION": aoai.get("apiVersion") or "2024-12-01-preview",
+            "AOAI_CHAT_DEPLOYMENT": aoai.get("chatDeployment") or "",
+            "AOAI_VISION_DEPLOYMENT": aoai.get("visionDeployment") or "",
+            "AOAI_EMBED_DEPLOYMENT": aoai.get("embedDeployment") or "",
+            "DI_ENDPOINT": (di.get("endpoint") or "").rstrip("/"),
+            "DI_API_VERSION": di.get("apiVersion") or "2024-11-30",
+            "SEARCH_ENDPOINT": (search_cfg.get("endpoint") or "").rstrip("/"),
+            "SEARCH_INDEX_NAME": f"{prefix}-index",
+            "SEARCH_INDEXER_NAME": f"{prefix}-indexer",
+            "STORAGE_ACCOUNT_NAME": storage_acct,
+            "STORAGE_CONTAINER_NAME": storage_cfg.get("pdfContainerName") or "",
+            "SKILL_VERSION": cfg.get("skillVersion") or "1.0.0",
+            # AUTO_HEAL on by default — the timer self-heals stuck blobs
+            # every 30 min. Operators can disable later via az CLI if
+            # needed, but for a fresh deploy "on" is the right default.
+            "AUTO_HEAL_ENABLED": "true",
+            "AUTO_HEAL_STUCK_AFTER_MIN": "60",
+            "AUTO_HEAL_MAX_BLOBS_PER_RUN": "20",
+        }
+        app_insights_conn = (cfg.get("appInsights") or {}).get("connectionString") or ""
+        if app_insights_conn:
+            settings["APPLICATIONINSIGHTS_CONNECTION_STRING"] = app_insights_conn
+
+        # Filter out empty values so `az` doesn't blank-out existing settings
+        # the operator might have set manually (e.g. a connection string).
+        kv_pairs = [f"{k}={v}" for k, v in settings.items() if v]
+        step(f"applying {len(kv_pairs)} app settings to {func_name}")
+        rc, _, err = az([
+            "functionapp", "config", "appsettings", "set",
+            "-n", func_name, "-g", rg,
+            "--settings", *kv_pairs,
+            "--output", "none",
+        ])
+        if rc != 0:
+            issues_warned.append(f"could not set app settings: {err[:300]}")
+        else:
+            step("app settings applied (AUTO_HEAL_ENABLED=true)")
+            step("restarting function app to pick up new settings")
+            az(["functionapp", "restart", "-n", func_name, "-g", rg, "--output", "none"])
+            time.sleep(15)
+
+    # ============================================================
+    section("STEP 7 / 9 — Deploy search artifacts (5-attempt retry on 403)")
     # ============================================================
     # 5 attempts × 120s wait = up to 10 minutes of total retry time.
     # That covers worst-case Gov-cloud RBAC propagation (~15-30 min)
     # combined with the 5-min wait already done in step 4.
-    max_attempts = 5
-    rc = -1
-    for attempt in range(1, max_attempts + 1):
-        rc = run_script("scripts/deploy_search.py", ["--config", args.config])
-        if rc == 0:
-            step(f"deploy_search succeeded on attempt {attempt}")
-            break
-        if attempt < max_attempts:
-            step(f"attempt {attempt}/{max_attempts} failed; sleeping 120s for RBAC propagation")
-            time.sleep(120)
-    if rc != 0:
-        issues_blocking.append(
-            f"deploy_search.py failed after {max_attempts} attempts. Likely causes: "
-            "(1) Gov-cloud RBAC took longer than ~15 min — re-run bootstrap.py to retry. "
-            "(2) Network firewall blocking your laptop — run from corporate network. "
-            "(3) Search service in apiKeyOnly mode — re-run with --auto-fix."
-        )
-        return 1
+    if args.skip_search_artifacts:
+        print("  --skip-search-artifacts set; skipping (caller will run preanalyze "
+              "first, then deploy artifacts)")
+    else:
+        max_attempts = 5
+        rc = -1
+        for attempt in range(1, max_attempts + 1):
+            rc = run_script("scripts/deploy_search.py", ["--config", args.config])
+            if rc == 0:
+                step(f"deploy_search succeeded on attempt {attempt}")
+                break
+            if attempt < max_attempts:
+                step(f"attempt {attempt}/{max_attempts} failed; sleeping 120s for RBAC propagation")
+                time.sleep(120)
+        if rc != 0:
+            issues_blocking.append(
+                f"deploy_search.py failed after {max_attempts} attempts. Likely causes: "
+                "(1) Gov-cloud RBAC took longer than ~15 min — re-run bootstrap.py to retry. "
+                "(2) Network firewall blocking your laptop — run from corporate network. "
+                "(3) Search service in apiKeyOnly mode — re-run with --auto-fix."
+            )
+            return 1
 
     # ============================================================
-    section("STEP 8 / 8 — Smoke test")
+    section("STEP 8 / 9 — Smoke test")
     # ============================================================
-    rc = run_script("scripts/smoke_test.py", ["--config", args.config, "--skip-run"])
-    if rc != 0:
-        issues_warned.append("smoke_test reported issues; review logs above")
+    if args.skip_smoke_test or args.skip_search_artifacts:
+        # Smoke test queries the deployed search service; if artifacts
+        # weren't deployed, skipping is the right call.
+        print("  skipped (no search artifacts deployed yet OR --skip-smoke-test)")
+    else:
+        rc = run_script("scripts/smoke_test.py", ["--config", args.config, "--skip-run"])
+        if rc != 0:
+            issues_warned.append("smoke_test reported issues; review logs above")
 
     # ============================================================
     section("DONE")
@@ -330,34 +413,31 @@ def main() -> int:
         for w in issues_warned:
             print(f"  - {w}")
         print()
-    print("Bootstrap complete. Your environment is ready to ingest PDFs.")
+    print("Bootstrap complete. Infrastructure + RBAC + app settings + function "
+          "code are in place.")
     print()
-    print("NEXT STEPS (copy-paste in order):")
+    print("THE EASIEST WAY TO RUN THE REST: scripts/deploy.py does everything")
+    print("(bootstrap, preanalyze, deploy search artifacts, indexer, heal loop)")
+    print("in one command. If you only ran bootstrap, finish with these steps:")
     print()
-    print("  # 1. Upload your PDFs to the blob container, then run preanalyze.")
-    print("  #    DEFAULT (safe, slow):")
-    print(f"  python scripts/preanalyze.py --config {args.config}")
-    print()
-    print("  #    FASTER (recommended for 20+ PDFs, parallel processing):")
+    print("  # 1. Upload PDFs to the blob container, then run preanalyze.")
     print(f"  python scripts/preanalyze.py --config {args.config} --concurrency 3 --vision-parallel 50")
     print()
-    print("  #    FASTEST (phased -- best for 50+ PDFs):")
-    print(f"  python scripts/preanalyze.py --config {args.config} --phase di --concurrency 3")
-    print(f"  python scripts/preanalyze.py --config {args.config} --phase vision --vision-parallel 60")
-    print(f"  python scripts/preanalyze.py --config {args.config} --phase output")
-    print()
-    print("  # 2. The indexer's first run after deploy_search may have fired with")
-    print("  #    no cache. Reset it so it reprocesses with the populated cache:")
+    if args.skip_search_artifacts:
+        print("  # 2. Search artifacts were NOT deployed (--skip-search-artifacts). Deploy now:")
+        print(f"  python scripts/deploy_search.py --config {args.config}")
+        print()
+    print("  # 3. Reset + run the indexer.")
     if os.name == "nt":
         print("  .\\scripts\\reset_indexer.ps1")
     else:
         print("  ./scripts/reset_indexer.sh")
     print()
-    print("  # 3. Verify everything is indexed:")
-    print(f"  python scripts/check_index.py --config {args.config} --coverage")
+    print("  # 4. Loop until coverage is 100% (or a deterministic failure shows up).")
+    print(f"  python scripts/heal_until_done.py --config {args.config}")
     print()
-    print("In production, Jenkinsfile.run handles steps 1-3 nightly + on demand:")
-    print(f"  python scripts/run_pipeline.py --config {args.config} --auto-heal")
+    print("  # 5. Verify coverage.")
+    print(f"  python scripts/check_index.py --config {args.config} --coverage")
     return 0
 
 

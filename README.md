@@ -115,9 +115,12 @@ Local prerequisites for running scripts manually:
 │   └── shared/                Skill implementations + utilities
 │
 ├── scripts/                   Operational tooling (Jenkins or laptop)
+│   ├── deploy.py              ★ ONE-COMMAND end-to-end deploy
+│   ├── bootstrap.py           Provision + RBAC + app settings + function code
+│   ├── heal_until_done.py     Loop indexer + force-reindex until 100%
 │   ├── preanalyze.py          Stage 1: DI + Vision, populates _dicache/
 │   ├── reconcile.py           Detect added / edited / deleted PDFs
-│   ├── run_pipeline.py        End-to-end orchestrator
+│   ├── run_pipeline.py        Daily operations orchestrator
 │   ├── check_index.py         Coverage + diagnostics
 │   ├── cosmos_writer.py       Cosmos DB persistence helper
 │   ├── deploy_search.py       Deploy index/skillset/datasource/indexer
@@ -163,7 +166,7 @@ Local prerequisites for running scripts manually:
 
 ---
 
-## First-time deployment
+## First-time deployment — ONE command
 
 ```bash
 # 1. Configure
@@ -174,20 +177,35 @@ cp deploy.config.example.json deploy.config.json
 az cloud set --name AzureUSGovernment
 az login
 
-# 3. Deploy function app code
-./scripts/deploy_function.sh deploy.config.json     # Linux/Mac
-# or
-./scripts/deploy_function.ps1 deploy.config.json    # Windows
-
-# 4. Deploy search artifacts (index, skillset, datasource, indexer)
-python scripts/deploy_search.py --config deploy.config.json
-
-# 5. Validate
-python scripts/smoke_test.py --config deploy.config.json
+# 3. ONE command does the whole end-to-end deploy
+python scripts/deploy.py --config deploy.config.json --auto-fix
 ```
 
-In production, steps 3–5 are run by `Jenkinsfile.deploy` on every push
-to `main`. See [docs/SETUP.md §4](docs/SETUP.md#4-jenkins).
+`deploy.py` runs the full pipeline in order: bootstrap (RBAC, Cosmos
+DB, Function App app settings incl. `AUTO_HEAL_ENABLED=true`, function
+code deploy) → preanalyze (DI + Vision cache) → deploy search artifacts
+→ reset + run indexer → heal-until-done loop → final coverage report.
+
+Exit code `0` = every PDF in the container is indexed. Exit code `1`
+means the heal loop detected a deterministic failure on specific PDFs
+(its output names them) — usually a Function App memory limit hit by
+the largest files; bump the App Service Plan SKU and re-run.
+
+For a partial deploy or to skip phases, see:
+
+```bash
+python scripts/deploy.py --help
+# --skip-bootstrap, --skip-preanalyze, --skip-heal-loop, etc.
+```
+
+The lower-level scripts (`bootstrap.py`, `deploy_function.{ps1,sh}`,
+`deploy_search.py`, `preanalyze.py`, `heal_until_done.py`,
+`check_index.py`) are still individually invokable. `scripts/deploy.py`
+just chains them in the right order with the right flags.
+
+In production, `Jenkinsfile.deploy` (one-time provision) and
+`Jenkinsfile.run` (nightly ops) both wrap these scripts. See
+[docs/SETUP.md §4](docs/SETUP.md#4-jenkins).
 
 ---
 
