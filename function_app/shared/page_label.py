@@ -46,7 +46,7 @@ def _embedding_version() -> str:
     return optional_env("EMBEDDING_MODEL_VERSION", "text-embedding-ada-002")
 
 
-# Equipment-id detection. PSEG manuals reference equipment by manufacturer
+# Equipment-id detection. Technical manuals reference equipment by manufacturer
 # part numbers ("GE-THQL-1120-2"), model numbers ("ABB-VD4-1250"), and
 # class codes ("NEMA 4X"). The single most common chatbot query shape on
 # technical manuals is "what does manual X say about model Y", so
@@ -60,8 +60,8 @@ _EQUIPMENT_ID_RE = re.compile(
     # Bounded quantifiers throughout. The previous form had an unbounded
     # `[A-Z0-9]*` followed by `\d[A-Z0-9-]{0,8}` — combined with the
     # leading `(?:[A-Z0-9]{1,8}-){0,3}`, the regex engine could backtrack
-    # quadratically on hyphenated equipment-heavy chunks (typical PSEG
-    # manual paragraph). Tightening the trailing run to `{0,8}` makes the
+    # quadratically on hyphenated equipment-heavy chunks (typical
+    # technical-manual paragraph). Tightening the trailing run to `{0,8}` makes the
     # whole pattern linear-time in chunk length.
     r"\b[A-Z]{2,5}-(?:[A-Z0-9]{1,8}-){0,3}[A-Z0-9]{0,8}\d[A-Z0-9-]{0,8}\b"
 )
@@ -80,7 +80,7 @@ def _detect_language(text: str) -> str:
     """Best-effort language code for the chunk.
 
     Cheap heuristic — looks for English stop-words. This is enough for
-    today's PSEG corpus (English-only) but lets a future Spanish or
+    the current corpus (English-only) but lets a future Spanish or
     French manual flag itself for filter routing without a full
     language-detect dependency. Returns ISO 639-1 codes when detected,
     "" when undetermined."""
@@ -234,7 +234,7 @@ SECTION_REF_RE = re.compile(
 
 # Page references: "page 18-25", "p. 215", "pp. 18-25", "page A-7".
 # Captures the page label (e.g. "18-25"). We accept both digit-only
-# and chapter-prefixed labels because PSEG manuals use both.
+# and chapter-prefixed labels because technical manuals use both.
 PAGE_REF_RE = re.compile(
     r"\b(?:page|pages|pp?\.?)\s+([A-Z]{0,3}[\-\.]?\d[\w\-\.]{0,8})",
     re.IGNORECASE,
@@ -844,7 +844,7 @@ def _printed_label_for_page(source_path: str, physical_page: int | None) -> str 
 #
 # These regexes are used to mine page-1 paragraphs for document-level
 # fields the chatbot must know to answer "is this the current revision?".
-# Tolerant: PSEG manuals format these many ways across the corpus.
+# Tolerant: technical manuals format these many ways across the corpus.
 _REVISION_RE = re.compile(
     r"\b(?:rev(?:ision)?|version|issue|ver)\.?\s*[:\-]?\s*([A-Z0-9][\w\.\-]{0,15})",
     re.IGNORECASE,
@@ -962,7 +962,7 @@ def cover_metadata_for_pdf(source_path: str) -> dict[str, str]:
     number. Returns a dict with three string fields, each '' when not
     extractable.
 
-    Why this matters: PSEG technical manuals are revised over decades.
+    Why this matters: technical manuals are revised over decades.
     The chatbot must be able to filter retrieval to the current revision
     of a manual; the LLM cannot tell a 1998 manual from a 2024 manual
     by inspecting page text alone. Surfacing these as filterable index

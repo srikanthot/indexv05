@@ -1122,7 +1122,7 @@ check("heading-anchor: fallback to min(pages) when no heading",
 # ---------- 22. heading-stack dedup (h1 == h2 bug fix) ----------
 section("22. heading-stack dedup")
 
-# Production scenario: PSEG manuals tag the chapter title twice — once
+# Production scenario: technical manuals tag the chapter title twice — once
 # as DI role=title (level 1) and again as role=sectionHeading without a
 # numeric prefix (would fall to level 2 via _guess_heading_level). The
 # OLD walker pushed both, yielding header_1 == header_2. The NEW walker
@@ -1608,7 +1608,7 @@ _pl_mod._ANALYSIS_CACHE[_COVER_KEY] = {
     "paragraphs": [
         {"content": "Information and Requirements for Electric Service",
          "boundingRegions": [{"pageNumber": 1}]},
-        {"content": "Document Number: PSEG-IRES-001",
+        {"content": "Document Number: ACME-IRES-001",
          "boundingRegions": [{"pageNumber": 1}]},
         {"content": "Revision: 5.02",
          "boundingRegions": [{"pageNumber": 1}]},
@@ -1626,8 +1626,8 @@ meta = cover_metadata_for_pdf(_COVER_KEY)
 check("cover: document_revision = '5.02'",
       meta["document_revision"] == "5.02",
       f"got {meta['document_revision']!r}")
-check("cover: document_number = 'PSEG-IRES-001'",
-      meta["document_number"] == "PSEG-IRES-001",
+check("cover: document_number = 'ACME-IRES-001'",
+      meta["document_number"] == "ACME-IRES-001",
       f"got {meta['document_number']!r}")
 check("cover: effective_date = '2024-03-26'",
       meta["effective_date"] == "2024-03-26",

@@ -104,7 +104,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
                 level = 1 if role == "title" else _guess_heading_level(title, local_stack)
 
                 # Dedup guard: skip pushing a heading whose normalized text
-                # already exists at any level on the stack. PSEG manuals
+                # already exists at any level on the stack. Technical manuals
                 # frequently emit the chapter title twice — once tagged
                 # `title` (level 1) and again as a `sectionHeading` whose
                 # numeric prefix is missing, which the fallback in

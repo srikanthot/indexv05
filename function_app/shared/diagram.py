@@ -153,8 +153,8 @@ def _decode_b64_once(image_b64: str) -> bytes | None:
 # returned to indexer with no Python traceback, because the OS killed the
 # worker process). Skipping phash on huge images sacrifices cross-PDF
 # perceptual dedup for those specific figures, but keeps the worker alive.
-# 8 MB raw is well above any realistic PSEG figure crop -- crops in their
-# corpus are typically 100KB-2MB.
+# 8 MB raw is well above any realistic figure crop -- crops in technical
+# manuals are typically 100KB-2MB.
 _PHASH_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
 
 # Maximum pixels we'll allow PIL to decompress. PIL's default
