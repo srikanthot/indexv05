@@ -1610,7 +1610,7 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 # Per-item pdf_total_pages so the analyze-diagram skill's
                 # input mapping (`/document/enriched_figures/*/pdf_total_pages`)
                 # resolves cleanly. Without it, the indexer logs a warning
-                # per figure -- ~167 warnings on a typical PSEG manual.
+                # per figure -- ~167 warnings on a typical technical manual.
                 "pdf_total_pages": pdf_total_pages,
                 # Cover metadata propagated so analyze-diagram can stamp
                 # document_revision / effective_date / document_number on

@@ -75,7 +75,7 @@ def test_running_artifacts_strips_revision_line():
 
 
 def test_running_artifacts_strips_copyright():
-    text = "Copyright 2024 PSEG\nBody content here.\n© 2023 ACME Corp"
+    text = "Copyright 2024 ExampleCo\nBody content here.\n© 2023 ACME Corp"
     cleaned = _strip_running_artifacts(text)
     assert "Body content here." in cleaned
     assert "Copyright" not in cleaned, cleaned

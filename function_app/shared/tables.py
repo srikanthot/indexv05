@@ -25,13 +25,13 @@ MAX_TABLE_CHARS = 3000
 # table doesn't add retrieval value as 3 separate row records.
 #
 # Upper bound (5000): matches _MAX_TABLE_ROWS, the defensive cap on DI's
-# rowCount. PSEG technical manuals (pricing schedules, conductor spec
+# rowCount. Technical manuals (pricing schedules, conductor spec
 # tables, equipment rating tables) routinely have 100-500-row tables --
 # those rows ARE the high-value retrieval content (queries like
 # "200A 4-wire 277/480V conductor 4/0" need to hit the specific row).
 #
 # Audit 2026-05-13: previous cap of 80 was excluding 70,000+ row records
-# across the PSEG corpus, causing the index to come in at ~21K chunks
+# across the corpus, causing the index to come in at ~21K chunks
 # vs v04's 92K. Per-row emission for large tables is the right call for
 # technical-manual retrieval -- index size grows but the rows are
 # exactly the lookup keys the chatbot needs.
@@ -95,7 +95,7 @@ def _table_to_grid(table: dict[str, Any]) -> list[list[str]]:
 def _header_row_count(table: dict[str, Any]) -> int:
     """How many leading rows of the table are header rows.
 
-    PSEG manuals routinely use 2-row or 3-row table headers (super-header
+    Technical manuals routinely use 2-row or 3-row table headers (super-header
     + sub-header), e.g. a "Voltage" super-header spanning two columns
     above "120/240" and "277/480" sub-headers. The naive "row 0 is the
     header" assumption flattens that hierarchy and the chunk no longer

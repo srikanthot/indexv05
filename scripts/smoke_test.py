@@ -478,7 +478,7 @@ def _run_cloud(args, repo_root: Path) -> int:
             print(f"  {facet_field}: facet query failed ({exc})")
 
     # Smoke-check the new Sprint-1 safety_callout filter actually returns
-    # something — if zero rows have callouts on a real PSEG manual, the
+    # something — if zero rows have callouts on a real technical manual, the
     # extractor probably regressed.
     callout_count = _record_count(
         endpoint, token, index_name,

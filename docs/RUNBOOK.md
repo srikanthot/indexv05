@@ -1981,7 +1981,7 @@ setting metadata then re-running the pipeline (`reconcile` will detect
 the metadata change as an edit and re-index).
 
 > Tip: keep a CSV of filename → taxonomy and a small script that sets
-> metadata in bulk. The PSEG-style filename prefix (e.g. `GD-AS-ATM`)
+> metadata in bulk. A structured filename prefix (e.g. `GD-AS-ATM`)
 > can be parsed mechanically; the script writes `operationalarea=Gas
 > Distribution` for everything starting with `GD-`, etc.
 
@@ -2059,10 +2059,9 @@ PDFs render these in three different ways:
 type 2 in `diagram_description` (vision narrates them). Neither is a
 structured equation object.
 
-**To capture them as math:** State of the art uses
-[MathPix OCR](https://mathpix.com/) or the
-[Marker](https://github.com/VikParuchuri/marker) library, which
-recognise equation regions and emit LaTeX. Both are external
+**To capture them as math:** State of the art uses dedicated equation-OCR
+tools (commercial APIs or open-source LaTeX-recognition libraries) which
+recognise equation regions and emit LaTeX. Both classes are external
 dependencies (paid API or 1+GB model). Integrating either would mean
 adding a `latex` or `equation_text` field and a new
 equation-recognition skill in preanalyze.
@@ -2080,7 +2079,7 @@ is rarely the search target.
 | Step-numbered procedures ("Step 3:") | ⚠️ in body text | Sequence preserved; no per-step record |
 | Acronyms + glossary entries | ⚠️ in body text | No dedicated extraction |
 | Part numbers / model numbers | ⚠️ in body text + vision OCR | Vision pulls them from nameplates; body text retains them inline |
-| Cross-document references ("see PSEG-GD-2024-01") | ⚠️ in body text | No automatic linking |
+| Cross-document references ("see GD-2024-01") | ⚠️ in body text | No automatic linking |
 | Footnotes | ⚠️ may merge with body | DI's `role: "footnote"` not specially handled |
 | Index / TOC entries | ⚠️ marked `processing_status="toc_like"` | Filterable so you can exclude from results |
 | Multiple languages in same manual | ⚠️ no language detection field | All chunks indexed identically |
