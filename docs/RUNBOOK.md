@@ -74,38 +74,40 @@ is depth.
 ## 1. Architecture overview
 
 ```
-SharePoint ──(automated upstream)──► Blob container (PDFs)
-                                          │
-                                          │  BlobCreated / BlobDeleted
-                                          ▼
-                              ┌──────────────────────┐
-                              │  Event Grid          │
-                              │  + Storage Queue     │
-                              └──────────────────────┘
-                                          │
-                                          ▼
-                              ┌──────────────────────┐
-                              │  Container App Job   │   long-running, no timeout
-                              │  (event-triggered)   │   1) preanalyze --only <pdf>
-                              │                      │   2) POST /indexers/run
-                              └──────────────────────┘
-                                          │
-                                          │  writes _dicache/* alongside PDFs
-                                          ▼
-                              ┌──────────────────────┐
-                              │  Azure AI Search     │
-                              │  Indexer ─► Skillset │
-                              │  ─► Index            │
-                              └──────────────────────┘
-                                          │
-                                          │  custom skills hit:
-                                          ▼
-                              ┌──────────────────────┐
-                              │  Azure Function App  │
-                              │  (Python 3.11)       │
-                              │  6 WebApi skills     │
-                              │  reads cache + AOAI  │
-                              └──────────────────────┘
+Upload PDFs ──► Blob container (PDFs)
+                    │
+                    ▼
+       ┌─────────────────────────────┐
+       │  Jenkins agent OR laptop    │   runs:
+       │  python scripts/deploy.py   │     bootstrap → preanalyze
+       │  (one command)              │     → deploy_search → reset_indexer
+       │                             │     → heal_until_done → check_index
+       └─────────────────────────────┘
+                    │
+                    │  writes _dicache/* alongside the PDFs
+                    ▼
+       ┌─────────────────────────────┐
+       │  Azure AI Search            │
+       │  Indexer ─► Skillset        │   schedule: PT15M
+       │  ─► Index                   │
+       └─────────────────────────────┘
+                    │
+                    │  custom skills hit:
+                    ▼
+       ┌─────────────────────────────┐
+       │  Azure Function App         │
+       │  (Python 3.11, Linux)       │   6 WebApi skills:
+       │  reads _dicache/ + AOAI     │   page label, process-document,
+       │                             │   analyze-diagram, process-table,
+       │                             │   build-semantic-string, summary
+       └─────────────────────────────┘
+                    │
+                    │  status persistence
+                    ▼
+       ┌─────────────────────────────┐
+       │  Cosmos DB (optional)       │   run history + per-PDF state
+       │  → Power BI dashboard       │   for operators / managers
+       └─────────────────────────────┘
 ```
 
 Four peer record types live in one index:
@@ -172,21 +174,26 @@ X7 on the overcurrent relay?"*, generic tags fail. So we keep custom
 skills for the parts the wizard can't do, and use built-ins for the
 parts it can.
 
-### 2.3 Why Azure Container Apps Jobs (and not Functions) for automation
+### 2.3 Why a Jenkins agent (and not Functions or Container Apps) for automation
 
 Production automation has to handle a 2,000-page PDF that takes 2–4
-hours to preanalyze.
+hours to preanalyze. Hosting options considered:
 
 | Host                          | Execution time limit | Verdict for preanalyze |
 |-------------------------------|----------------------|------------------------|
 | Azure Functions (Consumption) | 10 min               | ❌ fails mid-vision |
 | Azure Functions (Premium)     | 30 min               | ❌ fails on large PDFs |
 | Azure App Service WebJob      | indefinite, but always-warm cost | ⚠ wasteful at idle |
-| **Azure Container Apps Job**  | **no limit**         | ✅ pay-per-run, scales on queue |
+| Azure Container Apps Job      | no limit             | ⚠ extra infra to provision and monitor |
+| **Jenkins agent VM**          | **no limit**         | ✅ already provisioned for CI; same identity model |
 | Azure Batch                   | indefinite           | ⚠ heavyweight for this scale |
 
-Container Apps Jobs match the workload shape: long-running, bursty,
-event-triggered, idle most of the day.
+The Jenkins agent matches the workload shape (long-running, bursty,
+idle most of the day) and reuses CI infra the team already operates.
+`Jenkinsfile.deploy` runs on push-to-main; `Jenkinsfile.run` runs the
+operational pipeline nightly on a cron. Both call the same scripts a
+developer runs from their laptop — no Container Apps, Event Grid, or
+Storage Queue infrastructure required.
 
 ### 2.4 Why Azure OpenAI ada-002 for embeddings (still, in 2026)
 
@@ -287,15 +294,13 @@ VNet integration to reach private endpoints.
 | POST body limit: ~50 MB                     | Use `urlSource` + SAS for big PDFs |
 | Service-side analyze timeout: ~30 min       | OK for our 5–15 min typical |
 
-### 3.5 Storage / Event Grid
+### 3.5 Storage
 
 | Limitation                                   | Impact |
 |----------------------------------------------|--------|
-| Storage Queue message: 64 KB                 | We pass blob name only; fine |
-| Queue TTL default: 7 days                    | Set explicitly to avoid surprises |
-| Event Grid delivery: **at-least-once**       | Idempotency in worker required |
-| Event Grid retry budget: ~24 h               | DLQ after exhaustion |
 | Blob soft-delete retention: 7–365 days       | Set to 30 days for our case |
+| Per-blob max size: 5 TB                      | Far above any realistic PDF |
+| Blob HEAD/GET: needs `Storage Blob Data Reader` for AAD | RBAC granted to Function App MI + Search service MI |
 
 ### 3.6 Azure Government Cloud differences
 
@@ -326,29 +331,26 @@ subscription (`az account set --subscription <id>`).
 | # | Resource                                   | Purpose | SKU / config we use |
 |---|--------------------------------------------|---------|---------------------|
 | 1 | Resource group                             | Container | RG in same region as data sources |
-| 2 | Storage account                            | PDFs + `_dicache/` cache + queue | Standard_LRS; **soft-delete ON**; HNS optional |
+| 2 | Storage account                            | PDFs + `_dicache/` cache | Standard_LRS; **soft-delete ON** |
 | 3 | Blob container                             | Source PDFs | name = `manuals` (or per `deploy.config.json`) |
-| 4 | Storage Queue                              | Event-driven worker buffer | name = `pdf-events` |
-| 5 | Azure AI Search                            | Index + indexer + skillset | Standard (S1) for prod; system-assigned MI |
-| 6 | Azure OpenAI                               | Embeddings + vision + summary | Standard; deployments below |
-| 7 | AOAI deployment: `text-embedding-ada-002`  | Embeddings | 1,536 dims; ≥240K TPM |
-| 8 | AOAI deployment: `gpt-4.1`                 | Vision + summary | ≥80K TPM |
-| 9 | Document Intelligence                      | Layout extraction | Standard (S0); region with prebuilt-layout |
-| 10 | AI Services multi-service                  | Bills the built-in Layout skill | Standard (S0) |
+| 4 | Azure AI Search                            | Index + indexer + skillset | Standard (S1) for prod; system-assigned MI |
+| 5 | Azure OpenAI                               | Embeddings + vision + summary | Standard; deployments below |
+| 6 | AOAI deployment: `text-embedding-ada-002`  | Embeddings | 1,536 dims; ≥240K TPM |
+| 7 | AOAI deployment: `gpt-4.1`                 | Vision + summary | ≥80K TPM |
+| 8 | Document Intelligence                      | Layout extraction | Standard (S0); region with prebuilt-layout |
+| 9 | AI Services multi-service                  | Bills the built-in Layout skill | Standard (S0) |
+| 10 | Function App (Linux, Python 3.11, v4)     | Hosts custom skills | Consumption (Y1); system-assigned MI; **AUTO_HEAL_ENABLED=true** |
+| 11 | Application Insights                      | Function App telemetry | Workspace-based |
+| 12 | Cosmos DB (optional)                      | Run history + per-PDF state for the Power BI dashboard | Serverless or low RU; SQL API; database `indexing` |
 
-> **Note on rows 9 + 10.** These can be **the same resource**. A multi-service `kind=CognitiveServices` account bundles Document Intelligence with the AI Services billing surface, so a single account fills both roles. This is the common layout in **GCC High** and Azure Gov, where teams typically provision one multi-service account rather than two separate resources. In `deploy.config.json`, point `documentIntelligence.endpoint` and `aiServices.subdomainUrl` at the same URL; in `scripts/assign_roles.sh`, set `DI` and `AISVC` to the same name. AOAI (row 6) is always a separate `kind=OpenAI` resource — it cannot live inside a multi-service account.
-| 11 | Function App (Linux, Python 3.11, v4)      | Hosts custom skills | Consumption (Y1); system-assigned MI |
-| 12 | Application Insights                       | Function App telemetry | Workspace-based |
-| 13 | Container Apps environment                 | Hosts automation jobs | Consumption profile |
-| 14 | Container App Job (event-triggered)        | Per-PDF preanalyze | replicas 0–3, queue scaler |
-| 15 | Container App Job (cron)                   | Nightly reconciliation | cron `0 2 * * *` |
-| 16 | Event Grid System Topic                    | Blob events fan-out | On the storage account |
-| 17 | Event Grid Subscription ×2                 | BlobCreated, BlobDeleted | Filter `.pdf`, exclude `_dicache/` |
+> **Note on rows 8 + 9.** These can be **the same resource**. A multi-service `kind=CognitiveServices` account bundles Document Intelligence with the AI Services billing surface, so a single account fills both roles. This is the common layout in **GCC High** and Azure Gov, where teams typically provision one multi-service account rather than two separate resources. In `deploy.config.json`, point `documentIntelligence.endpoint` and `aiServices.subdomainUrl` at the same URL; in `scripts/assign_roles.py`, the script handles same-name or distinct-name cases automatically. AOAI (row 5) is always a separate `kind=OpenAI` resource — it cannot live inside a multi-service account.
+
+> **What the repo does NOT need.** No Container Apps, no Container App Jobs, no Event Grid, no Storage Queue, no Service Bus, no ACR. The pipeline runs from a Jenkins agent (or a developer laptop) calling `python scripts/deploy.py`. Earlier designs explored an event-driven Container Apps Jobs architecture; production simplified to the Jenkins cron model because it reuses CI infra and has no extra moving parts.
 
 ### 4.2 Region choice
 
-Use one region for all of: storage, search, function, container apps,
-queue, event grid. Cross-region traffic costs money and adds latency.
+Use one region for all of: storage, search, function, AOAI, DI, Cosmos.
+Cross-region traffic costs money and adds latency.
 
 For Azure OpenAI, **gpt-4.1 region availability is the binding
 constraint**. Pick a region where gpt-4.1 is available (check
@@ -369,7 +371,7 @@ PREFIX=mmman         # used for naming
 az account set --subscription "$SUB"
 az group create -n "$RG" -l "$LOC"
 
-# 1. Storage account + container + soft-delete + queue
+# 1. Storage account + container + soft-delete
 az storage account create \
   -n ${PREFIX}stg -g "$RG" -l "$LOC" \
   --sku Standard_LRS --kind StorageV2 --allow-blob-public-access false
@@ -378,8 +380,6 @@ az storage account blob-service-properties update \
   --enable-delete-retention true --delete-retention-days 30
 az storage container create \
   --account-name ${PREFIX}stg -n manuals --auth-mode login
-az storage queue create \
-  --account-name ${PREFIX}stg -n pdf-events --auth-mode login
 
 # 2. Azure AI Search (Standard, MI on)
 az search service create \
@@ -401,7 +401,7 @@ az cognitiveservices account deployment create \
   --model-name gpt-4.1 --model-version <current> --model-format OpenAI \
   --sku-name Standard --sku-capacity 80
 
-# 4. Document Intelligence
+# 4. Document Intelligence (skip if using a single multi-service account)
 az cognitiveservices account create \
   -n ${PREFIX}-di -g "$RG" -l "$LOC" --kind FormRecognizer --sku S0 \
   --custom-domain ${PREFIX}-di --yes
@@ -425,17 +425,19 @@ az functionapp create \
   --app-insights ${PREFIX}-appi
 az functionapp identity assign -g "$RG" -n ${PREFIX}-func
 
-# 8. Container Apps environment
-az containerapp env create \
-  -n ${PREFIX}-cae -g "$RG" -l "$LOC"
-
-# 9. Container App Jobs are deployed by `scripts/deploy_jobs.sh`
-#    (see §16). They reference an image in ACR — create one too:
-az acr create -n ${PREFIX}acr -g "$RG" --sku Basic --admin-enabled false
+# 8. Cosmos DB (optional, for run history + Power BI dashboard)
+az cosmosdb create -n ${PREFIX}-cosmos -g "$RG" \
+  --kind GlobalDocumentDB --default-consistency-level Session \
+  --locations regionName="$LOC" failoverPriority=0
+az cosmosdb sql database create -a ${PREFIX}-cosmos -g "$RG" -n indexing
+# Containers (indexing_run_history, indexing_pdf_state) auto-create on first write
 ```
 
 After these commands run, fill `deploy.config.json` with the resulting
-endpoints and resource IDs, then proceed to §10.
+endpoints and resource IDs, then proceed to §10. The `python
+scripts/deploy.py` path (§10.0) handles app settings, role
+assignments, function code, search artifacts, preanalyze, and indexer
+in one call.
 
 ### 4.4 What Storage soft-delete actually does for us
 
@@ -464,12 +466,17 @@ All outbound auth is AAD. Create these once per environment.
 | Search service MI       | Storage account           | Storage Blob Data Reader                                   | Indexer reads PDFs |
 | Search service MI       | Azure OpenAI              | Cognitive Services OpenAI User                             | Embedding skill + vectorizer |
 | Search service MI       | AI Services account       | Cognitive Services User                                    | Built-in Layout skill billing |
-| Container App Job MI    | Storage account           | Storage Blob Data Contributor + Storage Queue Data Message Processor | Reads PDFs, writes cache, drains queue |
-| Container App Job MI    | Azure OpenAI              | Cognitive Services OpenAI User                             | Vision in preanalyze |
-| Container App Job MI    | Document Intelligence     | Cognitive Services User                                    | DI in preanalyze |
-| Container App Job MI    | Search service            | Search Service Contributor                                 | POST `/indexers/run` |
-| Deploying principal     | Search service            | Search Service Contributor + Search Index Data Contributor | PUT search artifacts |
-| Deploying principal     | Function App's RG         | Contributor                                                | Set App Settings, fetch function key |
+| Jenkins agent MI (or laptop user) | Storage account     | Storage Blob Data Contributor                               | preanalyze writes `_dicache/`; reconcile purges blobs |
+| Jenkins agent MI (or laptop user) | Azure OpenAI        | Cognitive Services OpenAI User                              | Vision calls during preanalyze |
+| Jenkins agent MI (or laptop user) | Document Intelligence | Cognitive Services User                                   | DI submissions during preanalyze |
+| Jenkins agent MI (or laptop user) | Search service      | Search Service Contributor + Search Index Data Contributor  | PUT search artifacts; delete chunks during reconcile |
+| Jenkins agent MI (or laptop user) | Cosmos DB account   | Cosmos DB Built-in Data Contributor                         | Write run history + per-PDF state |
+| Deploying principal               | Function App's RG   | Contributor                                                 | Set App Settings, fetch function key |
+
+All of these are granted in one shot by
+`python scripts/assign_roles.py --config deploy.config.json`. The
+script reads identities from the config, looks up principal IDs
+automatically, and skips assignments that already exist.
 
 Role propagation is not instantaneous. After grants, **wait 5–10
 minutes** before retrying a failed call. This is the most common
@@ -519,26 +526,30 @@ tables + summary). 200 manuals ≈ 1M records ≈ 5 GB. S1 is fine.
 | `process-document-skill` `degreeOfParallelism`     | 2     | DI cache reads are I/O bound but cheap |
 | `analyze-diagram-skill` `degreeOfParallelism`      | 4     | AOAI vision TPM ceiling |
 | `extract-page-label-skill` `batchSize`             | 5     | Cheap CPU work |
-| Container App Job replicas (event-triggered)       | 0–3   | Cap concurrent vision per worker × replicas ≤ TPM |
 | `preanalyze.py --vision-parallel`                  | 40    | Empirically saturates 80K TPM without 429 storms |
+| `preanalyze.py --concurrency` (parallel PDFs)      | 3     | Default in `deploy.py`; raise carefully on bigger AOAI quotas |
+| `heal_until_done.py --max-iterations`              | 8     | Caps healing loop duration; raise for very large initial loads |
 
 ---
 
 ## 7. Local prerequisites
 
-Tools needed on the machine that runs deploy / preanalyze:
+Tools needed on the machine that runs deploy / preanalyze (Jenkins
+agent or developer laptop — same list):
 
 - Azure CLI (`az`) — logged in via `az login`
-- Azure Functions Core Tools v4 (`func`)
+- Azure Functions Core Tools v4 (`func`) — used by `deploy_function.{sh,ps1}`
 - Python 3.11+
-- `jq` (used by `deploy_function.sh`)
+- `jq` (used by `deploy_function.sh` on Linux/Mac)
 - PowerShell 5.1+ or bash
-- Docker (only if you build the Container App Job image locally)
+- LibreOffice (optional) — enables figure extraction from DOCX/PPTX/XLSX
+  by auto-converting to PDF first. Pipeline works without it; non-PDF
+  formats just won't have figures extracted.
 
 Python deps (`pip install -r requirements.txt`):
 
 - `azure-identity`, `httpx`, `azure-storage-blob`, `pymupdf`,
-  `azure-functions`, `ruff` (dev)
+  `azure-functions`, `azure-cosmos`, `ruff` (dev)
 
 ---
 
@@ -546,12 +557,12 @@ Python deps (`pip install -r requirements.txt`):
 
 ```
 function_app/                 Python Azure Functions app (custom skills)
-  function_app.py             HTTP routes -> skill handlers
+  function_app.py             HTTP routes + auto-heal timer
   host.json
   requirements.txt
   local.settings.json.example
   shared/
-    skill_io.py               WebApi envelope + error translation
+    auto_heal.py              Timer-triggered self-recovery
     credentials.py            Managed identity helper (lazy)
     config.py                 Typed env-var access
     aoai.py                   Azure OpenAI client (MI-first)
@@ -575,26 +586,43 @@ search/                       Azure AI Search REST bodies (templated)
   indexer.json
 
 scripts/
-  deploy_function.sh / .ps1   Publish function code + apply App Settings
+  deploy.py                   ★ ONE-COMMAND end-to-end deploy
+  bootstrap.py                Provision + RBAC + app settings + function code
+  heal_until_done.py          Loop indexer + force-reindex until 100%
+  preanalyze.py               Stage 1: DI + Vision, populates _dicache/
+  reconcile.py                Detect added / edited / deleted PDFs
+  run_pipeline.py             Daily operations orchestrator (used by Jenkinsfile.run)
+  check_index.py              Coverage + diagnostics
+  cosmos_writer.py            Cosmos DB persistence helper
   deploy_search.py            Render + PUT search artifacts via AAD
-  preanalyze.py               Offline DI + vision pre-analysis
-  run_preanalyze.sh / .ps1    Preanalyze wrappers
-  check_index.py              Index health report
-  smoke_test.py               Post-deploy validation
-  reset_indexer.ps1           Reset + run indexer
-  preflight.py                Checks config + role assignments
-  diagnose.py                 Misc diagnostics
+  deploy_function.sh / .ps1   Publish function code + apply App Settings
+  smoke_test.py               Post-deploy validation gate
+  reset_indexer.sh / .ps1     Reset + run indexer
+  diagnose.py                 Health probe (function app + indexer)
+  diagnose_403.py             Targeted 403 diagnosis for deploy_search
+  inspect_pdf.py              Per-PDF cache + index inspection
+  preflight.py                Pre-deploy environment validation
+  assign_roles.py             One-shot RBAC bootstrapper (reads config)
+  reap_stale_rows.py          Cleanup stale index records
+  cleanup_environment.py      Fresh-start cleanup of search artifacts + cache
+  convert.py                  DOCX/PPTX/XLSX -> PDF via LibreOffice
+  force_reindex_blobs.ps1     Force reindex of specific PDFs
+  rerun_failed_docs.ps1       Surgical retry of failed PDFs
+  pipeline_lock.py            Cross-script pipeline lock
 
 tests/
   test_unit.py
   test_e2e_simulator.py
+  test_filename_spaces.py
+  test_techmanual_capture.py
 
 docs/
-  ARCHITECTURE.md
-  SEARCH_INDEX_GUIDE.md
-  RUNBOOK.md                  This file
-  validation.md
+  RUNBOOK.md                  This file (everything operational)
 
+Jenkinsfile.deploy            CI pipeline (push to main)
+Jenkinsfile.run               CI pipeline (nightly cron + manual)
+.github/workflows/ci.yml      PR gate: pytest + ruff
+CHATBOT_INTEGRATION.md        Hand-off spec for the chatbot dev team
 deploy.config.example.json
 requirements.txt
 ruff.toml
@@ -634,28 +662,90 @@ it live at deploy time.
 
 ## 10. First-deploy bootstrap
 
+Two paths — pick one. **10.0** is the production path (one command,
+chains every step). **10.1 onwards** is the manual line-by-line
+sequence for when you want to run a single stage at a time.
+
+### 10.0 ONE command (recommended)
+
+```bash
+# 1. Configure (one-time)
+cp deploy.config.example.json deploy.config.json
+# Fill in identifiers for your environment. Never commit this file.
+
+# 2. Authenticate
+az cloud set --name AzureUSGovernment    # skip if commercial cloud
+az login
+az account set --subscription "<your-sub-id>"
+
+# 3. One-shot RBAC (only the first time, on a fresh env)
+python scripts/assign_roles.py --config deploy.config.json
+# wait 10 minutes for RBAC propagation
+
+# 4. ONE command does everything else
+python scripts/deploy.py --config deploy.config.json --auto-fix
+```
+
+`deploy.py` runs in order:
+1. **bootstrap** — RBAC sanity check, Cosmos DB database, Function App
+   app settings (`AUTO_HEAL_ENABLED=true`), function code deploy
+2. **preanalyze** — DI + GPT-4 Vision, populates `_dicache/`
+3. **deploy_search** — index, skillset, datasource, indexer
+4. **reset_indexer** — fresh full indexer pass against the populated cache
+5. **heal_until_done** — loop until every PDF has a `summary` record
+6. **check_index** — final coverage report
+
+Exit code 0 = every PDF in the container is indexed. Exit code 1 = a
+deterministic failure on specific PDFs (output names them); usually a
+Function App memory hit on the biggest files — bump the App Service
+Plan SKU and re-run.
+
+Skip flags for partial re-runs:
+
+```bash
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap        # infra + code already deployed
+python scripts/deploy.py --config deploy.config.json --skip-preanalyze       # cache already complete
+python scripts/deploy.py --config deploy.config.json --skip-heal-loop        # deploy + trigger once, no looping
+```
+
+For everything else, jump to §11. The rest of §10 is the manual stage-by-stage walkthrough.
+
 ### 10.1 Sign in
 
 ```bash
 az login
 # For Gov Cloud:
 # az cloud set --name AzureUSGovernment && az login
+az account set --subscription "<your-sub-id>"
 ```
 
-### 10.2 Preflight check
+### 10.2 Grant RBAC (one-time per environment)
+
+```bash
+python scripts/assign_roles.py --config deploy.config.json
+```
+
+Reads `deploy.config.json`, discovers principal IDs of every managed
+identity, and assigns the roles from §5. Idempotent. After this,
+**wait 10 minutes** for propagation before the next step.
+
+### 10.3 Preflight check
 
 ```bash
 python scripts/preflight.py --config deploy.config.json
 ```
 
 Verifies the resources from §4 exist and the role assignments from §5
-are in place.
+are in place. Exits non-zero with a clear message if anything is off.
 
-### 10.3 Deploy the Function App code
+### 10.4 Deploy the Function App code
 
 ```bash
-scripts/deploy_function.sh deploy.config.json
-# Windows: .\scripts\deploy_function.ps1 -Config .\deploy.config.json
+# Linux/Mac:
+bash scripts/deploy_function.sh deploy.config.json
+
+# Windows:
+.\scripts\deploy_function.ps1 -Config .\deploy.config.json
 ```
 
 Publishes the Python package and applies App Settings:
@@ -666,10 +756,38 @@ AOAI_ENDPOINT, AOAI_API_VERSION, AOAI_CHAT_DEPLOYMENT, AOAI_VISION_DEPLOYMENT
 DI_ENDPOINT, DI_API_VERSION
 SEARCH_ENDPOINT, SEARCH_INDEX_NAME
 SKILL_VERSION
+AUTO_HEAL_ENABLED=true
 APPLICATIONINSIGHTS_CONNECTION_STRING
 ```
 
-### 10.4 Deploy the Search artifacts
+### 10.5 Pre-analyze the PDFs
+
+```bash
+python scripts/preanalyze.py --config deploy.config.json --incremental
+```
+
+Runs DI + GPT-4 Vision on every PDF that doesn't yet have a complete
+cache. `--incremental` skips fully-cached PDFs, so re-running picks up
+where it left off.
+
+Cache artifacts land under `<container>/_dicache/`:
+
+| Blob                                      | Contents |
+|-------------------------------------------|----------|
+| `_dicache/<pdf>.di.json`                  | Full DI layout result |
+| `_dicache/<pdf>.crop.<fig>.json`          | Per-figure base64 PNG + bbox |
+| `_dicache/<pdf>.vision.<fig>.json`        | Per-figure GPT-4V JSON |
+| `_dicache/<pdf>.output.json`              | Final assembled output (= "done" marker) |
+
+For phased runs (rare; useful only when debugging one stage):
+
+```bash
+python scripts/preanalyze.py --config deploy.config.json --phase di --concurrency 3
+python scripts/preanalyze.py --config deploy.config.json --phase vision --vision-parallel 40
+python scripts/preanalyze.py --config deploy.config.json --phase output
+```
+
+### 10.6 Deploy the Search artifacts
 
 ```bash
 python scripts/deploy_search.py --config deploy.config.json
@@ -685,28 +803,35 @@ key live, then `PUT`s four artifacts via AAD:
 
 Idempotent. Fails loud if any placeholder is unrendered.
 
-### 10.5 Pre-analyze the PDFs
+### 10.7 Reset + run the indexer
 
 ```bash
-python scripts/preanalyze.py --config deploy.config.json --phase di --concurrency 3
-python scripts/preanalyze.py --config deploy.config.json --phase vision --vision-parallel 40
-python scripts/preanalyze.py --config deploy.config.json --phase output
+# Linux/Mac:
+bash scripts/reset_indexer.sh
+
+# Windows:
+.\scripts\reset_indexer.ps1
 ```
 
-Cache artifacts land under `<container>/_dicache/`:
+Forces a fresh full pass over every blob with the new skillset +
+populated cache.
 
-| Blob                                      | Contents |
-|-------------------------------------------|----------|
-| `_dicache/<pdf>.di.json`                  | Full DI layout result |
-| `_dicache/<pdf>.crop.<fig>.json`          | Per-figure base64 PNG + bbox |
-| `_dicache/<pdf>.vision.<fig>.json`        | Per-figure GPT-4V JSON |
-| `_dicache/<pdf>.output.json`              | Final assembled output (= "done" marker) |
-
-### 10.6 Run the indexer + validate
+### 10.8 Heal until done
 
 ```bash
-python scripts/deploy_search.py --config deploy.config.json --run-indexer
-python scripts/smoke_test.py      --config deploy.config.json
+python scripts/heal_until_done.py --config deploy.config.json
+```
+
+Polls coverage, bumps any stuck blobs, retriggers the indexer, repeats
+until every PDF has a `summary` record (or two consecutive identical
+stuck-set iterations, which signals a deterministic failure to
+investigate).
+
+### 10.9 Validate
+
+```bash
+python scripts/smoke_test.py --config deploy.config.json
+python scripts/check_index.py --config deploy.config.json --coverage
 ```
 
 `smoke_test.py` triggers the indexer, waits for `status=success`, then
@@ -1036,125 +1161,71 @@ az rest --method get \
 
 ---
 
-## 16. Production automation — add / update / delete
+## 16. Production automation — Jenkins pipelines
 
 In production the operator does not run preanalyze or trigger the
-indexer manually. SharePoint→blob is automated upstream; everything
-from the blob container onwards must also be automated.
+indexer manually. Jenkins runs everything on a nightly cron, with
+manual "Build Now" available for catch-up. See §6 for one-time
+Jenkins agent setup.
 
-### 16.1 The correctness problem with naïve cron
+### 16.1 Correctness for add / update / delete
 
-| Event | Blob emits | What we need to do | Naïve cron behaviour |
-|---|---|---|---|
-| **Add** (new PDF) | `BlobCreated` | preanalyze → index | ✅ `--incremental` handles it |
-| **Update** (overwrite, same name) | `BlobCreated` (new LMT) | invalidate cache → re-preanalyze → re-index | ❌ `--incremental` skips because `_dicache/<pdf>.output.json` already exists. Indexer reads stale cache. |
-| **Delete** | `BlobDeleted` | drop records + drop `_dicache/<pdf>.*` | ✅ if soft-delete on + deletion policy in place |
+| Event | What needs to happen | How the pipeline handles it |
+|---|---|---|
+| **Add** (new PDF) | preanalyze → index | `reconcile.py` detects the new blob; `preanalyze.py --incremental` builds the cache; indexer's 15-min schedule picks it up. |
+| **Update** (overwrite, same name) | invalidate cache → re-preanalyze → re-index | `reconcile.py` compares `metadata_storage_last_modified` to its tracked LMT and treats it as an edit. It purges the stale `_dicache/<pdf>.*` blobs AND the stale chunks from the index. Then `preanalyze.py --incremental` rebuilds the cache (now uncached). Indexer reprocesses. |
+| **Delete** | drop records + drop `_dicache/<pdf>.*` | `reconcile.py` detects the absent blob, purges chunks from the index AND `_dicache/` blobs. Blob soft-delete + `NativeBlobSoftDeleteDeletionDetectionPolicy` is also wired so the indexer would handle deletion even without reconcile. |
 
-The update case is the killer. The recommended architecture solves
-it by reacting to blob events directly.
+The update-case correctness comes from `reconcile.py` — not from event
+triggers. The earlier Container Apps + Event Grid design was
+considered but production simplified to a single nightly Jenkins job
+that runs `reconcile → preanalyze → indexer → coverage` in sequence.
 
-### 16.2 Recommended architecture
+### 16.2 The two Jenkins pipelines
 
 ```
-Storage Account  (blob soft-delete ON)
-   │
-   ├── Event Grid System Topic
-   │      ├── Subscription: BlobCreated   (subject endsWith ".pdf",
-   │      │                                 NOT under "_dicache/")
-   │      └── Subscription: BlobDeleted   (same filter)
-   │                  │
-   │                  ▼
-   │         Storage Queue  (visibility 5 min, DLQ after 5 dequeues)
-   │                  │
-   │                  ▼
-   │   Container App Job — event-triggered (KEDA queue-length scaler)
-   │     replicas: min 0, max 2-3
-   │     Created  -> invalidate cache for that PDF
-   │                 -> preanalyze --only <pdf> --force
-   │                 -> POST /indexers/<prefix>-indexer/run
-   │     Deleted  -> remove _dicache/<pdf>.* blobs
-   │
-   └── Container App Job — cron 0 2 * * *   (nightly reconciliation)
-          preanalyze --incremental
-          preanalyze --cleanup
-          POST /indexers/<prefix>-indexer/run
+Jenkinsfile.deploy (push to main + manual approval before prod)
+  └── tests → lint → load config → approve prod → bootstrap → smoke test
 
-   Indexer schedule: PT1H   (third independent safety net)
+Jenkinsfile.run (cron 0 2 * * * UTC + manual "Build Now")
+  └── checkout → bootstrap (venv, az login) → load config
+      └── python scripts/run_pipeline.py
+            ├── reconcile.py                   # detect add/edit/delete; purge stale
+            ├── preanalyze.py --incremental    # build cache for new/changed PDFs
+            ├── wait for indexer to settle     # poll status until idle
+            ├── check_index.py --coverage      # report
+            └── write run record + per-PDF state to Cosmos DB
 ```
 
-### 16.3 Why these specific choices
+Both pipelines call the same `scripts/` a developer runs from a
+laptop. No extra Azure infra is required beyond the resources in §4.
 
-- **Container Apps Jobs over Functions:** unbounded execution time;
-  pay-per-run; KEDA scales on queue length.
-- **Event-driven over pure cron:** `BlobCreated` fires on overwrite,
-  so updates are correct. Latency drops from 30–60 min to 5–15 min.
-- **Nightly reconciliation kept anyway:** Event Grid is
-  at-least-once but not guaranteed-once. ~$0.05/day buys a safety
-  net that catches missed events.
-- **Indexer schedule kept at PT1H:** third layer. If both the event
-  path and the nightly job fail, lag is one hour, not "until someone
-  notices".
+### 16.3 Why this design (and not event-driven Container Apps Jobs)
 
-### 16.4 Pros and cons
+| Design                                | Pros                                              | Cons                                              | Verdict |
+|---------------------------------------|---------------------------------------------------|---------------------------------------------------|---------|
+| **Jenkins nightly + reconcile**       | Reuses CI infra; one cron; correct for add/edit/delete; identical to laptop runs | Worst-case 24-hour lag for new uploads (operator can "Build Now" to bypass) | ✅ **Chosen for production** |
+| Event Grid + Storage Queue + Container Apps Job | Sub-15-min lag; bursty workloads scale on queue | Extra Azure resources (Event Grid Topic, Queue, Container Apps env, ACR); KEDA scaler; DLQ monitoring; more MI grants; harder to debug locally | Considered, not adopted — extra infra didn't justify the latency improvement for this workload |
+| Naïve cron without reconcile          | Simplest                                          | **Incorrect on edits** — stale `_dicache/<pdf>.output.json` causes the indexer to read stale content forever | Rejected |
 
-**Pros**
+### 16.4 Required prerequisites checklist
 
-- Correct for add / update / delete, no manual intervention.
-- 5–15 min upload-to-searchable.
-- Three independent safety nets (events → nightly sweep → PT1H).
-- Bounded AOAI cost via replica cap.
-- Works for the 2,000-page edge-case PDF.
-- Burst absorption via queue.
+Before turning the Jenkins cron on:
 
-**Cons**
+- [ ] Blob soft-delete enabled on the storage account (Data protection blade)
+- [ ] `dataDeletionDetectionPolicy: NativeBlobSoftDeleteDeletionDetectionPolicy` present in `search/indexer.json`
+- [ ] Jenkins agent identity holds the roles listed in §5
+- [ ] `deploy.config.json` uploaded to Jenkins as a secret-file credential per env (`deploy-config-dev`, `deploy-config-qa`, `deploy-config-prod`) — see §6
+- [ ] `Jenkinsfile.run` cron uncommented (set to whatever cadence matches your manuals' update frequency)
+- [ ] Optional: Cosmos DB provisioned + Power BI dashboard reading `indexing_run_history` / `indexing_pdf_state` (see §7)
 
-- More infra than a single cron: ~1–2 days to stand up cleanly.
-- Two small `preanalyze.py` changes required first (§16.6).
-- DLQ requires monitoring for poison PDFs.
-- One 2,000-page PDF ties up a worker for ~3 h; bursts queue.
-- Extra MI grants on the Container App Job principal.
+### 16.5 On-demand catch-up
 
-### 16.5 Two-phase rollout (recommended)
+When a user uploads a PDF and wants it indexed immediately (instead of
+waiting for tonight's cron):
 
-**Phase 1 — make it correct on a cron:** add LMT-aware invalidation
-to `preanalyze.py`. Deploy one Container App Job on cron every
-30 min running `preanalyze --incremental && preanalyze --cleanup &&
-POST /indexers/run`. Correct for add / update / delete with ≤30 min
-worst-case lag.
-
-**Phase 2 — add the event path:** stand up Event Grid + Storage
-Queue + an event-triggered Container App Job in front of Phase 1.
-The Phase 1 cron stays as the nightly reconciliation. Additive — no
-rework.
-
-Ship correctness first. Only add the event path if business actually
-needs sub-30-min lag.
-
-### 16.6 Code gaps to close in `preanalyze.py`
-
-Localized changes (~100 LOC):
-
-1. **`--only <blob-name>`** — process a single PDF (event worker uses
-   it).
-2. **LMT-aware invalidation** — if `pdf.lastModified >
-   output.json.lastModified`, re-run even under `--incremental`.
-   Required for both Phase 1 and Phase 2 update correctness.
-3. **Per-PDF cleanup helper** — delete `_dicache/<pdf>.*` for one
-   name (used by event worker on `BlobDeleted`).
-
-### 16.7 Required prerequisites checklist
-
-Before turning automation on:
-
-- [ ] Blob soft-delete enabled on the storage account
-- [ ] `dataDeletionDetectionPolicy` present in `search/indexer.json`
-- [ ] LMT-aware invalidation implemented in `preanalyze.py` (Phase 1)
-- [ ] `--only <pdf>` and per-PDF cleanup helpers exist (Phase 2)
-- [ ] Container App Job MI has the role grants in §5
-- [ ] Event Grid filters: `subject endsWith ".pdf"` AND `subject does
-      not contain "/_dicache/"`
-- [ ] DLQ has an alert wired to on-call
-- [ ] Job stdout shipped to Log Analytics; non-zero exit alerts
+- **From Jenkins:** open `Jenkinsfile.run` → "Build Now" → pick the env. Same code path as the nightly run.
+- **From a laptop with auth:** `python scripts/deploy.py --config deploy.config.json --skip-bootstrap --auto-fix` runs preanalyze → indexer → heal-until-done.
 
 ---
 
@@ -1336,33 +1407,34 @@ fresh key.
 op; usually self-heals. If a phase repeatedly fails, re-run that
 phase only (`--phase di` etc.).
 
-### 17.14 Event Grid delivery missed an event
+### 17.14 Jenkins nightly run missed an upload window
 
-**Symptom:** PDF uploaded; user can't find it; no event in worker
-logs.
+**Symptom:** PDF uploaded today; user can't find it; nothing in the
+indexer.
 
-**Cause:** Event Grid retry budget exhausted or subscription
-misconfigured.
+**Cause:** Upload happened after the nightly Jenkins cron fired.
 
-**Resolution:** the **2 a.m. nightly reconciliation** picks it up.
-If you can't wait, manually `preanalyze --only <pdf> --force` and
-trigger the indexer.
+**Resolution:** in Jenkins, open `Jenkinsfile.run` → "Build Now" with
+the right `TARGET_ENV`. Same code path as the nightly. Or from a
+laptop:
+```bash
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap --auto-fix
+```
 
-### 17.15 Container App Job stuck on a poison PDF
+### 17.15 Pipeline stuck on a poison PDF
 
-**Symptom:** queue depth not draining; one PDF keeps reappearing in
-DLQ.
+**Symptom:** `heal_until_done.py` exits 1 with "same N PDF(s) stuck
+across 2 consecutive iterations". Same PDFs failing every run.
 
-**Cause:** corrupt PDF, password-protected, or DI consistently
-failing.
+**Cause:** corrupt PDF, password-protected, DI consistently failing,
+or Function App OOM on a very large PDF (exit code 137).
 
 **Resolution:**
-1. Inspect the DLQ message; identify the PDF.
-2. `preanalyze --only <pdf> --force` locally with verbose logs to
-   see the underlying error.
-3. If genuinely unprocessable: move the PDF to a `_quarantine/`
-   prefix in the container and remove the DLQ message. Notify the
-   uploader.
+1. Identify the failing PDFs from `heal_until_done` output.
+2. Run `python scripts/inspect_pdf.py --config deploy.config.json --name <pdf>` to see what's in the cache vs the index.
+3. If OOM: bump the Function App App Service Plan SKU (more memory).
+4. If genuinely unprocessable: move the PDF to a `_quarantine/`
+   prefix in the container and notify the uploader.
 
 ### 17.16 Indexer reset wipes documents unexpectedly
 
@@ -1409,9 +1481,8 @@ uploader.
 |---|---|---|
 | Function App | App Insights / `az webapp log tail` | Per-skill latency, error rate, exceptions |
 | Indexer | Search → Indexers → Execution history | Items processed, failed items, error message |
-| Container App Job | Log Analytics (linked workspace) | Job exit code, stdout, replica count |
-| Storage Queue | Portal / `az storage queue stats` | Approx message count (= backlog) |
-| Event Grid | Subscription metrics | Delivered, failed, DLQ count |
+| Jenkins pipeline | Jenkins console output | Pipeline exit code, stage failures, stdout |
+| Cosmos DB | `indexing_run_history` / `indexing_pdf_state` | Coverage, run history, per-PDF status |
 | AOAI | Azure portal → AOAI resource → Metrics | Token usage, 429 rate, latency |
 | Cost | Cost Management | Daily spend per service |
 
@@ -1420,22 +1491,22 @@ uploader.
 - Indexer execution status `transientFailure` or `error` for
   3 consecutive runs.
 - Function App 5xx rate > 1% for 10 min.
-- Container App Job non-zero exit (any).
-- Storage Queue DLQ message count > 0.
+- Jenkins pipeline failure (any non-success on `Jenkinsfile.run`).
+- Coverage drop in Cosmos `indexing_run_history` (e.g. `fully_chunked / blob_pdfs_total < 0.9`).
 - AOAI 429 rate > 5% for 15 min.
 - Storage `BlobCount` for `_dicache/` growing without bound (orphan
-  cleanup not running).
+  cleanup not running — `reconcile.py` should be removing these).
 
 ### 18.3 Dashboards worth building
 
 Two dashboards, kept simple:
 
-**Pipeline health** — single page with: indexer last-run status,
-queue depth, DLQ count, recent App Insights exceptions, last
-nightly-reconciliation exit.
+**Pipeline health** — Power BI on top of `indexing_run_history`:
+last nightly-pipeline exit code, coverage %, items processed,
+recent App Insights exceptions for the Function App.
 
-**Cost** — daily spend split by AOAI / DI / Search / Storage /
-Container Apps, with month-to-date forecast.
+**Cost** — Azure Cost Management: daily spend split by AOAI / DI /
+Search / Storage / Function App, with month-to-date forecast.
 
 ---
 
@@ -1453,7 +1524,7 @@ manual:
 | Search storage | ~25 MB / PDF | negligible (~$0.02/mo) |
 | Storage (PDFs + cache) | 50 MB PDF + 100 MB cache | negligible |
 | Function App Consumption | Skill calls | negligible |
-| Container Apps Jobs | Worker minutes | <$1 / PDF |
+| Cosmos DB (optional) | Run history writes | negligible (serverless) |
 
 **Total ~$11–18 per fresh PDF.** Re-indexing after a schema change
 costs only the embedding + Search re-projection (~$0.10), thanks to
@@ -1466,8 +1537,8 @@ Cost levers, in priority order:
    give 2× TPM if quota is per-region.
 3. **Use Standard storage redundancy (LRS).** GRS doubles cost for
    no gain on this workload.
-4. **Drop the indexer schedule to PT1H once events are live.**
-   Eliminates ~95% of empty indexer runs.
+4. **Tune the indexer schedule.** `PT15M` is the default; bump to
+   `PT1H` if uploads are infrequent — eliminates ~95% of empty runs.
 
 ---
 
@@ -1480,7 +1551,7 @@ Cost levers, in priority order:
 | Source PDFs | Storage account | Re-sync from SharePoint (already automated upstream) |
 | Cache (`_dicache/`) | Storage account | **Regenerable** via preanalyze; not strictly DR-critical |
 | Search index | Search service | Rebuild via reset + indexer run; ~30 min/PDF, no data loss because PDFs are the source of truth |
-| Function App code | The repo + ACR (for jobs) | `scripts/deploy_function.sh` redeploys |
+| Function App code | The repo | `scripts/deploy_function.sh` redeploys |
 | Search artifacts | The repo | `scripts/deploy_search.py` redeploys |
 | `deploy.config.json` | Local / KeyVault / ops repo | **Back up separately** — it has all endpoints/IDs |
 
