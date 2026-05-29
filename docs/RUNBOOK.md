@@ -1,9 +1,12 @@
-# Runbook — daily operations, validation, content capture, incident response
+# Runbook — everything operational
 
-Single document covering everything operational. If you're setting up
-the pipeline for the first time, see [SETUP.md](SETUP.md). If you're
-debugging an edge case, see [SCENARIOS.md](SCENARIOS.md) (511
-scenarios).
+Single document covering setup, day-to-day operations, validation,
+content capture, incident response, Jenkins pipeline configuration,
+the Power BI dashboard spec, and first-time-setup troubleshooting.
+
+For the high-level architecture overview, see [../README.md](../README.md).
+For the chatbot integration spec, see
+[../CHATBOT_INTEGRATION.md](../CHATBOT_INTEGRATION.md).
 
 ## Table of contents
 
@@ -12,6 +15,9 @@ scenarios).
 3. [Validation](#3-validation) — local + cloud checks
 4. [Content capture](#4-content-capture) — what gets extracted from each file type
 5. [Incident response](#5-incident-response) — top failure modes + recovery
+6. [Jenkins pipeline setup](#6-jenkins-pipeline-setup) — agent, credentials, Jenkinsfiles
+7. [Power BI dashboard spec](#7-power-bi-dashboard-spec) — Cosmos schema + recommended tiles
+8. [First-time setup troubleshooting](#8-first-time-setup-troubleshooting) — SSL, proxy, firewall, 403 diagnostics
 
 ---
 
@@ -1580,14 +1586,10 @@ python scripts/deploy_search.py --config deploy.config.json
 
 ## 24. Related docs
 
-- [README.md](../README.md) — top-level project readme
-- [SETUP.md §1](SETUP.md#1-architecture) — design rationale (deeper
-  on preanalyze trade-offs)
-- [SETUP.md §6](SETUP.md#6-search-index-reference) — index
-  concepts & schema reference for non-search engineers
-- [RUNBOOK.md §3](RUNBOOK.md#3-validation) — manual validation checklist
-- [RUNBOOK.md §2](RUNBOOK.md#2-preanalyze-runbook) —
-  team-facing preanalyze runbook
+- [../README.md](../README.md) — top-level project readme + architecture
+- [§3 above](#3-validation) — manual validation checklist
+- [§2 above](#2-preanalyze-runbook) — team-facing preanalyze runbook
+- [../CHATBOT_INTEGRATION.md](../CHATBOT_INTEGRATION.md) — chatbot dev hand-off spec
 - [search/index.json](../search/index.json) /
   [skillset.json](../search/skillset.json) /
   [indexer.json](../search/indexer.json) /
@@ -2113,8 +2115,8 @@ Re-evaluate periodically as the AI assistant evolves.
 Top failure modes for the indexing pipeline and the recovery steps for
 each. Read this before opening a war room.
 
-For deeper architecture context, see [SETUP.md §1](SETUP.md#1-architecture).
-For the operational runbook (steady-state procedures), see [RUNBOOK.md](RUNBOOK.md).
+For deeper architecture context, see [../README.md](../README.md).
+For steady-state procedures, see [§1 above](#1-daily-operations).
 
 ---
 
@@ -2499,3 +2501,850 @@ python scripts/check_index.py --config deploy.config.json --coverage
 
 If the numbers match the blob container, you're back in a known good
 state.
+
+---
+
+
+# 6. Jenkins pipeline setup
+
+
+Two pipelines live in this repo:
+
+| File | Trigger | What it does |
+|------|---------|--------------|
+| [`Jenkinsfile.deploy`](../Jenkinsfile.deploy) | Push to `main` (with manual approval before prod) | Deploy function app code → deploy search artifacts → smoke test |
+| [`Jenkinsfile.run`](../Jenkinsfile.run) | Cron `0 2 * * *` UTC + manual button | Reconcile → preanalyze → wait for indexer → coverage → Cosmos status |
+
+## One-time agent setup
+
+You need a Linux Jenkins agent (Ubuntu 22.04 LTS recommended) with:
+
+```bash
+# Python 3.11+
+sudo apt-get install -y python3.11 python3.11-venv python3-pip
+
+# Azure CLI
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+# Tell az to use Government cloud
+az cloud set --name AzureUSGovernment
+
+# LibreOffice (OPTIONAL but recommended) — enables figure extraction
+# from DOCX/PPTX/XLSX via auto-conversion to PDF. Without it those
+# formats index for text + tables only.
+sudo apt-get install -y libreoffice
+```
+
+`Jenkinsfile.run` attempts to auto-install LibreOffice on first run if
+it's missing. The pipeline still works without it; figures from non-PDF
+formats just won't be extracted.
+
+Identity options (in order of preference):
+
+1. **System-assigned MI on the agent VM** (production default).
+   - Enable on the VM in the Azure portal.
+   - Assign the roles in [§5 above](#5-incident-response) (RBAC matrix
+     in main runbook) to the VM's MI.
+   - In Jenkins jobs, `az login --identity` with no further config.
+2. **Service principal** (for cross-cloud agents or Jenkins running
+   outside Azure).
+   - Create the SP and assign the same roles.
+   - Bind credentials as a Jenkins **Username + Password** credential
+     where `username = AZURE_CLIENT_ID` and `password = client_secret`.
+   - Add `AZURE_TENANT_ID` as a string credential.
+   - In the pipeline, `withCredentials([...]) { az login --service-principal ... }`.
+
+## Required Jenkins credentials
+
+Both pipelines load `deploy.config.json` from a Jenkins **secret file**
+credential so the per-environment identifiers never appear in code.
+
+| Credential ID | Type | Contents |
+|---------------|------|----------|
+| `deploy-config-dev`  | Secret file | dev-environment `deploy.config.json` |
+| `deploy-config-qa`   | Secret file | qa-environment `deploy.config.json` |
+| `deploy-config-prod` | Secret file | prod-environment `deploy.config.json` |
+
+Create them:
+
+> Manage Jenkins → Credentials → System → Global → Add Credentials → Kind: Secret file → ID: `deploy-config-prod` → upload the file.
+
+If using service-principal auth, also create:
+
+| Credential ID | Type | Contents |
+|---------------|------|----------|
+| `azure-sp` | Username with password | `AZURE_CLIENT_ID` / `client_secret` |
+| `azure-tenant` | Secret text | `AZURE_TENANT_ID` |
+
+And add an early stage to both Jenkinsfiles:
+
+```groovy
+withCredentials([
+    usernamePassword(credentialsId: 'azure-sp',
+                     usernameVariable: 'AZ_CLIENT', passwordVariable: 'AZ_SECRET'),
+    string(credentialsId: 'azure-tenant', variable: 'AZ_TENANT')
+]) {
+    sh '''
+        az login --service-principal -u "$AZ_CLIENT" -p "$AZ_SECRET" --tenant "$AZ_TENANT"
+    '''
+}
+```
+
+## Configuring the deploy pipeline
+
+`Jenkinsfile.deploy` is a multi-branch / parameterised job:
+
+> New Item → Multibranch Pipeline → Branch source: GitHub → Pipeline:
+> by Jenkinsfile → Path: `Jenkinsfile.deploy`.
+
+Manual parameters:
+
+- `TARGET_ENV` — `dev`, `qa`, or `prod`. Picks the secret-file credential.
+- `SKIP_SMOKE` — emergency only.
+
+Production stage gates on a manual approval (`input` step). Set the
+approver list to the operations team.
+
+## Configuring the run pipeline
+
+`Jenkinsfile.run` is a separate parameterised job (single branch, main):
+
+> New Item → Pipeline → Pipeline script from SCM → Script Path:
+> `Jenkinsfile.run`.
+
+Cron is `0 2 * * *` UTC; tweak in the Jenkinsfile if your manuals
+update on a different cadence.
+
+Parameters:
+
+- `TARGET_ENV` — same.
+- `SKIP_RECONCILE` — useful if reconcile is misbehaving and you just
+  want to run preanalyze + coverage.
+- `SKIP_WAIT` — short-circuit the indexer wait; useful for quick
+  status checks.
+- `MAX_PURGES` — caps how many PDFs reconcile is allowed to delete in
+  one run. Default 2. Raise intentionally.
+- `MAX_WAIT_MINUTES` — how long to poll the indexer before giving up
+  and reporting current state. Default 60.
+
+`disableConcurrentBuilds()` is on — only one run at a time per
+environment, to prevent two concurrent pipelines fighting over the
+same indexer.
+
+## What runs vs what's parallel
+
+```
+Jenkinsfile.deploy (push to main)         Jenkinsfile.run (nightly)
+─────────────────────────────────         ─────────────────────────
+1. Checkout                               1. Checkout
+2. Bootstrap (venv, az login)             2. Bootstrap
+3. Tests + lint (gate)                    3. Load config
+4. Load config                            4. python scripts/run_pipeline.py
+5. Approve prod                              ├── reconcile.py
+6. Deploy function app                       ├── preanalyze.py --incremental
+7. Deploy search artifacts                   ├── wait for indexer
+8. Smoke test (gate)                         ├── check_index.py --coverage --write-status
+                                             └── write run record to Cosmos
+```
+
+## Failure modes + Jenkins behavior
+
+| Failure | Pipeline behavior | Operator action |
+|---------|-------------------|-----------------|
+| Tests fail | Deploy aborts before any Azure call | Fix the test or revert the commit |
+| `deploy_function.sh` fails | Deploy aborts; function app may be partially updated | Re-run; the script is idempotent |
+| `deploy_search.py` fails on placeholder | Deploy aborts with the missing key name | Add the missing field to `deploy.config.json` |
+| Smoke test fails | Deploy marked failed; function + search artifacts already updated | Investigate via `python scripts/diagnose.py`; can roll back by reverting commit + redeploying |
+| Reconcile finds > MAX_PURGES | Run pipeline finishes step with exit 2; pipeline continues but skips purges | Re-run with higher `MAX_PURGES` if intentional |
+| Preanalyze partial failure (some PDFs FAIL) | Run pipeline continues; failures listed in stdout + Cosmos | Inspect Cosmos run record; re-run preanalyze for failed PDFs |
+| Indexer wait timeout | Run pipeline reports current state and exits non-zero | Indexer is still running on its own schedule; next pipeline run will pick up where this one left off |
+
+## Notifications
+
+Both pipelines emit a final `post` block. Wire to your team's channels:
+
+```groovy
+post {
+    failure {
+        emailext to: 'ops-team@example.com',
+                 subject: "FAIL: ${currentBuild.fullDisplayName}",
+                 body: "${env.BUILD_URL}"
+        // or
+        slackSend channel: '#indexing-pipeline',
+                  color: 'danger',
+                  message: "Indexing pipeline failed: ${env.BUILD_URL}"
+    }
+}
+```
+
+(Not added by default; depends on which Jenkins plugins your team has.)
+
+---
+
+
+# 7. Power BI dashboard spec
+
+
+What the Power BI analyst needs to wire indexing-pipeline tiles onto
+the existing Cosmos-DB-backed dashboard.
+
+## Data sources
+
+Two new containers in the existing Cosmos DB account
+(auto-created on first run; partition key shown):
+
+### `indexing_run_history`
+
+Partition key: `/partitionKey` (set to date `YYYY-MM-DD`).
+
+One document per pipeline / preanalyze / reconcile / coverage run.
+
+```json
+{
+  "id": "2026-05-04T02:30:00Z-a1b2c3d4",
+  "partitionKey": "2026-05-04",
+  "started_at": "2026-05-04T02:30:00Z",
+  "ended_at":   "2026-05-04T03:14:00Z",
+  "duration_seconds": 2640,
+  "run_type": "full_pipeline | preanalyze | reconcile | coverage",
+  "triggered_by": "jenkins-cron | jenkins-manual | manual",
+  "git_sha": "b6f8473",
+  "exit_code": 0,
+  "steps": {
+    "reconcile":   { "exit_code": 0 },
+    "preanalyze":  { "exit_code": 0 },
+    "wait_indexer":{ "last_status": "success", "items_processed": 56, "errors": 0, "warnings": 2 },
+    "check_index": { "exit_code": 0 }
+  },
+
+  "blob_pdfs_total":   56,
+  "fully_chunked":     54,
+  "partial":            1,
+  "not_started":        1,
+  "orphaned":           0,
+  "total_chunks":   92847,
+
+  "pdfs_processed":     2,
+  "pdfs_skipped":      54,
+  "pdfs_failed":        0,
+
+  "added":   ["new_manual.pdf"],
+  "edited":  ["GAS_Procedure.pdf"],
+  "deleted": [],
+  "chunks_purged":     412,
+  "cache_blobs_purged": 18,
+
+  "errors": []
+}
+```
+
+Not every field is populated for every run type — `run_type` tells you
+which subset to expect:
+
+- `full_pipeline` → `steps`, `blob_pdfs_total`, `fully_chunked`, `partial`, `not_started`, `total_chunks`, `exit_code`, `duration_seconds`
+- `preanalyze` → `pdfs_processed`, `pdfs_skipped`, `pdfs_failed`, `errors`, `phase`, `incremental`
+- `reconcile` → `added`, `edited`, `deleted`, `chunks_purged`, `cache_blobs_purged`, `errors`
+- `coverage` → `blob_pdfs_total`, `fully_chunked`, `partial`, `not_started`, `orphaned`, `total_chunks`
+
+### `indexing_pdf_state`
+
+Partition key: `/partitionKey` (set to `source_file`, so each PDF lives
+in its own logical partition).
+
+One document per PDF, replaced on each pipeline run.
+
+```json
+{
+  "id": "GAS_Procedure.pdf",
+  "partitionKey": "GAS_Procedure.pdf",
+  "source_file": "GAS_Procedure.pdf",
+  "status": "done",
+  "chunks_in_index": 1842,
+  "last_indexed_at": "2026-05-04T03:14:00Z",
+  "last_blob_modified": "2026-05-04T01:18:23Z",
+  "last_error": null,
+  "updated_at": "2026-05-04T03:14:00Z"
+}
+```
+
+`status` enum: `done | partial | not_started | failed`.
+
+## Recommended tiles
+
+### Tile 1 — Coverage headline (KPI card × 4)
+
+Read most-recent `coverage` or `full_pipeline` doc:
+
+| KPI            | Source                         |
+|----------------|--------------------------------|
+| Manuals total  | `blob_pdfs_total`              |
+| Fully indexed  | `fully_chunked` (% of total)   |
+| Partial        | `partial`                      |
+| Not started    | `not_started`                  |
+
+Color rule: green if `fully_chunked / blob_pdfs_total >= 0.95`, yellow
+between 0.8 and 0.95, red below.
+
+### Tile 2 — Last run summary (table)
+
+Read most-recent `full_pipeline` doc:
+
+| Column          | Source                                  |
+|-----------------|-----------------------------------------|
+| Run started     | `started_at`                            |
+| Triggered by    | `triggered_by`                          |
+| Duration        | `duration_seconds`                      |
+| Items processed | `steps.wait_indexer.items_processed`    |
+| Errors          | `steps.wait_indexer.errors`             |
+| Warnings        | `steps.wait_indexer.warnings`           |
+| Git sha         | `git_sha`                               |
+
+### Tile 3 — Run history trend (line chart)
+
+X axis: `ended_at` (last 30 days)
+Y axis: `fully_chunked`
+Filter: `run_type == "full_pipeline" or run_type == "coverage"`
+
+Visualises whether coverage is growing or stalling.
+
+### Tile 4 — Per-PDF status (table)
+
+Source: entire `indexing_pdf_state` container.
+
+| Column           | Source            |
+|------------------|-------------------|
+| Manual           | `source_file`     |
+| Status           | `status`          |
+| Chunks in index  | `chunks_in_index` |
+| Last indexed     | `last_indexed_at` |
+| Last error       | `last_error`      |
+
+Sort: status descending (so partial / failed bubble up), then
+`last_indexed_at` ascending.
+
+### Tile 5 — Recent errors (table)
+
+Source: `indexing_run_history` where `len(errors) > 0`, last 7 days.
+
+| Column     | Source           |
+|------------|------------------|
+| Run type   | `run_type`       |
+| When       | `ended_at`       |
+| Triggered by | `triggered_by` |
+| Error      | First entry of `errors[]` |
+
+### Tile 6 — Reconcile activity (last 7 days)
+
+Source: `indexing_run_history` where `run_type == "reconcile"`.
+
+Bar chart, X = day, three series:
+- Added (new PDFs)
+- Edited (re-indexed PDFs)
+- Deleted (purged PDFs)
+
+Optional: a stat on chunks_purged to show how much "cleanup" the
+pipeline does over time.
+
+## SQL examples
+
+The Power BI Cosmos DB connector uses Cosmos SQL. Two starter queries:
+
+**Most recent coverage snapshot:**
+
+```sql
+SELECT TOP 1 *
+FROM c
+WHERE c.run_type IN ("full_pipeline", "coverage")
+ORDER BY c.ended_at DESC
+```
+
+**Per-PDF state with error sort:**
+
+```sql
+SELECT
+  c.source_file,
+  c.status,
+  c.chunks_in_index,
+  c.last_indexed_at,
+  c.last_error
+FROM c
+ORDER BY c.status DESC, c.last_indexed_at ASC
+```
+
+**Run-failure rate over last 30 days:**
+
+```sql
+SELECT
+  COUNT(1) AS runs,
+  SUM(c.exit_code != 0 ? 1 : 0) AS failures
+FROM c
+WHERE c.run_type = "full_pipeline"
+  AND c.ended_at > "2026-04-04T00:00:00Z"
+```
+
+## Identity / connection
+
+Power BI to Cosmos requires the gateway to authenticate. Either:
+
+- Cosmos DB **read-only key** stored in the analyst's Power BI
+  workspace credential (simpler, but a key in flight).
+- **Microsoft Entra ID** auth via a service principal granted
+  `Cosmos DB Built-in Data Reader` on the database.
+
+The latter is preferred — same pattern as the rest of the pipeline.
+
+## Refresh cadence
+
+Set Power BI dataset refresh to 30 minutes (or whatever cadence
+matches the pipeline frequency). The pipeline runs nightly at 02:00,
+so a single refresh at 03:30 suffices for the morning view; more
+frequent refreshes give responsiveness on manual runs.
+
+---
+
+
+# 8. First-time setup troubleshooting
+
+When `deploy.py` / `deploy_search.py` / `preanalyze.py` / `run_pipeline.py`
+fails on a fresh laptop or environment, walk down this section and run
+the matching checks. Every command is copy-paste ready for **PowerShell
+on Windows**; equivalent bash for Linux/Mac included where it differs.
+
+> **First: always set your SSL cert env vars** if your environment uses
+> a corporate proxy / TLS inspection (Forcepoint, Zscaler, etc.):
+>
+> ```powershell
+> $env:SSL_CERT_FILE = "C:\Users\<you>\Downloads\combined-ca.crt"
+> $env:REQUESTS_CA_BUNDLE = "C:\Users\<you>\Downloads\combined-ca.crt"
+> ```
+>
+> If you don't have a combined-ca.crt, your IT/security team can give
+> you one. Without it, every Python HTTPS call fails with
+> `SSL: CERTIFICATE_VERIFY_FAILED`.
+
+## 8.0 Quick decision tree
+
+| Symptom | Jump to |
+|---|---|
+| `SSL: CERTIFICATE_VERIFY_FAILED` | [§8.1](#81-ssl-cert-error) |
+| `PUT datasources/... failed: 403` | [§8.2](#82-deploy_searchpy-403) |
+| `Forbidden by IP firewall` in 403 body | [§8.3](#83-search-service-firewall) |
+| HTML body in 403 mentioning Forcepoint / corp proxy | [§8.4](#84-corporate-proxy-blocking) |
+| `not authorized to perform action` in 403 body | [§8.5](#85-rbac--identity-issues) |
+| `assign_roles.py` says "already assigned" but deploy still 403 | [§8.5](#85-rbac--identity-issues) |
+| Works in one resource group but not another | [§8.6](#86-subscription--tenant-mismatch) |
+| `LibreOffice not found` warning | [§8.7](#87-libreoffice-missing) |
+| `blob HEAD unexpected 403` on PDFs with spaces | already fixed in code; pull latest |
+| Indexer stuck "in progress" for hours | [§8.8](#88-indexer-stuck) |
+| `cosmos run_history upsert failed` | [§8.9](#89-cosmos-db-issues) |
+
+## 8.1 SSL cert error
+
+**Symptom:**
+```
+httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self signed certificate in certificate chain
+```
+
+**Cause:** corporate TLS inspection rewriting cert chain.
+
+**Fix (PowerShell):**
+```powershell
+$env:SSL_CERT_FILE = "C:\Users\<you>\Downloads\combined-ca.crt"
+$env:REQUESTS_CA_BUNDLE = "C:\Users\<you>\Downloads\combined-ca.crt"
+```
+
+**Fix (bash):**
+```bash
+export SSL_CERT_FILE="$HOME/Downloads/combined-ca.crt"
+export REQUESTS_CA_BUNDLE="$HOME/Downloads/combined-ca.crt"
+```
+
+These env vars only live in your current shell session. Re-set them
+every time you open a new terminal, or add them to your PowerShell
+profile / `~/.bashrc`.
+
+## 8.2 deploy_search.py 403
+
+When you see:
+
+```
+PUTting artifacts to https://<search>.search.azure.us
+PUT datasources/<name>-ds failed: 403
+```
+
+The script truncates the response body. Get the **actual 403 message** —
+this is the single most useful diagnostic:
+
+```powershell
+python -c @"
+import httpx, json, base64
+from azure.identity import DefaultAzureCredential
+
+cfg = json.loads(open('deploy.config.json').read())
+endpoint = cfg['search']['endpoint'].rstrip('/')
+
+cred = DefaultAzureCredential()
+token_obj = cred.get_token('https://search.azure.us/.default')
+
+# Decode the JWT to confirm which identity Python is actually using
+parts = token_obj.token.split('.')
+pad = '=' * ((4 - len(parts[1]) % 4) % 4)
+claims = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+print('Token issued for:')
+print('  upn:', claims.get('upn') or claims.get('appid'))
+print('  oid:', claims.get('oid'))
+print('  tenant:', claims.get('tid'))
+print('  audience:', claims.get('aud'))
+print()
+
+r = httpx.get(f'{endpoint}/datasources?api-version=2024-11-01-preview',
+              headers={'Authorization': 'Bearer ' + token_obj.token}, timeout=30)
+print(f'GET status: {r.status_code}')
+print(f'BODY (first 1500 chars):')
+print(r.text[:1500])
+"@
+```
+
+Read the body and match against:
+
+| Body says | Means | Fix |
+|---|---|---|
+| `Forbidden by IP firewall` | Search service blocks your IP | [§8.3](#83-search-service-firewall) |
+| HTML page with `Forcepoint` or company proxy branding | Corporate proxy blocking outbound | [§8.4](#84-corporate-proxy-blocking) |
+| `not authorized to perform action` / `AuthorizationFailed` | RBAC role missing or wrong identity | [§8.5](#85-rbac--identity-issues) |
+| `PrincipalNotFound` | RBAC propagation incomplete | wait 10–30 min, retry |
+| `apiKeyOnly` / `requires admin key` | Search service rejects AAD | [§8.5.4](#854-search-service-in-apikeyonly-mode) |
+
+## 8.3 Search service firewall
+
+Verify network rules:
+
+```powershell
+$cfg = Get-Content deploy.config.json | ConvertFrom-Json
+$searchName = ($cfg.search.endpoint -replace 'https://','').Split('.')[0]
+$rg = $cfg.functionApp.resourceGroup
+
+az search service show -n $searchName -g $rg `
+  --query "{publicAccess:publicNetworkAccess, ipRules:networkRuleSet.ipRules}" -o json
+```
+
+If `publicAccess` is `"disabled"` or `ipRules` is restrictive:
+
+**Add your IP to the allowlist:**
+```powershell
+$myIp = (Invoke-RestMethod -Uri "https://api.ipify.org")
+Write-Host "Your public IP: $myIp"
+
+# If api.ipify.org returns HTML (proxy intercepting), use this instead:
+$myIp = (curl.exe -s https://ifconfig.me/ip).Trim()
+
+az search service update -n $searchName -g $rg --ip-rules $myIp
+```
+
+**Or enable public access entirely:**
+```powershell
+az search service update -n $searchName -g $rg --public-network-access enabled
+```
+
+## 8.4 Corporate proxy blocking
+
+**Symptom:** the 403 body contains HTML like:
+```html
+<title>Access to this site is blocked</title>
+Copyright (c) 2022 Forcepoint
+... credential prompt form ...
+```
+
+**Cause:** your corporate web filter (Forcepoint, Zscaler, Bluecoat, etc.)
+is intercepting outbound HTTPS to `*.azure.us` and returning its own
+block page. The traffic never reaches Azure.
+
+**Verify:** open the search URL in your browser:
+```
+https://<search>.search.azure.us
+```
+- Real Azure: TLS cert subject is `*.search.azure.us`, issuer is
+  Microsoft-something. Page returns Azure's own 403 (no UI).
+- Proxy intercept: TLS cert subject is your company / Forcepoint.
+  Page is the proxy's branded "blocked" page.
+
+**Fixes:**
+1. **Get Azure Gov endpoints allowlisted** — submit IT ticket asking for:
+   ```
+   *.search.azure.us
+   *.openai.azure.us
+   *.cognitiveservices.azure.us
+   *.documents.azure.us
+   *.blob.core.usgovcloudapi.net
+   *.azurewebsites.us
+   login.microsoftonline.us
+   ```
+2. **Use Forcepoint credential override** if your team has elevated
+   credentials for proxy bypass.
+3. **Run from Jenkins** — the CI agent is inside the corporate network
+   with proper allowlisting. Push to main, let `Jenkinsfile.deploy`
+   run there instead of from your laptop.
+
+## 8.5 RBAC / identity issues
+
+### 8.5.1 Verify which identity Python is using
+
+The diagnostic in [§8.2](#82-deploy_searchpy-403) prints the JWT claims.
+Confirm:
+- `upn` matches your login email
+- `tid` (tenant) is your expected tenant
+- `aud` (audience) is `https://search.azure.us`
+
+If the identity is wrong, force a refresh:
+
+```powershell
+az logout
+az login
+az account set --subscription "<the-sub-where-resources-live>"
+```
+
+### 8.5.2 Verify the role IS on THIS search service
+
+```powershell
+$cfg = Get-Content deploy.config.json | ConvertFrom-Json
+$searchName = ($cfg.search.endpoint -replace 'https://','').Split('.')[0]
+$rg = $cfg.functionApp.resourceGroup
+
+$me = az ad signed-in-user show --query id -o tsv
+$searchId = az search service show -n $searchName -g $rg --query id -o tsv
+
+az role assignment list --assignee $me --scope $searchId `
+  --query "[].{role:roleDefinitionName, scope:scope}" -o table
+```
+
+You should see at least:
+```
+Search Service Contributor
+Search Index Data Contributor
+```
+
+If empty → re-run `assign_roles.py` after confirming the correct
+subscription is selected (see [§8.6](#86-subscription--tenant-mismatch)).
+
+### 8.5.3 Verify Function App MI has its roles
+
+```powershell
+$funcMi = az functionapp identity show -n $cfg.functionApp.name -g $rg --query principalId -o tsv
+az role assignment list --assignee $funcMi --query "[].{role:roleDefinitionName, scope:scope}" -o table
+```
+
+Function App MI should have:
+- Storage Blob Data Reader on storage account
+- Cognitive Services OpenAI User on AOAI
+- Cognitive Services User on Document Intelligence
+- Search Index Data Reader on Search service
+
+### 8.5.4 Search service in apiKeyOnly mode
+
+```powershell
+az search service show -n $searchName -g $rg `
+  --query "{authOptions:authOptions, disableLocalAuth:disableLocalAuth}" -o json
+```
+
+If `authOptions` is `apiKeyOnly` or AAD is disabled, AAD tokens get 403.
+
+```powershell
+az search service update -n $searchName -g $rg `
+  --aad-auth-failure-mode http403 --auth-options aadOrApiKey
+```
+
+Wait 5 minutes after this change.
+
+## 8.6 Subscription / tenant mismatch
+
+Most common when "it works in another RG but not this one".
+
+```powershell
+# What sub am I using right now?
+az account show --query "{name:name, id:id, tenant:tenantId}" -o table
+
+# What sub does the resource live in?
+$cfg = Get-Content deploy.config.json | ConvertFrom-Json
+$searchName = ($cfg.search.endpoint -replace 'https://','').Split('.')[0]
+az resource list --resource-type "Microsoft.Search/searchServices" --name $searchName `
+  --query "[].{name:name, id:id}" -o table
+```
+
+If the sub IDs don't match → switch and re-grant:
+
+```powershell
+az account set --subscription "<sub-id-from-the-resource>"
+python scripts/assign_roles.py --config deploy.config.json --wait-for-propagation 300
+az logout
+az login
+az account set --subscription "<sub-id-from-the-resource>"
+python scripts/deploy_search.py --config deploy.config.json
+```
+
+## 8.7 LibreOffice missing
+
+**Symptom:** preanalyze logs:
+```
+warn: skipping conversion for X.pptx -- LibreOffice not installed.
+Indexing text + tables only.
+```
+
+This is **not an error**, just a warning. PDFs are unaffected. PPTX/DOCX/XLSX
+get text + tables but no figure extraction.
+
+```powershell
+# Windows: download from libreoffice.org, install with default options
+soffice --version
+```
+
+```bash
+# Linux
+sudo apt-get install -y libreoffice  # Ubuntu/Debian
+sudo dnf install -y libreoffice      # RHEL/Fedora
+
+# macOS
+brew install --cask libreoffice
+```
+
+After install, restart your terminal and re-run preflight:
+```powershell
+python scripts/preflight.py --config deploy.config.json
+```
+
+## 8.8 Indexer stuck
+
+If the Azure portal shows the indexer "In progress" for >24h:
+
+```powershell
+python scripts/check_index.py --config deploy.config.json --check-stuck-indexer
+```
+
+Returns:
+- exit 0: healthy
+- exit 2: stuck (in_progress >24h, OR last 5 runs all failed)
+- exit 3: cannot fetch status
+
+If stuck:
+```powershell
+.\scripts\reset_indexer.ps1   # Windows
+./scripts/reset_indexer.sh    # Linux/Mac
+```
+
+If indexer hits 230s timeout repeatedly → preanalyze cache is missing for
+some PDF. Run:
+```powershell
+python scripts/preanalyze.py --config deploy.config.json --status
+python scripts/preanalyze.py --config deploy.config.json --incremental
+```
+
+## 8.9 Cosmos DB issues
+
+Cosmos is **optional** — pipeline works without it. If `cosmos.endpoint`
+or `cosmos.database` is blank in deploy.config.json, all Cosmos writes
+silently no-op.
+
+```powershell
+# 1. Provision Cosmos account
+az cosmosdb create -n <cosmos-name> -g <rg> --kind GlobalDocumentDB `
+  --default-consistency-level Session
+
+# 2. Create the database
+az cosmosdb sql database create -a <cosmos-name> -g <rg> -n indexing
+
+# 3. Edit deploy.config.json
+#    "cosmos": {
+#      "endpoint": "https://<cosmos-name>.documents.azure.us:443/",
+#      "database": "indexing"
+#    }
+
+# 4. Re-run RBAC (idempotent — only grants missing Cosmos roles)
+python scripts/assign_roles.py --config deploy.config.json
+
+# 5. Containers auto-create on first write
+python scripts/run_pipeline.py --config deploy.config.json
+```
+
+**Cosmos write failures don't fail the pipeline.** They log a warning and
+move on.
+
+## 8.10 First-time setup, full sequence
+
+If you're starting fresh on a new resource group / new laptop:
+
+```powershell
+# 1. Set SSL env vars (every new shell)
+$env:SSL_CERT_FILE = "C:\Users\<you>\Downloads\combined-ca.crt"
+$env:REQUESTS_CA_BUNDLE = "C:\Users\<you>\Downloads\combined-ca.crt"
+
+# 2. Set Azure cloud + login
+az cloud set --name AzureUSGovernment
+az login
+az account set --subscription "<your-sub-id>"
+
+# 3. Verify environment
+python scripts/preflight.py --config deploy.config.json
+
+# 4. Grant RBAC roles
+python scripts/assign_roles.py --config deploy.config.json --wait-for-propagation 300
+
+# 5. Force fresh token after RBAC change
+az logout
+az login
+az account set --subscription "<your-sub-id>"
+
+# 6. Run the one-command deploy
+python scripts/deploy.py --config deploy.config.json --auto-fix
+```
+
+If step 6 fails on `deploy_search`, run [§8.2](#82-deploy_searchpy-403)
+and follow the matching sub-section.
+
+## 8.11 When all else fails — run from Jenkins
+
+Your Jenkins agent runs **inside the corporate network** with proper
+allowlists, in the **correct subscription** (configured by infra), with
+**managed identity** that already has the right roles.
+
+If your laptop hits any of: corporate proxy block, IP firewall block,
+weird tenant issue → push to main and let Jenkins do it:
+
+1. Commit + push your changes (never commit `deploy.config.json` — it's
+   uploaded into Jenkins as a secret-file credential, one per env)
+2. Open Jenkins → trigger `Jenkinsfile.deploy` for the right environment
+3. Watch the console output
+
+## 8.12 Useful one-liners
+
+```powershell
+# What's my current Azure context?
+az account show --query "{user:user.name, sub:name, tenant:tenantId}" -o table
+
+# What roles do I have right now (across all scopes)?
+$me = az ad signed-in-user show --query id -o tsv
+az role assignment list --assignee $me --query "[].{role:roleDefinitionName, scope:scope}" -o table
+
+# Coverage check on the index
+python scripts/check_index.py --config deploy.config.json --coverage
+
+# What's stuck in preanalyze?
+python scripts/preanalyze.py --config deploy.config.json --status
+
+# Storage container PDF count
+az storage blob list --account-name <storage> --container-name <container> `
+  --auth-mode login --query "length([?ends_with(name, '.pdf')])" -o tsv
+
+# Trigger the indexer manually
+.\scripts\reset_indexer.ps1
+```
+
+## 8.13 Pasting an error into chat for help
+
+When asking for help with a 403 or other failure, include:
+
+1. **The exact error message** (run the diagnostic in §8.2 to get the body)
+2. **The JWT claims** (from the same diagnostic) — `upn`, `oid`, `tid`, `aud`
+3. **Your Azure context**: `az account show -o table`
+4. **The role list**: `az role assignment list --assignee $me --scope $searchId -o table`
+5. **The Search service config**: `az search service show -n <name> -g <rg> -o json`
+
+With those five things, the cause is usually obvious within minutes.
