@@ -94,7 +94,7 @@ Provisioned by the infrastructure team (Bicep / Terraform / portal):
 - **Cosmos DB** account with database `indexing` (containers are
   auto-created on first run; optional).
 
-Required role assignments are listed in [docs/SETUP.md §3](docs/SETUP.md#3-rbac).
+Required role assignments are listed in [docs/RUNBOOK.md §5](docs/RUNBOOK.md#5-incident-response) and granted automatically by `python scripts/assign_roles.py --config deploy.config.json`.
 
 Local prerequisites for running scripts manually:
 
@@ -131,8 +131,7 @@ Local prerequisites for running scripts manually:
 │   ├── diagnose.py            Health probe (function app + indexer)
 │   ├── inspect_pdf.py         Per-PDF cache + index inspection
 │   ├── preflight.py           Pre-deploy environment validation
-│   ├── assign_roles.{ps1,py}  One-time RBAC bootstrapper
-│   ├── bootstrap.py           Initial setup helper
+│   ├── assign_roles.py        One-time RBAC bootstrapper
 │   ├── reap_stale_rows.py     Cleanup stale index records
 │   ├── force_reindex_blobs.ps1  Force reindex of specific PDFs
 │   ├── rerun_failed_docs.ps1  Surgical retry of failed PDFs
@@ -151,10 +150,10 @@ Local prerequisites for running scripts manually:
 │   └── test_techmanual_capture.py
 │
 ├── docs/
-│   ├── SETUP.md               One-time provisioning, RBAC, Jenkins, index reference
-│   ├── RUNBOOK.md             Day-to-day operations + incident response
-│   └── TROUBLESHOOTING.md     Copy-paste diagnostic commands
+│   └── RUNBOOK.md             Everything operational: setup, ops, RBAC, Jenkins,
+│                              dashboard spec, incident response, troubleshooting
 │
+├── CHATBOT_INTEGRATION.md     Hand-off spec for the chatbot dev team
 ├── Jenkinsfile.deploy         CI pipeline (push to main)
 ├── Jenkinsfile.run            CI pipeline (nightly cron + manual)
 ├── .github/workflows/ci.yml   PR gate: pytest + ruff
@@ -205,7 +204,7 @@ just chains them in the right order with the right flags.
 
 In production, `Jenkinsfile.deploy` (one-time provision) and
 `Jenkinsfile.run` (nightly ops) both wrap these scripts. See
-[docs/SETUP.md §4](docs/SETUP.md#4-jenkins).
+[docs/RUNBOOK.md §6](docs/RUNBOOK.md#6-jenkins-pipeline-setup).
 
 ---
 
@@ -266,15 +265,15 @@ Three sources of truth, in increasing reliability:
 3. **Power BI dashboard** — reads the Cosmos DB containers
    `indexing_run_history` and `indexing_pdf_state`. Single canonical
    view for managers and operators.
-   See [docs/SETUP.md §5](docs/SETUP.md#5-dashboard-spec).
+   See [docs/RUNBOOK.md §7](docs/RUNBOOK.md#7-power-bi-dashboard-spec).
 
 ---
 
 ## When something breaks
 
-See [docs/RUNBOOK.md §5](docs/RUNBOOK.md#5-incident-response) and
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for recovery steps.
-Quick links:
+See [docs/RUNBOOK.md §5](docs/RUNBOOK.md#5-incident-response) for
+incident playbooks and [docs/RUNBOOK.md §8](docs/RUNBOOK.md#8-first-time-setup-troubleshooting)
+for first-time-setup diagnostics (SSL, proxy, firewall, 403). Quick links:
 
 - Indexer timing out / 0 docs succeeded → preanalyze cache missing for
   some PDF. Run `preanalyze.py --status` then `--incremental`.
@@ -282,9 +281,6 @@ Quick links:
   then `run_pipeline.py`.
 - Edits not reflecting in search → reconcile.py finds and purges stale
   chunks; run the pipeline.
-
-For deeper architecture and configuration reference, see
-[docs/SETUP.md](docs/SETUP.md).
 
 ---
 
@@ -316,7 +312,7 @@ post-deploy.
 - API keys (`AUTH_MODE=key`) remain supported for local development only.
 - Per-environment `deploy.config.json` is excluded from git; deliver
   it to Jenkins via secret file credentials.
-- See [docs/SETUP.md §3](docs/SETUP.md#3-rbac) for the full role matrix.
+- See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the full role matrix and operational details.
 
 ---
 

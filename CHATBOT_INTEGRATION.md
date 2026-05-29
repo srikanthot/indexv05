@@ -460,6 +460,5 @@ no useful result, walk the §5 fix that matches the failure.
 | Cover metadata extraction | [function_app/shared/process_document.py](function_app/shared/process_document.py) |
 | chunk_id and parent_id construction | [function_app/shared/ids.py](function_app/shared/ids.py) |
 
-Everything else (deployment, ops) is in [README.md](README.md),
-[docs/SETUP.md](docs/SETUP.md), and [docs/RUNBOOK.md](docs/RUNBOOK.md)
-— the chatbot agent does not need those.
+Everything else (deployment, ops) is in [README.md](README.md) and
+[docs/RUNBOOK.md](docs/RUNBOOK.md) — the chatbot agent does not need those.

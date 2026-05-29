@@ -3,10 +3,10 @@ Cross-platform RBAC bootstrapper.
 
 Reads deploy.config.json, discovers principal IDs of every managed
 identity in the system, and assigns the roles defined in
-docs/SETUP.md (RBAC matrix). Idempotent — re-running is safe; existing
-assignments are skipped.
+docs/RUNBOOK.md §5 (Identity & role assignments). Idempotent —
+re-running is safe; existing assignments are skipped.
 
-Replaces the older PowerShell-only scripts/assign_roles.ps1. Used by
+Used by
 both:
   - Jenkinsfile.deploy   (after Bicep provisioning, before deploy_search.py)
   - One-time bootstrap on a developer machine
