@@ -1,22 +1,32 @@
 Hi Prakash,
 
-Based on our current setup, we can use Azure Application Insights and Azure Monitor for performance monitoring and issue identification during the performance testing.
+As discussed in yesterday’s call, I checked the Application Insights setup for the web app. The Application Insights resource being used is `psegtmappiuatv01`, and telemetry is currently flowing for the application.
 
-Below are the key metrics we can capture and use for monitoring:
+Below are the key performance metrics that we can monitor from Application Insights:
 
-1. Request Count / Throughput
-    This helps us understand how many requests are coming into the application during the performance test window.
-2. Response Time / Request Duration
-    This helps us identify how long each API request is taking and whether any specific endpoint is responding slowly.
+1. Server Requests / Request Count
+   This shows the number of requests coming into the application during the selected performance test window.
+
+2. Server Response Time / Request Duration
+   This helps us track the average response time of the application and identify any slow API endpoints. From the Performance blade, we can drill down by operation name, such as `/chat/stream`, `/health`, or `/conversations`.
+
 3. Failed Requests
-    This helps us track failed requests, especially 4xx and 5xx errors. For 5xx errors, we can drill down further into the failure details.
-4. Dependency Duration
-    This helps us identify delays from downstream dependencies such as Azure AI Search, Azure OpenAI, Blob Storage, SharePoint, or any other external API calls, based on the telemetry available.
+   This shows the failed request count and failed operations. It helps us track application failures during the test window.
+
+4. Response Codes
+   The Failures blade shows HTTP response codes such as 404, 401, and any 5xx server-side errors if they occur during testing. This helps us classify whether the failure is related to routing, authentication, client-side errors, or server-side issues.
+
 5. Exceptions
-    This helps us capture application-level exceptions, error messages, and stack traces, which will be useful for debugging and root cause analysis.
-6. Live Metrics / Resource Health
-    During the actual performance test, we can use Live Metrics to monitor request rate, failure rate, exception rate, CPU, memory, and overall application health in near real time.
+   Application Insights captures exception types and related failure details. This helps us identify application-level errors and supports debugging/root cause analysis.
 
-For the monitoring strategy, during performance execution we will first monitor the overall request volume, response time, and failure rate in Application Insights. If we observe slowness, for example if a PDF-related request is taking 40–50 seconds, we will drill down into the request details and check the dependency timeline to identify whether the delay is coming from the application layer, Azure AI Search, OpenAI/LLM call, Blob/SharePoint, network, or any backend dependency. If we observe 5xx errors, we will review the failed requests, exception details, stack trace, and related logs to identify the failure point. We will also use Live Metrics during the test window to observe the application behavior in real time. Based on the issue pattern, we can classify whether the bottleneck is application-side, infrastructure-side, or dependency-side. If any required RAG-level metric is not automatically captured, we can add custom logging or telemetry for more detailed tracking. This approach will help us identify the issue, narrow down the root cause, and take corrective action to avoid recurrence.
+6. Dependency Calls / Dependency Duration
+   Live Metrics shows dependency call rate, dependency duration, and dependency failure rate. This helps us understand whether slowness is coming from backend dependencies or downstream service calls.
 
-For the load balancer point, no dedicated Azure Load Balancer has been identified from our side at this point. Since the application is hosted on Azure App Service / Premium V3 compute, the platform-level traffic distribution is managed by Azure App Service. We can confirm the current instance count and scale-out/autoscale configuration from the App Service Plan and update this section accordingly.
+For real-time monitoring during performance execution, we can use the Live Metrics blade. It shows request rate, request duration, failure rate, dependency call rate, exception rate, CPU, memory, and server health in near real time.
+
+For issue identification and root cause analysis, if we observe slowness, for example if a chat/PDF-related request takes 40–50 seconds, we will first check the Performance blade to identify the slow operation. Then we will drill into the request samples and review related dependency calls, exceptions, failed requests, and traces. If we see 5xx errors, we will review the Failures blade to check the failed operation, response code, exception type, and related telemetry. Based on that, we can narrow down whether the issue is coming from the application layer, dependency layer, infrastructure/resource usage, or configuration/authentication side.
+
+One note: Availability monitoring is available in Application Insights, but I do not see an active availability test configured currently. Also, diagnostic export settings are not configured at this point, so if telemetry needs to be exported to Log Analytics, Storage, or Event Hub for long-term retention/reporting, that may need separate configuration.
+
+For the Load Balancer point, I do not see a dedicated Azure Load Balancer configured from our side. Since the application is hosted on Azure App Service / Premium V3 compute, the platform-level traffic distribution is managed by Azure App Service. We can additionally confirm the current instance count and scale-out/autoscale configuration from the App Service Plan if needed.
+
