@@ -3,9 +3,15 @@ One-command bootstrap for a fresh environment.
 
 Step list (idempotent — safe to re-run):
 
+  0. Pre-preflight auto-fixes (--auto-fix only):
+       - Enable blob soft-delete (30-day retention) if disabled
+       - Create Cosmos DB database if missing
+     These run BEFORE preflight so preflight passes without manual
+     `az storage account ...` / `az cosmosdb ...` commands.
   1. Preflight checks                        (preflight.py)
   2. Detect Search auth + network issues     (auto-fix with --auto-fix)
-  3. Create Cosmos DB database if missing
+  3. Create Cosmos DB database if missing    (safety-net; usually a no-op
+                                              after STEP 0)
   4. Assign all RBAC roles (+ 300s wait)     (assign_roles.py)
   5. Wait for RBAC propagation
   6. Deploy Function App code                (deploy_function.sh/ps1)
@@ -108,6 +114,23 @@ def detect_cosmos_database(account: str, db: str, rg: str) -> bool:
     return db in (out or "").splitlines()
 
 
+def detect_blob_soft_delete(storage_account: str) -> tuple[bool, int]:
+    """Returns (enabled, retention_days). enabled=False on any error."""
+    rc, out, _ = az([
+        "storage", "account", "blob-service-properties", "show",
+        "--account-name", storage_account,
+        "--query", "deleteRetentionPolicy",
+        "-o", "json",
+    ])
+    if rc != 0:
+        return False, 0
+    try:
+        prop = json.loads(out) if out.strip() else {}
+        return bool(prop.get("enabled")), int(prop.get("days") or 0)
+    except Exception:
+        return False, 0
+
+
 def detect_cosmos_role(account: str, rg: str, principal_oid: str) -> bool:
     """Returns True if principal_oid has at least one role assignment on
     the cosmos account."""
@@ -133,9 +156,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="One-command environment bootstrap")
     ap.add_argument("--config", default="deploy.config.json")
     ap.add_argument("--auto-fix", action="store_true",
-                    help="Allow auto-fixing security-relevant settings: "
-                         "search service authOptions and publicNetworkAccess. "
-                         "Without this, the script reports issues and stops.")
+                    help="Allow auto-fixing common preflight blockers: "
+                         "search service authOptions, search publicNetworkAccess, "
+                         "blob soft-delete (30-day default), and Cosmos DB database "
+                         "creation. Without this, the script reports issues and stops.")
     ap.add_argument("--skip-cosmos", action="store_true",
                     help="Skip Cosmos DB setup entirely.")
     ap.add_argument("--skip-deploy-principal", action="store_true",
@@ -164,9 +188,54 @@ def main() -> int:
     cosmos_endpoint = (cfg.get("cosmos") or {}).get("endpoint", "")
     cosmos_db = (cfg.get("cosmos") or {}).get("database", "")
     cosmos_account = cosmos_endpoint.replace("https://", "").split(".")[0] if cosmos_endpoint else ""
+    storage_account = cfg["storage"]["accountResourceId"].rstrip("/").split("/")[-1]
 
     issues_blocking: list[str] = []
     issues_warned: list[str] = []
+
+    # ============================================================
+    section("STEP 0 / 8 — Pre-preflight auto-fixes (--auto-fix only)")
+    # ============================================================
+    # These run BEFORE preflight so the preflight checks pass without
+    # operator intervention. Each one is idempotent — re-running is safe.
+    if args.auto_fix:
+        # 0a. Enable blob soft-delete if disabled.
+        enabled, days = detect_blob_soft_delete(storage_account)
+        if enabled:
+            step(f"blob soft-delete already ON ({days}-day retention) on {storage_account}")
+        else:
+            step(f"enabling blob soft-delete on {storage_account} (30-day retention)...")
+            rc, _, err = az([
+                "storage", "account", "blob-service-properties", "update",
+                "--account-name", storage_account,
+                "--resource-group", rg,
+                "--enable-delete-retention", "true",
+                "--delete-retention-days", "30",
+            ])
+            if rc != 0:
+                issues_warned.append(f"could not enable blob soft-delete: {err[:200]}")
+            else:
+                step("blob soft-delete enabled")
+
+        # 0b. Create Cosmos DB database if missing.
+        if not args.skip_cosmos and cosmos_account and cosmos_db:
+            if detect_cosmos_database(cosmos_account, cosmos_db, rg):
+                step(f"cosmos database '{cosmos_db}' already exists in {cosmos_account}")
+            else:
+                step(f"creating cosmos database '{cosmos_db}' in {cosmos_account}...")
+                rc, _, err = az([
+                    "cosmosdb", "sql", "database", "create",
+                    "--account-name", cosmos_account,
+                    "--resource-group", rg,
+                    "--name", cosmos_db,
+                    "--throughput", "400",
+                ])
+                if rc != 0:
+                    issues_warned.append(f"could not create cosmos database: {err[:200]}")
+                else:
+                    step("cosmos database created")
+    else:
+        print("  (skipped; --auto-fix not set)")
 
     # ============================================================
     section("STEP 1 / 8 — Preflight checks")
