@@ -112,14 +112,43 @@ def _bump_blob_metadata(account: str, container: str, blob_name: str,
                        stamp: str) -> bool:
     """Set blob metadata `force_reindex=<stamp>`. Bumping metadata
     advances lastModified, which the Search indexer treats as a fresh
-    blob and re-processes."""
+    blob and re-processes.
+
+    PRESERVES existing user-metadata on the blob (operationalarea,
+    functionalarea, doctype, etc.). The `az storage blob metadata
+    update --metadata` command REPLACES the entire metadata dict, so
+    we must read existing keys first and merge force_reindex into
+    them before writing back. Otherwise every heal iteration wipes
+    classification tags the operator set for retrieval filtering.
+    """
     try:
+        # 1. Read existing metadata.
+        existing_raw = _az([
+            "storage", "blob", "metadata", "show",
+            "--account-name", account,
+            "--container-name", container,
+            "--name", blob_name,
+            "--auth-mode", "login",
+            "-o", "json",
+        ], check=True)
+        try:
+            existing = json.loads(existing_raw) if existing_raw else {}
+            if not isinstance(existing, dict):
+                existing = {}
+        except json.JSONDecodeError:
+            existing = {}
+
+        # 2. Merge force_reindex without dropping any existing keys.
+        existing["force_reindex"] = stamp
+
+        # 3. Write back the full dict (one key=value arg per entry).
+        meta_args = [f"{k}={v}" for k, v in existing.items()]
         _az([
             "storage", "blob", "metadata", "update",
             "--account-name", account,
             "--container-name", container,
             "--name", blob_name,
-            "--metadata", f"force_reindex={stamp}",
+            "--metadata", *meta_args,
             "--auth-mode", "login",
         ], check=True)
         return True
