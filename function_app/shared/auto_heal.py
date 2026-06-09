@@ -36,7 +36,7 @@ from typing import Any
 
 import httpx
 
-from .config import feature_enabled, optional_env
+from .config import optional_env
 from .credentials import SEARCH_SCOPE, STORAGE_SCOPE, bearer_token
 
 _SEARCH_API_VERSION = "2024-05-01-preview"
@@ -136,24 +136,55 @@ def _list_pdfs_in_container(storage_account: str, container: str) -> list[dict[s
 
 def _bump_blob_metadata(storage_account: str, container: str, blob_name: str,
                          stamp: str) -> bool:
-    """Update blob metadata to force lastModified to advance."""
+    """Update blob metadata to force lastModified to advance.
+
+    PRESERVES existing user-metadata on the blob. Azure's Set Blob Metadata
+    REST API (PUT ?comp=metadata) REPLACES the entire metadata dict — every
+    x-ms-meta-* header that's not present on the request is dropped. So
+    we must GET the existing headers first and re-include them on the PUT,
+    otherwise operator-set classification keys (operationalarea,
+    functionalarea, doctype, etc.) get wiped on every heal iteration.
+    """
     endpoint_suffix = "blob.core.usgovcloudapi.net" if ".azure.us" in (
         optional_env("SEARCH_ENDPOINT", "") or ""
     ) else "blob.core.windows.net"
     base = f"https://{storage_account}.{endpoint_suffix}"
     # URL-encode the blob name in path
     from urllib.parse import quote
-    url = f"{base}/{container}/{quote(blob_name)}?comp=metadata"
+    blob_url = f"{base}/{container}/{quote(blob_name)}"
     token = bearer_token(STORAGE_SCOPE)
-    headers = {
+    common_headers = {
         "Authorization": f"Bearer {token}",
         "x-ms-version": _STORAGE_API_VERSION,
         "x-ms-date": datetime.now(UTC).strftime("%a, %d %b %Y %H:%M:%S GMT"),
-        "x-ms-meta-auto_heal_at": stamp,
-        "Content-Length": "0",
     }
+
+    # 1. GET existing metadata via HEAD on ?comp=metadata. Response headers
+    #    include every x-ms-meta-<key> currently set on the blob.
+    existing_meta: dict[str, str] = {}
+    try:
+        with httpx.Client(timeout=15.0) as c:
+            head_resp = c.request("HEAD", f"{blob_url}?comp=metadata", headers=common_headers)
+        if head_resp.status_code == 200:
+            for hk, hv in head_resp.headers.items():
+                lk = hk.lower()
+                if lk.startswith("x-ms-meta-"):
+                    existing_meta[lk[len("x-ms-meta-"):]] = hv
+    except Exception as exc:
+        # Non-fatal: if we can't read existing metadata, we still bump —
+        # but we log it so operators know the merge step was skipped.
+        logging.warning("auto_heal: could not read existing metadata for %s: %s",
+                        blob_name, exc)
+
+    # 2. Merge auto_heal_at into existing keys.
+    existing_meta["auto_heal_at"] = stamp
+
+    # 3. PUT with the full merged set as x-ms-meta-<key> headers.
+    put_headers = {**common_headers, "Content-Length": "0"}
+    for k, v in existing_meta.items():
+        put_headers[f"x-ms-meta-{k}"] = v
     with httpx.Client(timeout=30.0) as c:
-        resp = c.put(url, headers=headers)
+        resp = c.put(f"{blob_url}?comp=metadata", headers=put_headers)
     if resp.status_code in (200, 201):
         return True
     logging.warning("auto_heal: metadata bump failed for %s: %d %s",
