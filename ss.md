@@ -1,224 +1,88 @@
-I need you to act like a senior DevOps + Azure AI Search engineer and help me convert this repo into a working Jenkins pipeline.
+Tier 1 — Skip everything except indexing (most common after initial setup)
+ONE command:
 
-Context:
 
-* Repo name/folder: `psegtmindex`
-* Branch currently: `dev`
-* This repo is for Azure AI Search indexing automation for technical manuals/PDFs.
-* This is not a normal frontend/backend build.
-* The goal is to run the Azure AI Search indexing pipeline through Jenkins.
-* Jenkins multibranch job already exists:
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze
+Line-by-line equivalent:
 
-  * Jenkins folder/job: `TechManual / psegtechmanualindex`
-  * Branch: `dev`
-* Current Jenkinsfile was manually created by someone. It is only a skeleton right now.
-* Current Jenkinsfile has:
 
-  * `agent { label 'linux' }`
-  * Azure credentials:
-
-    * `azure-client-id`
-    * `azure-client-secret`
-    * `azure-tenant-id`
-    * `DEV_AZURE_SUBSCRIPTION_ID`
-    * `QA_AZURE_SUBSCRIPTION_ID`
-    * `PROD_AZURE_SUBSCRIPTION_ID`
-  * Branch mapping:
-
-    * `dev` → DEV subscription
-    * `qa` → QA subscription
-    * `main` → PROD subscription
-  * Azure login using service principal
-  * Build stage only echoes “This is the BUILD stage”
-  * Deploy stage only echoes “This is the DEPLOY stage”
-  * Post stage runs `az logout`
-
-Problem:
-
-* Jenkins currently succeeds quickly, but it is not doing real work.
-* Build and Deploy stages are placeholders.
-* Need to inspect the repo and create a real Jenkins pipeline that can:
-
-  1. Set up Python
-  2. Install repo dependencies
-  3. Log into Azure
-  4. Select correct Azure subscription based on branch
-  5. Validate config
-  6. Run safe check first
-  7. Then run indexing pipeline
-  8. Optionally run full deployment only when requested
-  9. Archive useful logs/results
-  10. Fail clearly if credentials/config/Azure permissions are missing
-
-Important safety requirement:
-
-* Do not make the default action full deploy.
-* Full deploy can modify Azure Search resources, indexers, skillsets, function app settings, etc.
-* The safest default should be `check`.
-* Then we can run `run`.
-* Only later we should run `deploy`.
-
-Please inspect these files carefully:
-
-* `Jenkinsfile`
-* `Jenkinsfile.deploy`
-* `Jenkinsfile.run`
-* `deploy.config.json`
-* `deploy.config.example.json`
-* `requirements.txt`
-* `README.md`
-* `scripts/check_index.py`
-* `scripts/run_pipeline.py`
-* `scripts/deploy.py`
-* `scripts/bootstrap.py`
-* `scripts/preanalyze.py`
-* `scripts/heal_until_done.py`
-* `scripts/deploy_search.py`
-* Any other scripts used by these files
-
-First, do not change code blindly. I want you to analyze and tell me:
-
-1. What each Jenkinsfile currently does.
-2. Which Jenkinsfile should be used by the Jenkins multibranch job.
-3. Whether the current `Jenkinsfile` is enough or needs replacement.
-4. Whether `deploy.config.json` contains secrets and should be moved to Jenkins Secret File credentials.
-5. Which scripts are safe to run first.
-6. Which scripts modify Azure resources.
-7. Which command should be used for:
-
-   * safe index check only
-   * normal indexing run
-   * full deployment/setup
-8. What Jenkins credentials are required.
-9. What Azure RBAC permissions are required.
-10. What can be completed only by code changes and what requires Jenkins/Azure admin access.
-
-Expected Jenkins design:
-
-* Add Jenkins parameters:
-
-  * `ACTION`: `check`, `run`, `deploy`
-  * Optional `SKIP_TESTS`: true/false
-  * Optional `CONFIG_FILE_MODE`: repo config vs Jenkins secret file, depending on what you find
-* Keep branch-to-subscription mapping:
-
-  * `dev` → DEV subscription
-  * `qa` → QA subscription
-  * `main` → PROD subscription
-* Add stages:
-
-  1. Checkout / print repo info
-  2. Setup Python
-  3. Install dependencies
-  4. Azure login
-  5. Select subscription
-  6. Validate required files
-  7. Validate config without printing secrets
-  8. Run tests/lint if available
-  9. Run selected action:
-
-     * `check`: run `check_index.py`
-     * `run`: run `run_pipeline.py`, then `heal_until_done.py`, then `check_index.py`
-     * `deploy`: run full `deploy.py --auto-fix`
-  10. Archive logs/results
-  11. Azure logout
-
-Use these command ideas, but verify exact arguments from `--help` before finalizing:
-
-Safe check:
-
-```bash
-python scripts/check_index.py --config deploy.config.json --coverage
-```
-
-Normal indexing run:
-
-```bash
-python scripts/run_pipeline.py --config deploy.config.json
+python scripts/deploy_search.py --config deploy.config.json
+.\scripts\reset_indexer.ps1
 python scripts/heal_until_done.py --config deploy.config.json
 python scripts/check_index.py --config deploy.config.json --coverage
-```
+Use this when: function code + search artifacts are already deployed, cache is already built. You just want to retrigger the indexer (e.g., after metadata changes, or to retry stuck PDFs).
 
-Full deployment/setup:
+Tier 2 — New PDFs added, need preanalyze + indexer
+ONE command:
 
-```bash
-python scripts/deploy.py --config deploy.config.json --auto-fix
-```
 
-Please run or suggest these local checks:
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap
+Line-by-line equivalent:
 
-```bash
-git branch
-git status
-python --version
-python3 --version
-python scripts/check_index.py --help
-python scripts/run_pipeline.py --help
-python scripts/deploy.py --help
-```
 
-For Jenkins Linux agent, use Linux venv syntax:
+python scripts/preanalyze.py --config deploy.config.json --incremental
+python scripts/deploy_search.py --config deploy.config.json
+.\scripts\reset_indexer.ps1
+python scripts/heal_until_done.py --config deploy.config.json
+python scripts/check_index.py --config deploy.config.json --coverage
+Use this when: new PDFs were uploaded to the blob container. --skip-bootstrap skips RBAC, Cosmos creation, function code deploy. preanalyze.py --incremental only processes PDFs that don't already have a complete cache.
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
+Tier 3 — Just retrigger stuck PDFs (no preanalyze, no search redeploy)
+ONE command:
+
+
+python scripts/heal_until_done.py --config deploy.config.json
+Line-by-line equivalent: same — it's already one script.
+
+Use this when: indexer got stuck on some PDFs and you just want to retry. No code changes, no metadata changes, just push the indexer along.
+
+Quick reference card
+Scenario	Command
+First-time setup (RBAC, function deploy, everything)	python scripts/deploy.py --config deploy.config.json --auto-fix
+New PDFs added (need preanalyze)	python scripts/deploy.py --config deploy.config.json --skip-bootstrap
+Metadata changed or just retrigger (no new PDFs)	python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze
+Just heal stuck PDFs (cache is fine, no schema changes)	python scripts/heal_until_done.py --config deploy.config.json
+Just check status (zero changes made)	python scripts/check_index.py --config deploy.config.json --coverage
+Full teammate-facing message (copy-paste version)
+
+# ===== ONE-TIME PER MACHINE =====
+git clone https://github.com/srikanthot/indexv05.git
+cd indexv05
 pip install -r requirements.txt
-```
+# save deploy.config.json in this folder
 
-Current Jenkinsfile has service principal login like this:
+# ===== ONE-TIME PER SHELL SESSION =====
+az cloud set --name AzureUSGovernment
+az login
+az account set --subscription "sub-pseg-nj-techmanual-dev"
 
-```bash
-az login --service-principal \
-  -u ${AZURE_CLIENT_ID} \
-  -p ${AZURE_CLIENT_SECRET} \
-  --tenant ${AZURE_TENANT_ID}
-```
+# ===== FIRST-TIME DEPLOY (does RBAC + function code + everything) =====
+python scripts/deploy.py --config deploy.config.json --auto-fix
 
-Keep this style unless you find the Jenkins agent uses managed identity.
+# ===== AFTER NEW PDFS ARE UPLOADED =====
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap
 
-Please produce:
+# ===== AFTER METADATA / TAG CHANGES (no new PDFs) =====
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze
 
-1. A short explanation of what is wrong with the current Jenkinsfile.
-2. A list of missing Jenkins credentials or Azure permissions.
-3. A safe first version of the Jenkinsfile that only runs setup + Azure login + check.
-4. A final Jenkinsfile with `ACTION=check/run/deploy`.
-5. Any changes needed in the repo.
-6. Any steps I must ask Jenkins/Azure admin to do because I do not have full access.
+# ===== IF INDEXER GOT STUCK ON SOME PDFS =====
+python scripts/heal_until_done.py --config deploy.config.json
 
-Important:
+# ===== VERIFY ANY TIME =====
+python scripts/check_index.py --config deploy.config.json --coverage
+That covers every scenario. Your teammates don't need to know bootstrap.py, deploy_search.py, or reset_indexer.ps1 exist — they just pick the right deploy.py invocation based on what changed.
 
-* Do not print secrets in logs.
-* Do not echo full `deploy.config.json` if it contains keys/secrets.
-* Do not hardcode secrets in Jenkinsfile.
-* Do not remove existing branch mapping unless there is a better reason.
-* Default action should be `check`, not `deploy`.
-* Make the pipeline fail fast with clear error messages.
-* Use `set -euo pipefail` where appropriate.
-* Archive logs/artifacts if the repo creates any.
-* Increase timeout if indexing takes more than 1 hour.
-* If a script may take long time, explain where timeout should be increased.
-
-After your analysis, give me the exact final Jenkinsfile content to replace the current one.
+Hey, here's the setup:
 
 
+git clone https://github.com/srikanthot/indexv05.git
+cd indexv05
+pip install -r requirements.txt
+az cloud set --name AzureUSGovernment
+az login
+az account set --subscription "sub-pseg-nj-techmanual-dev"
+Then save the deploy.config.json I sent you in the indexv05 folder, and run:
 
-Now review the Jenkinsfile you generated as if this will run in a corporate Jenkins environment.
 
-Check specifically:
-
-1. Will this work on a Linux Jenkins agent?
-2. Are secrets protected?
-3. Is `deploy.config.json` handled safely?
-4. Does it fail clearly if Jenkins credentials are missing?
-5. Does it fail clearly if Azure login fails?
-6. Does it avoid running full deploy by default?
-7. Does it support `dev`, `qa`, and `main` branches correctly?
-8. Does it run the correct Python commands for this repo?
-9. Are the Python virtual environment commands correct for Linux?
-10. Are logs/artifacts archived properly?
-11. Is the timeout enough for PDF pre-analysis/indexing?
-12. What exact Jenkins admin/Azure admin access is still needed?
-
-Then give me the final Jenkinsfile only, plus a short list of required Jenkins credentials.
-
+python scripts/deploy.py --config deploy.config.json --auto-fix
+That single command does everything — RBAC, Cosmos DB setup, blob soft-delete, function app deploy, preanalyze, indexer, healing. Takes a few hours on first run (mostly preanalyze). Watch the console output — if it finishes with ✓ DEPLOY COMPLETE, every PDF is indexed.
