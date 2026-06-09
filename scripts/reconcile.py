@@ -314,6 +314,13 @@ def main() -> int:
                     help="Refuse to purge more than N PDFs in one run (default 2)")
     ap.add_argument("--no-lock", action="store_true",
                     help="Skip the pipeline lock. Use only for read/diagnostic mode.")
+    ap.add_argument("--skip-edits", action="store_true",
+                    help="Only act on DELETED PDFs (purge index records + cache "
+                         "+ Cosmos state for them). Skip EDITED PDFs entirely — "
+                         "their cache and chunks stay intact, indexer re-projects "
+                         "on next run via blob LMT bump. Use when a blob batch was "
+                         "re-uploaded only to set metadata, and you want the "
+                         "existing _dicache/ to be re-used instead of rebuilt.")
     args = ap.parse_args()
 
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
@@ -341,11 +348,25 @@ def main() -> int:
         except Exception as exc:
             print(f"  warning: lock acquire failed: {exc}; proceeding")
 
-    print(f"Reconcile starting (dry_run={args.dry_run}, max_purges={args.max_purges})")
+    print(f"Reconcile starting (dry_run={args.dry_run}, max_purges={args.max_purges}, "
+          f"skip_edits={args.skip_edits})")
     plan = build_plan(cfg, endpoint, index_name, headers)
+
+    # If --skip-edits, clear the edits list so they're treated as STABLE.
+    # We keep them in the printed summary as "EDITED (skipped)" so the
+    # operator can see what was bypassed.
+    edits_skipped: list[str] = []
+    if args.skip_edits and plan.edited:
+        edits_skipped = list(plan.edited)
+        plan.edited = []
+
     print()
     print(f"  ADDED   : {len(plan.added)}  (no action — preanalyze + indexer will pick them up)")
-    print(f"  EDITED  : {len(plan.edited)}  (will purge index + cache, then preanalyze re-runs)")
+    if edits_skipped:
+        print(f"  EDITED  : {len(plan.edited)}  (purge), "
+              f"{len(edits_skipped)} skipped (--skip-edits)")
+    else:
+        print(f"  EDITED  : {len(plan.edited)}  (will purge index + cache, then preanalyze re-runs)")
     print(f"  DELETED : {len(plan.deleted)} (will purge index + cache + Cosmos state)")
     print(f"  STABLE  : {len(plan.stable)}")
 
