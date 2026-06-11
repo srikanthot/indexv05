@@ -86,3 +86,12 @@ Then save the deploy.config.json I sent you in the indexv05 folder, and run:
 
 python scripts/deploy.py --config deploy.config.json --auto-fix
 That single command does everything — RBAC, Cosmos DB setup, blob soft-delete, function app deploy, preanalyze, indexer, healing. Takes a few hours on first run (mostly preanalyze). Watch the console output — if it finishes with ✓ DEPLOY COMPLETE, every PDF is indexed.
+
+python scripts/bootstrap.py --config deploy.config.json --auto-fix --skip-function-app --skip-search-artifacts --skip-smoke-test
+
+az functionapp config appsettings set -g <RG> -n <FuncApp> --settings SCM_DO_BUILD_DURING_DEPLOYMENT=1
+Compress-Archive -Path function_app\* -DestinationPath func.zip -Force
+az functionapp deployment source config-zip -g <RG> -n <FuncApp> --src func.zip
+
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap
+
