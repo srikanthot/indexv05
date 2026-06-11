@@ -166,3 +166,10 @@ $cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post
 
 python scripts/check_index.py --config deploy.config.json --coverage
 
+
+
+python scripts/preanalyze.py --config deploy.config.json --pdf MYDOC.pdf --force
+
+$cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post --url "$($cfg.search.endpoint.TrimEnd('/'))/indexers/$($cfg.search.artifactPrefix)-indexer/run?api-version=2024-11-01-preview" --resource "https://search.azure.us"
+
+python scripts/check_index.py --config deploy.config.json --coverage
