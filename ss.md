@@ -125,3 +125,44 @@ Please also create these Secret Text credentials:
 
 The credential IDs must match exactly because the Jenkinsfile uses these names. These credentials should be accessible to the TechManual/psegtechmanualindex pipeline so any team member can run the job.
 
+
+
+python scripts/check_index.py --config <prod-config>.json --check-stuck-indexer
+
+
+az rest --method get --resource "https://search.azure.us" --url "https://<prod-search-service>.search.azure.us/indexers/<prefix>-indexer/status?api-version=2024-05-01-preview"
+
+
+python scripts/check_index.py --config <prod-config>.json --coverage
+
+
+python scripts/reconcile.py --config <prod-config>.json --dry-run
+
+
+python scripts/preanalyze.py --config deploy.config.json --pdf MYDOC.pdf --force
+
+
+$cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az storage blob metadata update --account-name ($cfg.storage.accountResourceId.Split('/')[-1]) --container-name $cfg.storage.pdfContainerName --name MYDOC.pdf --metadata force_reindex=1 --auth-mode login
+
+
+python scripts/check_index.py --config deploy.config.json --coverage
+
+
+$cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post --url "$($cfg.search.endpoint.TrimEnd('/'))/indexers/$($cfg.search.artifactPrefix)-indexer/run?api-version=2024-11-01-preview" --resource "https://search.azure.us"
+
+python scripts/preanalyze.py --config deploy.config.json --pdf MYDOC.pdf --force
+
+$cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az storage blob metadata update --account-name ($cfg.storage.accountResourceId.Split('/')[-1]) --container-name $cfg.storage.pdfContainerName --name MYDOC.pdf --metadata force_reindex=1 --auth-mode login
+
+$cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post --url "$($cfg.search.endpoint.TrimEnd('/'))/indexers/$($cfg.search.artifactPrefix)-indexer/run?api-version=2024-11-01-preview" --resource "https://search.azure.us"
+
+
+python scripts/check_index.py --config deploy.config.json --coverage
+
+
+python scripts/preanalyze.py --config deploy.config.json --pdf MYDOC.pdf --force
+
+$cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post --url "$($cfg.search.endpoint.TrimEnd('/'))/indexers/$($cfg.search.artifactPrefix)-indexer/run?api-version=2024-11-01-preview" --resource "https://search.azure.us"
+
+python scripts/check_index.py --config deploy.config.json --coverage
+
