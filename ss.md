@@ -97,3 +97,31 @@ python scripts/deploy.py --config deploy.config.json --skip-bootstrap
 
 $cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json; $FuncApp = $cfg.functionApp.name; $RG = $cfg.functionApp.resourceGroup; "FuncApp = $FuncApp   |   RG = $RG"
 
+
+Hi, for the PSG Tech Manual indexing Jenkins pipeline, I need shared Jenkins credentials created at the TechManual folder level or Jenkins Global/System level, not under my personal Jenkins user.
+
+Jenkins job:
+TechManual / psegtechmanualindex
+
+Please create these Secret File credentials:
+
+1. deploy-config-dev
+    File: deploy.config.dev.json
+2. deploy-config-qa
+    File: deploy.config.qa.json
+3. deploy-config-prod
+    File: deploy.config.prod.json
+
+Each JSON file contains the exact environment resource references: Function App name/resource group, Azure AI Search endpoint/artifact prefix, Azure OpenAI endpoint/deployments, Document Intelligence endpoint, Storage account resource ID/blob container, Cosmos endpoint/database, and App Insights connection string if applicable.
+
+Please also create these Secret Text credentials:
+
+1. azure-client-id
+2. azure-client-secret
+3. azure-tenant-id
+4. DEV_AZURE_SUBSCRIPTION_ID
+5. QA_AZURE_SUBSCRIPTION_ID
+6. PROD_AZURE_SUBSCRIPTION_ID
+
+The credential IDs must match exactly because the Jenkinsfile uses these names. These credentials should be accessible to the TechManual/psegtechmanualindex pipeline so any team member can run the job.
+
