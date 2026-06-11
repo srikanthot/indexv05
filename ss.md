@@ -95,3 +95,5 @@ az functionapp deployment source config-zip -g <RG> -n <FuncApp> --src func.zip
 
 python scripts/deploy.py --config deploy.config.json --skip-bootstrap
 
+$cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json; $FuncApp = $cfg.functionApp.name; $RG = $cfg.functionApp.resourceGroup; "FuncApp = $FuncApp   |   RG = $RG"
+
