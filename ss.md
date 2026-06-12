@@ -173,3 +173,21 @@ python scripts/preanalyze.py --config deploy.config.json --pdf MYDOC.pdf --force
 $cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post --url "$($cfg.search.endpoint.TrimEnd('/'))/indexers/$($cfg.search.artifactPrefix)-indexer/run?api-version=2024-11-01-preview" --resource "https://search.azure.us"
 
 python scripts/check_index.py --config deploy.config.json --coverage
+
+
+Hi Bhagya and Anoop,
+
+I had a discussion with Paul regarding the Jenkins pipeline setup for the Tech Manual indexing work.
+
+Currently, I have Developer access in the Tech Manual Jenkins workspace. To proceed with the indexing pipeline configuration, I need access to create and manage Jenkins credentials, since the pipeline needs to securely reference Azure-related values and secrets instead of keeping them in plain text.
+
+Could you please approve elevating my access from Developer to Lead for the Tech Manual workspace?
+
+This access will allow me to create/update/manage the required credential entries for the Tech Manual and Tech Manual Index pipelines. I understand that the actual secret values will remain protected and will not be visible after they are stored.
+
+Paul mentioned that once approval is provided, he can update my access accordingly.
+
+Please reply with your approval.
+
+Thanks,
+Srikant
