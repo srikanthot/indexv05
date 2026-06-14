@@ -174,20 +174,53 @@ $cfg=Get-Content deploy.config.json -Raw|ConvertFrom-Json; az rest --method post
 
 python scripts/check_index.py --config deploy.config.json --coverage
 
+You are working in our chatbot's front-end + back-end repository. This app sits on top of an Azure AI Search index (multimodal, built from technical-manual PDFs). You do NOT have access to the indexing repo, so below is the authoritative contract for the index. Audit our code against it. Primary problem: citations/highlights are mostly wrong — clicking a citation jumps to the wrong page and highlights scattered/irrelevant regions. Fix that first, then report what index capabilities we are not using.
 
-Hi Bhagya and Anoop,
+INDEX BASICS
 
-I had a discussion with Paul regarding the Jenkins pipeline setup for the Tech Manual indexing work.
+One flat index. Each row is a "record" distinguished by the field record_type ∈ {text, diagram, table, table_row, summary}.
+All records of one PDF share parent_id. Stable per-record key is chunk_id. The Azure-internal key id is NOT stable — use chunk_id for deep-links/caching.
+Supports BM25 + HNSW vector (1536-dim ada-002) + hybrid + semantic ranker, with an integrated vectorizer (the index embeds the query itself — pass vectorQueries.kind="text", no need to call the embedding model yourself).
+Semantic config name: mm-semantic-config. Always filter processing_status eq 'ok'.
+CITATION / HIGHLIGHT FIELD CONTRACT (this is the focus)
+Each text record has TWO different "page" concepts — do not confuse them:
 
-Currently, I have Developer access in the Tech Manual Jenkins workspace. To proceed with the indexing pipeline configuration, I need access to create and manage Jenkins credentials, since the pipeline needs to securely reference Azure-related values and secrets instead of keeping them in plain text.
+physical_pdf_page (Int) = the chunk's TRUE start page. This is the page to OPEN the PDF at.
+physical_pdf_page_end (Int) and physical_pdf_pages (Int list) = the chunk's REAL, contiguous page span (e.g. [3,4]). This is the source of truth for where the chunk actually is.
+text_bbox (JSON string) = a list of highlight rectangles: [{ "page":N, "x_in":.., "y_in":.., "w_in":.., "h_in":.. }, ...]. IMPORTANT: this list is built by matching the chunk text against ALL paragraphs in the whole PDF and is NOT constrained to the chunk's real pages. It can therefore contain FALSE rectangles on pages 100–300 away, caused by repeated boilerplate (safety notices, headers, footers, table-of-contents lines).
+highlight_text (string) = plain text to feed the PDF viewer's text-search highlighter.
+printed_page_label (string) = the human-visible page label to DISPLAY (e.g. "A-12", "iv"). printed_page_label_is_synthetic=true means it was synthesized — show physical_pdf_page instead. printed_page_label_end for ranges.
+page_resolution_method (string) = confidence of the page resolution; header_match = high confidence.
+For diagram records use figure_bbox; for table records use table_bbox (these are single-region, not scattered). Coordinates are in INCHES, origin top-left: x_in,y_in = top-left corner; w_in,h_in = width/height. pdf_total_pages gives the PDF length.
+THE CITATION BUG WE ARE HITTING
+Our front-end appears to navigate to the LAST entry of text_bbox and render ALL boxes. Because text_bbox contains false far-away boxes, the user lands on the wrong page and sees scattered highlights; the real text isn't highlighted in view.
 
-Could you please approve elevating my access from Developer to Lead for the Tech Manual workspace?
+REQUIRED CORRECT BEHAVIOR — implement exactly this
 
-This access will allow me to create/update/manage the required credential entries for the Tech Manual and Tech Manual Index pipelines. I understand that the actual secret values will remain protected and will not be visible after they are stored.
+To OPEN the PDF, navigate to physical_pdf_page (NEVER the last text_bbox entry).
+To DRAW highlights, parse text_bbox and render ONLY rectangles whose page is within physical_pdf_pages (i.e. between physical_pdf_page and physical_pdf_page_end). DISCARD every box on a page outside that set — they are false matches.
+For text-search highlighting, feed highlight_text to the viewer.
+Display the label as printed_page_label; fall back to physical_pdf_page when printed_page_label_is_synthetic=true or the label is null.
+For record_type=diagram use figure_bbox; for record_type=table use table_bbox.
+If page_resolution_method != header_match, still show the citation but de-emphasize the "jump to exact spot" action.
+RETRIEVAL CAPABILITIES WE MAY NOT BE USING — audit each
+The index supports far more than plain text search. Check whether our back-end does each of these; report which are missing:
 
-Paul mentioned that once approval is provided, he can update my access accordingly.
+ Uses hybrid (BM25+vector) + queryType:"semantic" with semanticConfiguration:"mm-semantic-config", not plain keyword.
+ Does NOT hard-filter to record_type='text' — so diagrams/tables/rows can surface. Use search.in(record_type,'text,diagram,table,table_row',',').
+ Intent routing: figure/diagram/schematic/wiring words → record_type eq 'diagram' and has_diagram eq true; value/lookup questions → record_type eq 'table_row'; "what is X / define X" → record_subtype eq 'glossary'; safety/warning/LOTO words → safety_callout eq true; "what is this manual about" → record_type eq 'summary'.
+ Cross-reference expansion: when a top text hit has non-empty figures_referenced_normalized or tables_referenced, run a second query (same parent_id, record_type='diagram'/'table') to fetch the referenced figure/table and include it in the answer context.
+ table_row hits: dereference table_parent_chunk_id to fetch and show the parent table.
+ Selects and renders diagram_description (for diagram rows this carries the only visual content as text).
+ Surfaces safety_callout/callouts as UI badges and leads safety answers with them.
+ Prefers current revisions via effective_date desc / document_revision.
+ Always filters processing_status eq 'ok'.
+ Never $selects non-retrievable fields (chunk_for_semantic, surrounding_context, text_vector) — those error/return null.
+ Builds citation chip from source_file + printed_page_label linking to source_url#page=physical_pdf_page (mint a SAS token if blob isn't anonymously readable).
+TASKS — do these in order and report findings
 
-Please reply with your approval.
-
-Thanks,
-Srikant
+Locate our citation/highlight code (PDF viewer component + the back-end search response mapping). Quote the current logic for choosing the page and the bbox.
+Compare it to "REQUIRED CORRECT BEHAVIOR" above. List every deviation (e.g., "uses text_bbox[last]", "renders all boxes", "navigates to printed label").
+Do a trial run: take one real search result, log its physical_pdf_page, physical_pdf_pages, and parsed text_bbox, and show which boxes our current code would render vs which it SHOULD render after filtering by physical_pdf_pages. Report any parsing errors (e.g., text_bbox is a JSON string that must be JSON.parsed; null/empty when processing_status != ok).
+Apply the citation fix (open at physical_pdf_page; render only in-span boxes; use highlight_text; correct label fallback; diagram/table use their own bbox).
+Then audit the "RETRIEVAL CAPABILITIES" checklist against our query code and list what we're not using, with the specific code change for each.
