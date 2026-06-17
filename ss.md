@@ -224,3 +224,40 @@ Compare it to "REQUIRED CORRECT BEHAVIOR" above. List every deviation (e.g., "us
 Do a trial run: take one real search result, log its physical_pdf_page, physical_pdf_pages, and parsed text_bbox, and show which boxes our current code would render vs which it SHOULD render after filtering by physical_pdf_pages. Report any parsing errors (e.g., text_bbox is a JSON string that must be JSON.parsed; null/empty when processing_status != ok).
 Apply the citation fix (open at physical_pdf_page; render only in-span boxes; use highlight_text; correct label fallback; diagram/table use their own bbox).
 Then audit the "RETRIEVAL CAPABILITIES" checklist against our query code and list what we're not using, with the specific code change for each.
+
+
+We have a defect in the chatbot retrieval/answer generation flow.
+
+User prompt:
+"give me UEOC 24hr checklist as per SDR"
+
+Actual behavior:
+The chatbot returns only 5 checklist items and citations point to the "UEOC and Division 12-Hour Checklist" source/page.
+
+Expected behavior:
+It should retrieve and answer from the "UEOC and Division 24-Hour Checklist" source/page, which contains 6 checklist items.
+
+Observed from the document:
+The wrong cited source is the 12-hour checklist page. It has 5 responsibilities.
+The next/correct page is the 24-hour checklist page and has 6 responsibilities:
+1. Assure 48-hour checklist completed
+2. Verify facility status, circuits, all reclosers and station alarms
+3. Top off all gasoline and diesel fuel tanks
+4. Reserve lodging and arrange meals for UEOC personnel if necessary
+5. Arrange for emergency vehicles for Damage Assessment Strike team if needed
+6. Review Board Order for storm response - Regulatory Timing Requirements - Updated from 48-hour review
+
+Please inspect the backend RAG/search flow and identify why the query "UEOC 24hr checklist" retrieves the 12-hour checklist chunk instead of the 24-hour checklist chunk.
+
+Check the following areas:
+1. Azure AI Search query construction/query rewriting: is "24hr" being normalized incorrectly or ignored?
+2. Search ranking/topK: is the 12-hour chunk ranked higher than the 24-hour chunk because both contain similar terms like UEOC/checklist/SDR?
+3. Chunking/indexing: are 12-hour and 24-hour checklist pages split correctly, or are they merged/mislabelled?
+4. Metadata fields: check page number, title/header, document name, section heading, and citation mapping.
+5. Filters: verify whether the backend applies any filter for SDR/manual/source and whether it is too broad.
+6. Prompt/context assembly: confirm which retrieved chunks are passed to the LLM before answer generation.
+7. Citation generation: confirm citations are coming from the same chunks used to generate the answer.
+8. Add debug logs to print retrieved documents with score, rerankerScore, page number, title/header, chunk text preview, and source path for this exact query.
+9. Add a regression test where "UEOC 24hr checklist as per SDR" must retrieve the 24-hour checklist chunk and return exactly 6 items, not the 12-hour checklist.
+
+Please suggest the code changes needed so exact checklist duration terms like "24hr", "24-hour", "24 hour", and "24 hours" are strongly matched before semantic/reranker results are sent to the LLM.
