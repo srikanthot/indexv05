@@ -1,139 +1,104 @@
-Continue from the indexing-side audit/report you already produced.
+CONTEXT
+I have a chatbot (RAG) over technical manuals — PDFs, some 3,000–4,000 pages. Backend uses
+Azure Document Intelligence (DI) for layout; frontend renders the PDF (PDF.js). Under each
+answer the bot shows citations. Clicking a citation should: open the PDF, jump to the EXACT
+page, and highlight the ENTIRE answer chunk — every line of it, neatly — and nothing else.
 
-This is only for the indexing repository. Please do not discuss frontend/backend chatbot code, UI, chat history, query-router, or retrieval implementation right now.
+You already analyzed this codebase earlier and gave me a root-cause writeup + 5 recommendations
+(paragraph-level bbox vs chunk-level; build_highlight_text / highlight_text text-search via
+PDF.js findController being fragile; tables/figures coarse bbox; recommendations: tracked
+paragraph mapping, highlight_snippets array, row-level cell bbox, figure region + description,
+raise MAX_HIGHLIGHT_LEN to 3000). I reviewed that and it's good DIRECTIONALLY. Now I want you
+to pressure-test it against a STRONGER approach below, evaluate both against the ACTUAL CODE,
+and give me a final recommendation. DO NOT change any code yet — analysis and plan only.
 
-I want to share my current thinking and get your architectural opinion before we approve any code changes.
+WHAT THE USER EXPERIENCES (this is the bar)
+The user does not read the PDF top to bottom. They read the answer, click the citation to
+VERIFY it, land on the highlight, and look ONLY at the highlight without scrolling. If the
+highlight visibly contains the answer → they trust it. If it shows one line, the wrong
+paragraph, half a diagram, or the whole page → trust is broken even when the answer was correct.
 
-The report you gave looks good. Based on that, this is what I am thinking:
+THE ERRORS I AM ACTUALLY SEEING (user-expected → what happens)
+- Expect: full chunk highlighted.        Get: only 1 line, or only ~4 lines, answer not inside.
+- Expect: just the answer.               Get: whole 2 paragraphs, or an area the answer isn't in.
+- Expect: highlight on the right spot.   Get: shifted to one side.
+- Expect: the diagram highlighted.       Get: left half / right half / middle of the diagram only.
+- Expect: the diagram highlighted.       Get: the WHOLE page highlighted.
+- Expect: the table row.                 Get: the entire table highlighted.
+- Expect: the passage.                   Get: nothing highlighted (text-search missed).
 
-1. The current indexing pipeline has already indexed documents, but I am not fully confident that it is production-safe yet.
-2. The main concern is not just whether the indexer ran successfully. The concern is whether the indexed data is complete, current, clean, correctly cited, and safe for weekly document changes.
-3. PDFs are not static. New PDFs will be added weekly. Existing PDFs can be edited. Some files may keep the same name but have new content. Some may be renamed. Some may be deleted. Some manuals may have new revisions.
-4. Because of that, I am thinking we need stronger lifecycle handling around source hash, source last modified, document identity, index run ID, stale cleanup, cache invalidation, active/staged records, rollback, and coverage validation.
-5. I am also thinking the earlier P0 items still matter: table split coherence, table row linkage, diagram OCR projection, multi-page diagram handling, required citation metadata, and indexer failure tolerance.
-6. I do not want to blindly implement everything. I want to understand what you think should be implemented first, what can wait, what is risky, and what needs verification in the code.
+MY REFINED APPROACH (please tell me if this is correct, better, or if you have a better one)
+Core principle: SMART INGESTION, DUMB FRONTEND. The chunk's location is known for free at
+ingestion — capture it then and never re-derive it by matching text at click time.
 
-Please review this thinking and challenge it.
+1. STOP using text-search / fuzzy text matching to locate highlights.
+   Instead anchor by CHARACTER OFFSET / SPAN: DI gives every paragraph, line, word, table cell,
+   and figure a span {offset, length} into the document content string, plus a boundingRegion
+   {pageNumber, polygon}. Chunk ON the DI content string while preserving each chunk's
+   (start_offset, end_offset). Then select every element whose span INTERSECTS that range.
+   This is deterministic arithmetic — no head-probes, no length guards, no false positives,
+   no missed mid-paragraph splits.
 
-Questions I want your opinion on:
+2. Render at LINE granularity, with WORD-LEVEL CLIPPING on the first and last line, and emit a
+   LIST OF RECTANGLES (one per line) — NEVER a single min/max union box. A union box over a
+   multi-paragraph chunk is what produces "highlights 2 paragraphs + the gap + a figure between."
+   Line rects following the text contour are what make it look like a clean highlighter.
 
-1. Does this approach make sense?
-2. Am I overthinking any part?
-3. Is anything important still missing?
-4. Which items are truly P0 before the next production indexing run?
-5. Which items can be P1 or later?
-6. Which items can be added first as validation/reporting without schema changes?
-7. Which items require schema/index rebuild?
-8. Which items require full reindex?
-9. Which items are risky to implement immediately?
-10. Is there a safer rollout approach than changing everything at once?
+3. Treat the COORDINATE TRANSFORM as a SEPARATE bug. DI polygons are inches, top-left origin;
+   PDF.js draws in points (1/72"), bottom-left origin, at a viewport scale, on possibly rotated
+   pages. The "shifted / half-diagram" symptoms are almost certainly a transform bug, not a
+   matching bug. The viewer must do: x_pt = x_in*72 ; y_pt = (page_height_in - y_in - h_in)*72
+   (Y-FLIP) ; then page rotation (0/90/180/270) ; then viewport zoom ; then devicePixelRatio.
+   Build a calibration test: a known box must land dead-on at 100% zoom, 150% zoom, on a
+   landscape/rotated page, and on a non-Letter page size.
 
-Here is the direction I am considering. Please confirm, challenge, or improve it:
+4. TABLES: highlight the matched ROW's CELLS (union of cells[].boundingRegions), never the whole
+   table. Honor merged cells and tables continued across two pages.
 
-A. Validation-first items
-These seem safer to do first because they do not necessarily change the index schema:
+5. FIGURES/DIAGRAMS: the "answer" is a VISION-GENERATED description that does NOT physically
+   exist on the page, so it cannot be text-highlighted. Highlight the FIGURE REGION and show the
+   description in the citation panel/tooltip — not as an on-page text highlight.
 
-* improve coverage report
-* validate required fields by record type
-* detect stale records
-* detect deleted/renamed/edited PDFs
-* detect partial documents
-* detect pages with zero records
-* detect diagrams without OCR text
-* detect tables without row records
-* detect missing citation metadata
-* detect old active records after update
-* detect cache/source mismatch
-* add clear pass/fail coverage gate
+6. FALLBACK LADder — NEVER paint the whole page. If exact rects fail: draw paragraph rects
+   (marked approximate); if those fail: jump to the page with NO highlight + a soft "approximate
+   location" note; if nothing resolves: jump to page 1 + "could not locate, open PDF".
 
-B. Lifecycle metadata items
-These may need schema and code changes:
+7. Store a per-chunk record the frontend just DRAWS (no frontend intelligence):
+   - chunk_id (stable content hash), source_path, kind (text|table_row|figure|summary)
+   - first_page (PHYSICAL page index to jump to), printed_label (display only, never navigation)
+   - confidence (exact|approximate|none)
+   - regions: a LIST of { page, page_width_in, page_height_in, rotation,
+       rects_in: [ {x,y,w,h in inches, top-left origin}, ... one per line ] }
+       (a second region entry if the chunk crosses a page)
+   - figure_description (shown in panel, not highlighted)
+   - coords_schema_version + content_hash (invalidate on PDF reprocess)
 
-* source_hash
-* source_last_modified
-* index_run_id
-* is_active
-* document_status
-* processing_status
-* failure_reason
-* document_id
-* version_group_id if needed
-* active/staged/stale state
+COMPARISON I WANT YOU TO MAKE
+There are basically six mechanisms: (A) text-search at view time, (B) bbox chosen by fuzzy text
+match [my current], (C) bbox anchored by character offset/span, (D) word-level span anchoring,
+(E) server-baked highlight image (NotebookLM/Glean style), (F) embedded PDF annotations.
+Tell me which is best for MY case and why, and whether C+D (my refined approach) is correct or
+if E (pre-rendered highlighted page image) is worth it as a fallback/preview.
 
-C. Table coherence items
-These seem important for large manuals:
+WHAT I WANT YOU TO DO (take your time, be exhaustive)
+1. Enumerate a LARGE set of failure scenarios for citation highlighting — aim for 100+ distinct
+   cases (think up to ~1000), grouped into families: page navigation, region selection/matching,
+   coordinate transform, granularity/shape, tables, figures, multi-page/multi-column, document
+   variance (scanned/rotated/skewed/mixed/non-Latin), chunking artifacts, fallback/error states,
+   frontend/viewer/UX (zoom/scroll/remount/mobile), pipeline/data integrity (stale cache,
+   reprocessed PDF, id mismatch), and trust/perception. For EACH scenario state: what the user
+   sees → the root cause → and whether MY refined approach (C+D + the items above) SOLVES it or
+   not. Flag any scenario it does NOT fully solve.
+2. Map each scenario to the ACTUAL functions in my codebase (the ones you already found, e.g.
+   _text_bbox_for_chunk, build_highlight_text, MAX_HIGHLIGHT_LEN, the figure/table bbox paths,
+   the page-resolution logic) and say exactly what is wrong today and what would change.
+3. Give a FINAL verdict: is my refined approach the best achievable, or is there a better one?
+   If better, describe it concretely.
+4. Give an implementation PLAN ordered by impact (what to do first for the biggest visible win),
+   the exact data shape each record should store, the coordinate-transform spec, and a QA plan
+   (a golden eval set + visual-regression diffing) that would let me PROVE ~99–100% accuracy.
+5. Define what "100%" means as concrete acceptance criteria, including "zero confidently-wrong
+   highlights" (a confident wrong highlight is worse than no highlight).
 
-* table_cluster_id
-* table_split_index
-* table_split_count
-* table_page_start
-* table_page_end
-* table row to logical table linkage
-* full table artifact or full table reference
-* small critical tables should still produce table_row records
-
-D. Diagram/OCR items
-These seem important for image-heavy PDFs:
-
-* diagram_ocr_text or ocr_text should be emitted, projected, searchable, and retrievable
-* diagram page range should be captured
-* multi-page diagrams should at least be detected and flagged
-* full multi-page diagram support may be P1 if too risky
-* DI-missed embedded images should at least be counted/reported first
-* secondary image extraction can be P1 if implementation is risky
-
-E. Weekly update / rollback items
-This is what I am thinking for safer production updates:
-
-* detect source changes using hash, not only filename or last modified time
-* if same file changed, invalidate old cache and old records
-* if file deleted, mark/remove old records
-* if renamed but same hash, avoid duplicate active records
-* if new run fails, keep old active records
-* new run should be staged first
-* promote staged records only after coverage validation passes
-* if validation fails, do not promote
-* stale cleanup should happen only after successful promotion
-* consider blue/green index or new dev index for schema-changing rollout
-
-Please tell me if this staged/active approach is the right design for this repository, or if there is a simpler option that is safer.
-
-Please produce a P0-focused review, not code changes.
-
-For each possible P0 item, please give:
-
-1. Your recommendation: keep as P0 / move to P1 / postpone / needs verification
-2. Why it matters
-3. What can go wrong if skipped
-4. Files/functions likely affected
-5. Schema change required? yes/no
-6. Skillset projection change required? yes/no
-7. Full reindex required? yes/no
-8. Can we implement validation-only first? yes/no
-9. Suggested safe rollout order
-10. Acceptance criteria
-11. Rollback consideration
-
-Please also separate the plan into:
-
-1. Things we can do without schema change
-2. Things that require schema/index rebuild
-3. Things that require full reindex
-4. Things that should be tested only in dev first
-5. Things that should not be implemented yet
-
-Tone:
-Please do not blindly agree with me. I want your honest architecture review. Use wording like:
-
-* “This makes sense because…”
-* “I would challenge this because…”
-* “This may be too much for P0 because…”
-* “This should probably move to P1 because…”
-* “This needs verification in the code because…”
-* “A safer alternative is…”
-
-Final instruction:
-Do not edit files yet.
-Do not apply patches yet.
-Do not change production configs.
-Give only your opinion, challenge review, and P0-focused patch planning recommendation.
+Constraints: do NOT modify any code in this pass — analysis, scenario coverage, verdict, and
+plan only. Be specific to my actual code, not generic. Take your time and be thorough.
