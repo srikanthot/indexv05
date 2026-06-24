@@ -1,14 +1,34 @@
-| Category                               |  Count | Pending Reason / Dependency                                                                    | Next Action / Target                                                         |
-| -------------------------------------- | -----: | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Assumptions                            |      1 | Technical assumptions need to be captured in SSP / requirements file.                          | Update SSP / requirements.txt before go-live.                                |
-| Constraints                            |      1 | POC support model and post-go-live support approach need confirmation.                         | Define support coverage before go-live.                                      |
-| System Capability Requirements         |      3 | Browser/device compatibility, iOS app readiness, and supported configurations are in progress. | Confirm supported browsers/devices and complete iOS/Intune setup.            |
-| Integration Requirements               |      4 | Some items need clarification due to solution change from Power Apps to Tech Manual app.       | Update wording and validate SharePoint → Blob → Indexing and CI/CD flow.     |
-| Performance & Scalability Requirements |      1 | Performance testing is ongoing; KPI thresholds are not finalized.                              | Capture App Insights/Grafana metrics and define alert thresholds during UAT. |
-| Supportability Requirements            |      4 | Support model, ServiceNow process, monitoring thresholds, and ownership need definition.       | Finalize incident/change process and support ownership.                      |
-| Testing Requirements                   |      3 | UAT, regression testing, and failed test case retesting are ongoing.                           | Complete second-pass testing and move remaining failures into Octane.        |
-| Training Requirements                  |      2 | KT is in progress; team needs to run/deploy/support independently.                             | Complete indexing KT and end-to-end deployment KT before go-live.            |
-| Application Standards Requirement      |      1 | UAT/SIT standards need final validation.                                                       | Confirm test coverage and sign-off readiness.                                |
-| Deployment Requirements                |      1 | Deployment checklist and production support plan are pending.                                  | Finalize go-live checklist, rollback plan, and ownership.                    |
-| Platform Requirements                  |      1 | Application roles and permissions need definition.                                             | Define admin, developer, support, and end-user roles in SSP.                 |
-| **Total**                              | **22** |                                                                                                |                                                                              |
+## Slide 1: Current Project Status
+
+**Current Focus Areas**
+
+* Srikanth is working on UAT bug analysis, fixes, and defect tracking.
+* Dustin is working on iOS app development after receiving access.
+* Parallelly, chatbot indexing work is in progress.
+* Indexing has been completed for 5 documents.
+* Remaining documents will be indexed once the required code changes are available due to current technical difficulties.
+* Functional Area and Operational Area changes have been pushed to UAT.
+* UAT testing target: **July 10**
+* Chat app go-live target: **July 20**
+
+## Slide 2: Defect Summary & Action Plan
+
+**Defect Status**
+
+| Defect Category | Count | Remarks                                     |
+| --------------- | ----: | ------------------------------------------- |
+| Total Defects   |   133 | Overall defects reported                    |
+| Closed Defects  |    86 | Completed                                   |
+| Open Defects    |    22 | 11 pushed to Fusers/UAT users for retesting |
+| New Defects     |    16 | Under triage                                |
+| In Progress     |     2 | Actively being worked                       |
+
+**This Week / Next Steps**
+
+* Continue bug fixes and UAT support.
+* Follow up on 11 defects pushed for retesting.
+* Analyze and fix remaining open defects.
+* Triage newly reported defects.
+* Review bug status and filtering option demo with Bindu on Friday.
+* Continue iOS development tracking.
+* Resume remaining chatbot indexing after code changes are available.
