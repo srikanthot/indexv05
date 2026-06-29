@@ -1,56 +1,82 @@
-To delete subtitle box: **click the border of the subtitle box → press Delete**.
-If text cursor is inside, press **Esc once**, then **Delete**.
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
 
-## Slide 1
+# =========================
+# Editors / IDE
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-**Current Project Status**
+# =========================
+# Environment files
+# =========================
+.env
+.env.*
+!.env.example
 
-**Current Focus Areas**
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
 
-**UAT Defects**
+# =========================
+# Node / Next.js
+# =========================
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
 
-```text
-• Working on UAT bug analysis, fixes, and defect tracking
-• Defect tracking and retesting support is in progress
-• Functional Area and Operational Area changes pushed to UAT
-```
+# =========================
+# Logs
+# =========================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+uvicorn*.log
+*.err.log
 
-**iOS Development**
+# =========================
+# Local generated / testing folders
+# Do not push these to GitHub
+# =========================
+handoff_bundle_*/
+handoff_bundle*/
+indexing_handoff_bundle/
+reports/
+evaluation/
 
-```text
-• Dustin received iOS app access
-• iOS code build is in progress
-• Weekly progress will be tracked
-```
+# =========================
+# Local diagnostic / testing files
+# Do not push these to GitHub
+# =========================
+deploy.config.json
+diagnose_highlight.py
+index_catalog.json
 
-**Chatbot Indexing**
-
-```text
-• Indexing completed for 5 documents
-• Remaining documents pending required code changes
-• Current indexing has technical difficulties
-```
-
-**Timeline**
-
-```text
-• UAT testing target: July 10
-• Chat app go-live target: July 20
-• Friday meeting with Bindu for filtering demo and bug status review
-```
-
-## Slide 2
-
-Below your table, add:
-
-**Action Plan / Next Steps**
-
-```text
-• Follow up with Fusers/UAT users on 11 defects sent for retesting
-• Continue fixing remaining open defects
-• Triage newly reported defects and identify ownership
-• Track Dustin’s iOS development progress
-• Resume remaining chatbot indexing once code changes are available
-• Prepare for UAT closure by July 10 and go-live readiness by July 20
-```
-
+# =========================
+# Local temp/cache files
+# =========================
+tmp/
+temp/
+.cache/
