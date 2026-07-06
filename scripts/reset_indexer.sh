@@ -14,12 +14,12 @@
 #   ./scripts/reset_indexer.sh
 #   ./scripts/reset_indexer.sh --config /path/to/config.json
 #   ./scripts/reset_indexer.sh --indexer-name my-indexer-name
-
+ 
 set -euo pipefail
-
+ 
 CONFIG="deploy.config.json"
 INDEXER_NAME=""
-
+ 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)
@@ -40,12 +40,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
+ 
 if [[ ! -f "$CONFIG" ]]; then
     echo "config file not found: $CONFIG" >&2
     exit 1
 fi
-
+ 
 # Need either jq or python to parse the JSON config. Prefer jq since it's
 # a single binary; fall back to python if jq isn't available on the agent.
 parse_json() {
@@ -66,31 +66,32 @@ print(v if v is not None else "")
 PYEOF
     fi
 }
-
+ 
 SEARCH_ENDPOINT="$(parse_json '.search.endpoint')"
 SEARCH_ENDPOINT="${SEARCH_ENDPOINT%/}"
 API_VERSION="2024-11-01-preview"
-
+ 
 if [[ -z "$INDEXER_NAME" ]]; then
     PREFIX="$(parse_json '.search.artifactPrefix')"
     PREFIX="${PREFIX:-mm-manuals}"
     INDEXER_NAME="${PREFIX}-indexer"
 fi
-
+ 
 # Azure Government scope. Matches the rest of the repo.
 SCOPE="https://search.azure.us"
-
+ 
 echo "Resetting indexer '$INDEXER_NAME' at $SEARCH_ENDPOINT"
-
+ 
 az rest --method post \
     --url "$SEARCH_ENDPOINT/indexers/$INDEXER_NAME/reset?api-version=$API_VERSION" \
     --resource "$SCOPE" >/dev/null
 echo "Reset: OK"
-
+ 
 az rest --method post \
     --url "$SEARCH_ENDPOINT/indexers/$INDEXER_NAME/run?api-version=$API_VERSION" \
     --resource "$SCOPE" >/dev/null
 echo "Run triggered: OK"
-
+ 
 echo ""
 echo "Watch progress: Search service -> Indexers -> $INDEXER_NAME -> Execution history"
+ 

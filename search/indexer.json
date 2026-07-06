@@ -23,18 +23,6 @@
   },
   "fieldMappings": [
     {
-      "sourceFieldName": "metadata_operationalarea",
-      "targetFieldName": "operationalarea"
-    },
-    {
-      "sourceFieldName": "metadata_functionalarea",
-      "targetFieldName": "functionalarea"
-    },
-    {
-      "sourceFieldName": "metadata_doctype",
-      "targetFieldName": "doctype"
-    },
-    {
       "sourceFieldName": "metadata_storage_file_extension",
       "targetFieldName": "filetype"
     }

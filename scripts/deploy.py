@@ -1,78 +1,78 @@
 """
 deploy.py — ONE command, end-to-end pipeline.
-
+ 
 For the team. This is the only command they need to know:
-
+ 
     python scripts/deploy.py --config deploy.config.json --auto-fix
-
+ 
 What it runs, in order:
-
+ 
   STEP 1.  bootstrap.py --skip-search-artifacts
            Provision RBAC, fix search auth, create Cosmos DB, deploy
            function code, configure Function App app settings (incl.
            AUTO_HEAL_ENABLED=true). Stops BEFORE deploying search
            artifacts so the indexer doesn't fire on an empty preanalyze
            cache.
-
+ 
   STEP 2.  preanalyze.py --incremental
-           Run DI + GPT-4 Vision against every PDF in the container
+           Run DI + GPT-5.1 Vision against every PDF in the container
            that doesn't yet have a complete cache. Writes _dicache/
            output.json files so the indexer can read them instantly.
-
+ 
   STEP 3.  deploy_search.py
            Deploy the index, skillset, indexer, datasource to Azure
            Search. Indexer's first run will hit the populated cache.
-
+ 
   STEP 4.  reset_indexer (resetdocs + run)
            Force a fresh full pass so the indexer reprocesses every
            blob with the just-deployed skillset + preanalyzed cache.
-
+ 
   STEP 5.  heal_until_done.py
            Loop: check coverage, bump stuck blobs, retrigger indexer,
            repeat until every PDF has a `summary` record OR the same
            stuck set repeats twice (deterministic failure → exit 1
            and operator must investigate).
-
+ 
   STEP 6.  check_index.py --coverage
            Final report: which PDFs have records, how many chunks per
            PDF, anything still missing.
-
+ 
 Exit codes:
   0  every PDF in the container has a summary record in the index
   1  one of the steps failed (or heal_until_done detected a
      deterministic failure — see its output for the stuck PDF list)
   2  config file not found
-
+ 
 Re-runnable: every step is idempotent. Re-running picks up wherever
 the previous run failed. Use this as the nightly Jenkins job or the
 one-shot command after a fresh provision.
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import os
 import subprocess
 import sys
 from pathlib import Path
-
+ 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
+ 
+ 
 def section(title: str) -> None:
     print()
     print("#" * 72)
     print(f"#  {title}")
     print("#" * 72)
-
-
+ 
+ 
 def run_script(script: str, args: list[str]) -> int:
     py = sys.executable or "python"
     cmd = [py, str(REPO_ROOT / script)] + args
     print(f"\n$ {' '.join(cmd)}", flush=True)
     return subprocess.run(cmd).returncode
-
-
+ 
+ 
 def run_reset_indexer() -> int:
     """Cross-platform reset_indexer invocation."""
     if os.name == "nt":
@@ -83,8 +83,8 @@ def run_reset_indexer() -> int:
         cmd = ["bash", script]
     print(f"\n$ {' '.join(cmd)}", flush=True)
     return subprocess.run(cmd).returncode
-
-
+ 
+ 
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="ONE command end-to-end: bootstrap + preanalyze + indexer + heal.",
@@ -114,12 +114,12 @@ def main() -> int:
     ap.add_argument("--heal-wait-minutes", type=int, default=30,
                     help="Per-iteration max wait for indexer to drain (default 30).")
     args = ap.parse_args()
-
+ 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         print(f"ERROR: config not found: {cfg_path}", file=sys.stderr)
         return 2
-
+ 
     print(f"Using config: {cfg_path}")
     print(f"Auto-fix:     {args.auto_fix}")
     print(f"Steps:        "
@@ -128,7 +128,7 @@ def main() -> int:
           f"deploy_search, reset_indexer"
           f"{', heal_loop' if not args.skip_heal_loop else ''}"
           f", check_index")
-
+ 
     # ============================================================
     section("STEP 1 / 6 — Bootstrap (infrastructure + RBAC + app settings + code)")
     # ============================================================
@@ -142,7 +142,7 @@ def main() -> int:
         if rc != 0:
             print(f"\n✗ bootstrap failed (rc={rc}). Fix the issue above and re-run.")
             return 1
-
+ 
     # ============================================================
     section("STEP 2 / 6 — Preanalyze (build DI + vision cache)")
     # ============================================================
@@ -159,7 +159,7 @@ def main() -> int:
             print(f"\n✗ preanalyze failed (rc={rc}). "
                   "Check the output above; fix and re-run deploy.py.")
             return 1
-
+ 
     # ============================================================
     section("STEP 3 / 6 — Deploy search artifacts (index/skillset/indexer/datasource)")
     # ============================================================
@@ -168,7 +168,7 @@ def main() -> int:
         print(f"\n✗ deploy_search failed (rc={rc}). "
               "If 403, RBAC may need more propagation — wait 5 min and re-run.")
         return 1
-
+ 
     # ============================================================
     section("STEP 4 / 6 — Reset + run indexer (fresh pass over cached blobs)")
     # ============================================================
@@ -177,7 +177,7 @@ def main() -> int:
         # reset_indexer is best-effort — if it fails (e.g. indexer already
         # running), the next step's heal loop will trigger it again.
         print(f"  reset_indexer exited rc={rc} (continuing; heal loop will retrigger)")
-
+ 
     # ============================================================
     section("STEP 5 / 6 — Heal until done (loop until coverage = 100%)")
     # ============================================================
@@ -201,7 +201,7 @@ def main() -> int:
             print("    • Common cause on big PDFs: Function App OOM (exit code 137). "
                   "Bump the App Service Plan to a tier with more memory.")
             # Don't return immediately — still want to print final coverage below.
-
+ 
     # ============================================================
     section("STEP 6 / 6 — Coverage report")
     # ============================================================
@@ -209,7 +209,7 @@ def main() -> int:
         "--config", args.config,
         "--coverage",
     ])
-
+ 
     print()
     print("=" * 72)
     if not args.skip_heal_loop and rc == 0 and cov_rc == 0:
@@ -225,7 +225,8 @@ def main() -> int:
     print("  Pipeline completed; review coverage report above for any gaps.")
     print("=" * 72)
     return 0
-
-
+ 
+ 
 if __name__ == "__main__":
     sys.exit(main())
+ 

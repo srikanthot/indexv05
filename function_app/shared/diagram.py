@@ -1,27 +1,27 @@
 """
 analyze-diagram (per-figure)
-
+ 
 Inputs come from process-document's enriched_figures:
   - image_b64 (already cropped to the figure region)
   - figure_id, page_number, caption, bbox
   - header_1/2/3, surrounding_context
   - source_file, source_path, parent_id
-
+ 
 The vision prompt is enriched with section path, page, caption, surrounding
 text, and any figure refs we can recover from the surrounding text.
-
+ 
 Hash cache: before calling vision, we look up an existing index document
 with the same parent_id + image_hash. On a hit we copy the previous
 description and skip the vision call entirely.
 """
-
+ 
 import base64
 import hashlib
 import json
 import logging
 import re
 from typing import Any
-
+ 
 from .aoai import get_client, vision_deployment
 from .di_client import fetch_cached_crop, fetch_precomputed_vision
 from .ids import (
@@ -32,7 +32,7 @@ from .ids import (
 )
 from .search_cache import lookup_existing_by_hash, lookup_existing_by_phash
 from .text_utils import build_highlight_text
-
+ 
 VALID_CATEGORIES = {
     "circuit_diagram",
     "wiring_diagram",
@@ -50,7 +50,7 @@ VALID_CATEGORIES = {
     "decorative",
     "unknown",
 }
-
+ 
 USEFUL_CATEGORIES = {
     "circuit_diagram",
     "wiring_diagram",
@@ -65,11 +65,11 @@ USEFUL_CATEGORIES = {
     "nameplate",
     "equipment_photo",
 }
-
+ 
 MIN_CROP_BYTES = 10_000  # must match preanalyze.py triage threshold
-
+ 
 SYSTEM_PROMPT = """You are a technical-manual diagram analyst.
-
+ 
 Return STRICT JSON with these keys:
   category:    one of [circuit_diagram, wiring_diagram, schematic, line_diagram, block_diagram, pid_diagram, flow_diagram, control_logic, exploded_view, parts_list_diagram, nameplate, equipment_photo, decorative, unknown]
   is_useful:   boolean. true unless category is decorative/unknown.
@@ -83,25 +83,25 @@ Return STRICT JSON with these keys:
                wire tags, terminal IDs, model numbers, and callout numbers
                found in the image. Preserve the original text exactly.
                Separate items with " | ". If no readable text, return "".
-
+ 
 Return ONLY the JSON object. No markdown, no commentary."""
-
-
+ 
+ 
 FIGURE_REF_RE = re.compile(
     r"\b(Figure|Fig\.?)\s*[\-:]?\s*([A-Z]{0,3}[\-\.]?\d[\w\-\.]{0,8})",
     re.IGNORECASE,
 )
-
-
+ 
+ 
 def normalize_figure_ref(s: str) -> str:
     """Normalize a figure reference for cross-record joins.
-
+ 
     "Figure 18.117"  → "18117"
     "Fig 18-117"     → "18117"
     "Figure A-1"     → "a1"
-    "FIG. 4.2"  → "42"
+    "FIG. 4.2"  → "42"
     ""               → ""
-
+ 
     Strips the Figure/Fig prefix and all separators (dots, dashes,
     whitespace, NBSP, em-dash). The result is what frontend / Search
     queries should use when joining text-record `figures_referenced_normalized`
@@ -116,8 +116,8 @@ def normalize_figure_ref(s: str) -> str:
     # Strip any remaining non-alphanumerics — separators are noise for joins.
     cleaned = re.sub(r"[^A-Za-z0-9]+", "", cleaned)
     return cleaned.lower()
-
-
+ 
+ 
 def _image_hash(image_b64: str, raw: bytes | None = None) -> str:
     """SHA-256 of the decoded image bytes. Pass `raw` if already decoded
     (e.g. from _decode_b64_once below) to avoid a duplicate base64 decode."""
@@ -129,8 +129,8 @@ def _image_hash(image_b64: str, raw: bytes | None = None) -> str:
         return hashlib.sha256(raw).hexdigest()
     except Exception:
         return hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
-
-
+ 
+ 
 def _decode_b64_once(image_b64: str) -> bytes | None:
     """Decode base64 once, return None on failure. Used to share the
     decoded bytes across _image_hash, _image_phash, and triage logic
@@ -143,8 +143,8 @@ def _decode_b64_once(image_b64: str) -> bytes | None:
         return base64.b64decode(image_b64)
     except Exception:
         return None
-
-
+ 
+ 
 # Skip phash entirely for crops larger than this (raw decoded bytes).
 # PIL.Image.open decompresses the full bitmap into memory; a 10MB PNG can
 # be 200+ MB uncompressed for a 50-megapixel image. With dop=6 across the
@@ -156,7 +156,7 @@ def _decode_b64_once(image_b64: str) -> bytes | None:
 # 8 MB raw is well above any realistic figure crop -- crops in technical
 # manuals are typically 100KB-2MB.
 _PHASH_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
-
+ 
 # Maximum pixels we'll allow PIL to decompress. PIL's default
 # MAX_IMAGE_PIXELS is ~90 megapixels and only emits a warning above that
 # (Image.DecompressionBombWarning). We override to RAISE
@@ -164,14 +164,14 @@ _PHASH_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
 # legitimate PDF figure crop. Anything bigger is either a bug in the
 # rendering or an adversarial input -- abort cleanly instead of OOM.
 _PHASH_MAX_PIXELS = 30_000_000  # 30 megapixels
-
-
+ 
+ 
 def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
     """Perceptual hash (dHash variant) over a grayscale 9x8 thumbnail.
-
+ 
     Pass `raw` if already decoded (e.g. from _decode_b64_once) to skip
     a redundant base64 decode. Same return semantics as before.
-
+ 
     Memory-safety hardening (2026-05-13):
       - Skip entirely if raw decoded bytes > _PHASH_MAX_BYTES
       - Cap PIL's MAX_IMAGE_PIXELS at _PHASH_MAX_PIXELS (raises on overshoot)
@@ -187,7 +187,7 @@ def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
             raw = base64.b64decode(image_b64)
         except Exception:
             return ""
-
+ 
     # Hard size guard BEFORE PIL touches the bytes. PIL decompresses
     # into memory eagerly; oversized images can blow the worker.
     if len(raw) > _PHASH_MAX_BYTES:
@@ -196,7 +196,7 @@ def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
             len(raw), _PHASH_MAX_BYTES,
         )
         return ""
-
+ 
     try:
         from io import BytesIO
         from PIL import Image
@@ -214,7 +214,7 @@ def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
                 img = src.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
         finally:
             Image.MAX_IMAGE_PIXELS = _prev_max
-
+ 
         pixels = list(img.getdata())  # 72 grayscale ints
         bits = []
         for row in range(8):
@@ -237,8 +237,8 @@ def _image_phash(image_b64: str, raw: bytes | None = None) -> str:
         # safe failure for oversized images that previously crashed the worker.
         logging.warning("phash failed: %s: %s", type(exc).__name__, exc)
         return ""
-
-
+ 
+ 
 def phash_distance(a: str, b: str) -> int:
     """Hamming distance between two 16-hex-char phashes. Returns 64 (max)
     when either is empty / malformed. Threshold of <=8 is a typical
@@ -250,8 +250,8 @@ def phash_distance(a: str, b: str) -> int:
         return bin(int(a, 16) ^ int(b, 16)).count("1")
     except ValueError:
         return 64
-
-
+ 
+ 
 # Category-specific extraction hints. We don't run a separate
 # classifier call (that would double cost); instead we use caption
 # and surrounding-text keywords to guess the likely category and
@@ -294,8 +294,8 @@ _CATEGORY_HINTS = {
         "unclear, say so — do not guess values."
     ),
 }
-
-
+ 
+ 
 def _guess_category_from_context(caption: str, surrounding: str) -> str:
     """Cheap pre-classification using caption / surrounding-text keywords.
     Returns one of `_CATEGORY_HINTS` keys. The model still makes the
@@ -322,8 +322,8 @@ def _guess_category_from_context(caption: str, surrounding: str) -> str:
     )):
         return "parts_exploded"
     return "default"
-
-
+ 
+ 
 def _build_user_text(data: dict[str, Any]) -> str:
     source_file = safe_str(data.get("source_file"))
     h1 = safe_str(data.get("header_1"))
@@ -333,19 +333,19 @@ def _build_user_text(data: dict[str, Any]) -> str:
     page = safe_str(data.get("page_number"))
     caption = safe_str(data.get("caption"))
     surrounding = safe_str(data.get("surrounding_context"))
-
+ 
     refs = ", ".join(
         sorted(set(f"{m.group(1).title()} {m.group(2)}" for m in FIGURE_REF_RE.finditer(surrounding)))
     )
-
+ 
     surrounding_safe = surrounding[:1500].replace('"', "'")
-
+ 
     # Pick category-specific extraction guidance based on caption /
     # surrounding text keywords. Falls back to the default prompt for
     # photos and figures we can't pre-classify.
     category_guess = _guess_category_from_context(caption, surrounding)
     category_hint = _CATEGORY_HINTS[category_guess]
-
+ 
     return (
         f"You are analyzing a figure from technical manual \"{source_file}\".\n"
         f"Section: {header_path or '(unknown)'}\n"
@@ -358,8 +358,8 @@ def _build_user_text(data: dict[str, Any]) -> str:
         f"If any text/value is unclear, say so explicitly. Do not guess.\n"
         f"If decorative/logo/photo, return category=decorative and is_useful=false."
     )
-
-
+ 
+ 
 def _extract_json(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if text.startswith("```"):
@@ -371,8 +371,8 @@ def _extract_json(text: str) -> dict[str, Any]:
         if m:
             return json.loads(m.group(0))
         raise
-
-
+ 
+ 
 def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
     client = get_client()
     user_content = [
@@ -389,7 +389,7 @@ def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
             {"role": "user", "content": user_content},
         ],
         temperature=0.0,
-        max_tokens=1500,
+        max_completion_tokens=1500,
         response_format={"type": "json_object"},
         # Explicit per-call timeout. Vision calls on stuck Gov Cloud
         # sockets can hang up to the SDK default 600s, blowing past the
@@ -397,8 +397,8 @@ def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
         timeout=60.0,
     )
     return _extract_json(resp.choices[0].message.content or "{}")
-
-
+ 
+ 
 def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     image_b64 = safe_str(data.get("image_b64"))
     figure_id = safe_str(data.get("figure_id"))
@@ -419,7 +419,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     # highlights uniformly across record types: parse JSON → iterate the
     # array → for each entry draw a rect on entry.page.
     bbox_json = json.dumps([bbox], separators=(",", ":")) if bbox else ""
-
+ 
     # Decode base64 ONCE and share across both hash functions. Without
     # this both functions independently decoded the same 5MB string,
     # tripling decode CPU for every figure. For a PDF with 1500 figures,
@@ -435,18 +435,18 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     img_hash = _image_hash(image_b64, raw=raw_bytes)
     img_phash = ""  # lazily computed if/when we reach the phash cache lookup
     chunk_id = diagram_chunk_id(source_path, source_file, img_hash)
-
+ 
     # Diagrams always live on a single physical page, so physical_pdf_pages
     # is a single-element list. Kept for parity with text/table records so
     # the UI can use the same `physical_pdf_pages/any(...)` filter pattern
     # across all record types.
     physical_pdf_pages = [page_number] if isinstance(page_number, int) else []
-
+ 
     # Printed page label: diagrams don't run through extract-page-label,
     # so we synthesize from the physical page number. Same UX rule as
     # text/table: never blank when we know the page.
     printed_label = str(page_number) if isinstance(page_number, int) else ""
-
+ 
     base_record = {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -478,7 +478,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "surrounding_context": surrounding,
         "skill_version": SKILL_VERSION,
     }
-
+ 
     # Cover metadata. Read from input data only -- process-document /
     # preanalyze always supply these fields (empty when not extractable).
     # The previous "fallback to cover_metadata_for_pdf" branch was
@@ -499,7 +499,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     )
     base_record["last_indexed_at"] = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     base_record["language"] = "en"
-
+ 
     def _finalize(record: dict[str, Any]) -> dict[str, Any]:
         """Stamp highlight_text + figures_referenced_normalized onto every
         return path so the record carries:
@@ -516,7 +516,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         norm = normalize_figure_ref(ref)
         record["figures_referenced_normalized"] = [norm] if norm else []
         return record
-
+ 
     if not image_b64:
         # Try fetching the crop from blob cache (pre-computed by preanalyze)
         if source_path and figure_id:
@@ -539,7 +539,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 base_record["chunk_id"] = chunk_id
                 base_record["image_hash"] = img_hash
                 base_record["figure_bbox"] = bbox_json
-
+ 
     if not image_b64:
         return _finalize({
             **base_record,
@@ -549,7 +549,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": "",
             "processing_status": "no_image",
         })
-
+ 
     # Trace breadcrumb so worker crashes leave a hint in App Insights about
     # which figure was being processed. Each step in process_diagram logs
     # a single info line so the LAST log line before a crash identifies
@@ -559,7 +559,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "diagram start: src=%s fig=%s img_bytes=%d",
         (source_file or "")[-40:], figure_id, img_size,
     )
-
+ 
     # ── Image triage: skip tiny crops ──
     # Reuse raw_bytes from the _decode_b64_once call above instead of
     # decoding again. On a 5MB crop × 500 figures/PDF the redundant decode
@@ -576,7 +576,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": "",
             "processing_status": "skipped_tiny",
         })
-
+ 
     # ── Fast path: pre-computed vision result from preanalyze.py ──
     if source_path and figure_id:
         precomputed = fetch_precomputed_vision(source_path, figure_id)
@@ -599,7 +599,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             full_desc = p_description
             if p_ocr_text:
                 full_desc = f"{p_description}\nLabels: {p_ocr_text}"
-
+ 
             # img_hash + chunk_id already computed at top of function;
             # base_record already carries them. phash stays "" on this
             # path -- not needed for cross-PDF dedup of precomputed
@@ -615,7 +615,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 "figure_ref": p_figure_ref,
                 "processing_status": "precomputed",
             })
-
+ 
     cached = lookup_existing_by_hash(parent_id, img_hash)
     if cached:
         return _finalize({
@@ -626,7 +626,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             "figure_ref": safe_str(cached.get("figure_ref")),
             "processing_status": "cache_hit",
         })
-
+ 
     # Cross-PDF perceptual-hash lookup. Gated by env flag
     # SEARCH_CACHE_CROSS_PARENT — off by default so this is opt-in.
     # When enabled, the same OEM nameplate appearing in 50 manuals
@@ -654,7 +654,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 "figure_ref": safe_str(cached_phash.get("figure_ref")),
                 "processing_status": "cache_hit_phash",
             })
-
+ 
     # Narrowed exception scope: bare `except Exception` here swallowed
     # AAD/credential failures (azure.core ClientAuthenticationError,
     # openai.AuthenticationError) silently, emitting empty diagram records
@@ -696,31 +696,31 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         # Auth / config / unknown — propagate so the skill error envelope
         # surfaces the failure to the indexer.
         raise
-
+ 
     category = (result.get("category") or "unknown").strip().lower()
     if category not in VALID_CATEGORIES:
         category = "unknown"
-
+ 
     description = safe_str(result.get("description")).strip()
     figure_ref = safe_str(result.get("figure_ref")).strip()
     if not figure_ref:
         m = FIGURE_REF_RE.search(caption or surrounding or "")
         if m:
             figure_ref = f"{m.group(1).title()} {m.group(2)}"
-
+ 
     ocr_text = safe_str(result.get("ocr_text")).strip()
-
+ 
     is_useful = bool(result.get("is_useful"))
     has_diagram = (
         is_useful
         and category in USEFUL_CATEGORIES
         and bool(description)
     )
-
+ 
     full_description = description
     if ocr_text:
         full_description = f"{description}\nLabels: {ocr_text}"
-
+ 
     # Three distinct outcomes -- DON'T conflate "decorative" with
     # "empty description":
     #   - has_diagram=True  -> "ok"        (cached, never re-run)
@@ -740,7 +740,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         status = "vision_empty"
     else:
         status = "skipped_decorative"
-
+ 
     return _finalize({
         **base_record,
         "has_diagram": has_diagram,
@@ -749,3 +749,4 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "figure_ref": figure_ref,
         "processing_status": status,
     })
+ 

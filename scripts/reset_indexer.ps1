@@ -12,30 +12,30 @@
 # Usage:
 #   ./scripts/reset_indexer.ps1
 #   ./scripts/reset_indexer.ps1 -IndexerName my-indexer-name
-
+ 
 param(
     [string]$Config = "deploy.config.json",
     [string]$IndexerName = ""
 )
-
+ 
 if (-not (Test-Path $Config)) {
     Write-Host "Config file not found: $Config" -ForegroundColor Red
     exit 1
 }
-
+ 
 $cfg = Get-Content $Config -Raw | ConvertFrom-Json
 $searchEndpoint = $cfg.search.endpoint.TrimEnd("/")
 $apiVersion = "2024-11-01-preview"
-
+ 
 if (-not $IndexerName) {
     $prefix = if ($cfg.search.artifactPrefix) { $cfg.search.artifactPrefix } else { "mm-manuals" }
     $IndexerName = "$prefix-indexer"
 }
-
+ 
 $scope = "https://search.azure.us/.default"
-
+ 
 Write-Host "Resetting indexer '$IndexerName' at $searchEndpoint"
-
+ 
 # Reset
 az rest --method post `
     --url "$searchEndpoint/indexers/$IndexerName/reset?api-version=$apiVersion" `
@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 Write-Host "Reset: OK" -ForegroundColor Green
-
+ 
 # Run
 az rest --method post `
     --url "$searchEndpoint/indexers/$IndexerName/run?api-version=$apiVersion" `
@@ -57,3 +57,4 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Run triggered: OK" -ForegroundColor Green
 Write-Host ""
 Write-Host "Watch progress in Azure portal: Search service -> Indexers -> $IndexerName -> Execution history"
+ 

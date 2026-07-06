@@ -1,11 +1,11 @@
 """
 heal_until_done.py — foreground heal loop that runs the indexer to 100%.
-
+ 
 Background: the function-app auto_heal_timer bumps stuck blobs every 30
 min. It works, but it has no completion signal — operators have to
 manually poll coverage and decide when to stop. This script is the
 foreground CI loop:
-
+ 
     while stuck PDFs exist:
         bump metadata on each stuck blob
         clear indexer failed-items state for those blobs
@@ -13,27 +13,27 @@ foreground CI loop:
         wait for the indexer to go idle
         sleep a grace period for skills to settle
         re-check coverage
-
+ 
 Exit codes:
     0  every container PDF has a `summary` record in the index
     1  same stuck set repeated 2 iterations in a row (deterministic
        failure — manual investigation needed), OR max iterations
        elapsed with stuck PDFs remaining
-
+ 
 Usage:
     python scripts/heal_until_done.py --config deploy.config.json
     python scripts/heal_until_done.py --config deploy.config.json \\
         --max-iterations 8 --wait-minutes 30 --grace-minutes 5
-
+ 
 Auth:
     DefaultAzureCredential for Azure AI Search (REST PUTs / GETs).
     az CLI in `--auth-mode login` for storage blob operations
     (matches force_reindex_blobs.ps1 — keeps the same operator-identity
     requirements).
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import datetime
 import json
@@ -42,35 +42,35 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
+ 
 import httpx
 from azure.identity import DefaultAzureCredential
-
+ 
 API_VERSION = "2024-05-01-preview"
 SEARCH_SCOPE = "https://search.azure.us/.default"
-
-
+ 
+ 
 def _az_bin() -> str:
     """`az.cmd` on Windows, `az` elsewhere. Python's subprocess can't
     locate the .cmd shim without the explicit suffix on Windows."""
     return "az.cmd" if os.name == "nt" else "az"
-
-
+ 
+ 
 def _az(args: list[str], *, check: bool = True) -> str:
     cmd = [_az_bin()] + args
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if check and r.returncode != 0:
         raise RuntimeError(f"az {' '.join(args[:5])} failed: {r.stderr[:400]}")
     return r.stdout.strip()
-
-
+ 
+ 
 def _storage_endpoint_suffix(search_endpoint: str) -> str:
     """Mirror force_reindex_blobs.ps1: Gov vs. Public Azure detection."""
     if ".azure.us" in search_endpoint:
         return "blob.core.usgovcloudapi.net"
     return "blob.core.windows.net"
-
-
+ 
+ 
 def _summary_pdfs(client: httpx.Client, endpoint: str, index_name: str,
                   token: str) -> set[str]:
     """Return source_file values that already have a `summary` record."""
@@ -92,8 +92,8 @@ def _summary_pdfs(client: httpx.Client, endpoint: str, index_name: str,
         if sf:
             out.add(sf)
     return out
-
-
+ 
+ 
 def _pdf_blobs(account: str, container: str) -> list[str]:
     """List PDF blob names in the container. Uses az CLI login auth so
     operator/CI identity is honored (same as force_reindex_blobs.ps1)."""
@@ -106,14 +106,14 @@ def _pdf_blobs(account: str, container: str) -> list[str]:
         "-o", "json",
     ])
     return json.loads(raw) if raw else []
-
-
+ 
+ 
 def _bump_blob_metadata(account: str, container: str, blob_name: str,
                        stamp: str) -> bool:
     """Set blob metadata `force_reindex=<stamp>`. Bumping metadata
     advances lastModified, which the Search indexer treats as a fresh
     blob and re-processes.
-
+ 
     PRESERVES existing user-metadata on the blob (operationalarea,
     functionalarea, doctype, etc.). The `az storage blob metadata
     update --metadata` command REPLACES the entire metadata dict, so
@@ -137,10 +137,10 @@ def _bump_blob_metadata(account: str, container: str, blob_name: str,
                 existing = {}
         except json.JSONDecodeError:
             existing = {}
-
+ 
         # 2. Merge force_reindex without dropping any existing keys.
         existing["force_reindex"] = stamp
-
+ 
         # 3. Write back the full dict (one key=value arg per entry).
         meta_args = [f"{k}={v}" for k, v in existing.items()]
         _az([
@@ -155,8 +155,8 @@ def _bump_blob_metadata(account: str, container: str, blob_name: str,
     except RuntimeError as exc:
         print(f"    metadata update failed for {blob_name}: {exc}", flush=True)
         return False
-
-
+ 
+ 
 def _reset_failed_items(client: httpx.Client, endpoint: str, indexer_name: str,
                         blob_urls: list[str], token: str) -> None:
     """Clear failed-items state for the given documents so the indexer
@@ -175,8 +175,8 @@ def _reset_failed_items(client: httpx.Client, endpoint: str, indexer_name: str,
     except Exception as exc:
         print(f"  resetdocs: failed ({exc}); continuing — bump alone usually retriggers",
               flush=True)
-
-
+ 
+ 
 def _trigger_indexer_run(client: httpx.Client, endpoint: str, indexer_name: str,
                           token: str) -> None:
     """POST /indexers/<name>/run. Tolerate 409 = already running."""
@@ -192,8 +192,8 @@ def _trigger_indexer_run(client: httpx.Client, endpoint: str, indexer_name: str,
     if r.status_code not in (200, 202, 204):
         raise RuntimeError(f"indexer run failed: {r.status_code} {r.text[:300]}")
     print("  run: triggered", flush=True)
-
-
+ 
+ 
 def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
                     token: str, *, max_minutes: int) -> None:
     """Block until the indexer is no longer reporting inProgress, or the
@@ -219,12 +219,12 @@ def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
         time.sleep(backoff)
     print(f"  timeout: indexer still in-progress after {max_minutes} min "
           "(continuing to next iteration)", flush=True)
-
-
+ 
+ 
 def _now_stamp() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y%m%d%H%M%S")
-
-
+ 
+ 
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Loop until every container PDF has a summary record in the index.",
@@ -245,13 +245,13 @@ def main() -> int:
                     help="Cap the number of stuck blobs bumped per iteration "
                          "(default 20). Mirrors force_reindex_blobs.ps1.")
     args = ap.parse_args()
-
+ 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         print(f"ERROR: config not found: {cfg_path}", file=sys.stderr)
         return 2
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-
+ 
     search_ep = cfg["search"]["endpoint"].rstrip("/")
     prefix = cfg["search"].get("artifactPrefix") or "mm-manuals"
     indexer_name = f"{prefix}-indexer"
@@ -259,7 +259,7 @@ def main() -> int:
     storage_acct = cfg["storage"]["accountResourceId"].rstrip("/").split("/")[-1]
     container = cfg["storage"]["pdfContainerName"]
     storage_suffix = _storage_endpoint_suffix(search_ep)
-
+ 
     print(f"Search:   {search_ep}")
     print(f"Index:    {index_name}")
     print(f"Indexer:  {indexer_name}")
@@ -267,32 +267,32 @@ def main() -> int:
     print(f"Plan:     up to {args.max_iterations} iterations, "
           f"{args.wait_minutes}m idle wait + {args.grace_minutes}m grace each")
     print()
-
+ 
     cred = DefaultAzureCredential()
     previous_stuck: set[str] | None = None
     repeat_streak = 0
-
+ 
     with httpx.Client(timeout=60.0) as client:
         for it in range(1, args.max_iterations + 1):
             print("=" * 70)
             print(f"  ITERATION {it}/{args.max_iterations}")
             print("=" * 70)
-
+ 
             token = cred.get_token(SEARCH_SCOPE).token
-
+ 
             done = _summary_pdfs(client, search_ep, index_name, token)
             blob_names = set(_pdf_blobs(storage_acct, container))
             stuck = blob_names - done
-
+ 
             print(f"  Container PDFs : {len(blob_names)}")
             print(f"  Indexed (has summary): {len(done)}")
             print(f"  Stuck: {len(stuck)}")
-
+ 
             if not stuck:
                 print()
                 print("DONE: every container PDF has a summary record.")
                 return 0
-
+ 
             if previous_stuck is not None and stuck == previous_stuck:
                 repeat_streak += 1
                 print(f"  Stuck set unchanged from previous iteration "
@@ -311,7 +311,7 @@ def main() -> int:
             else:
                 repeat_streak = 0
             previous_stuck = set(stuck)
-
+ 
             to_bump = sorted(stuck)[: args.max_per_iteration]
             print(f"  Bumping metadata on {len(to_bump)} blob(s):")
             stamp = _now_stamp()
@@ -321,29 +321,29 @@ def main() -> int:
                 print(f"    {'ok ' if ok else 'FAIL'}  {name}")
                 if ok:
                     bumped.append(name)
-
+ 
             if not bumped:
                 print("  no blobs could be updated (storage failures); aborting")
                 return 1
-
+ 
             blob_urls = [
                 f"https://{storage_acct}.{storage_suffix}/{container}/{n}"
                 for n in bumped
             ]
             _reset_failed_items(client, search_ep, indexer_name, blob_urls, token)
             _trigger_indexer_run(client, search_ep, indexer_name, token)
-
+ 
             print(f"  Waiting up to {args.wait_minutes} min for indexer to drain...")
             _wait_for_idle(client, search_ep, indexer_name, token,
                           max_minutes=args.wait_minutes)
-
+ 
             if args.grace_minutes > 0:
                 print(f"  Grace sleep {args.grace_minutes} min for skill "
                       "records to project...")
                 time.sleep(args.grace_minutes * 60)
-
+ 
             print()
-
+ 
     print()
     print(f"GAVE UP after {args.max_iterations} iterations.")
     if previous_stuck:
@@ -351,7 +351,7 @@ def main() -> int:
         for sf in sorted(previous_stuck):
             print(f"  - {sf}")
     return 1
-
-
+ 
+ 
 if __name__ == "__main__":
     sys.exit(main())

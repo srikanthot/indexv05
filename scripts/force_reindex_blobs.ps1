@@ -20,36 +20,36 @@
 #           --include-recent  also bumps blobs uploaded < 30 min ago
 #                             (default behavior skips them -- they're likely
 #                              still in mid-processing)
-
+ 
 param(
   [string]$Config = 'deploy.config.json',
   [int]$Max = 20,
   [switch]$IncludeRecent
 )
 $ErrorActionPreference = 'Stop'
-
+ 
 if (-not (Test-Path $Config)) { throw "Config file not found: $Config" }
 $cfg = Get-Content $Config -Raw | ConvertFrom-Json
-
+ 
 $SearchEp = $cfg.search.endpoint.TrimEnd('/')
 $Prefix = $cfg.search.artifactPrefix
 $IndexerName = "$Prefix-indexer"
 $IndexName = "$Prefix-index"
 $StorageAcct = ($cfg.storage.accountResourceId -split '/')[-1]
 $Container = $cfg.storage.pdfContainerName
-
+ 
 # Detect storage endpoint suffix (Gov vs Public Azure)
 $StorageEndpoint = if ($SearchEp -match '\.azure\.us') {
   'blob.core.usgovcloudapi.net'
 } else {
   'blob.core.windows.net'
 }
-
+ 
 # Step 0: Get AAD tokens
 Write-Host "==> Step 0: acquiring AAD tokens"
 $SearchToken = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
 if (-not $SearchToken) { throw "Failed to acquire AAD token for Search service" }
-
+ 
 # Step 1: Query index for source_files that already have a summary record
 Write-Host "==> Step 1: querying index for already-done PDFs"
 $SearchUrl = "$SearchEp/indexes/$IndexName/docs/search?api-version=2024-05-01-preview"
@@ -59,7 +59,7 @@ $Body = @{
   select = "source_file"
   top = 1000
 } | ConvertTo-Json
-
+ 
 try {
   $Response = Invoke-RestMethod -Uri $SearchUrl -Method POST `
     -Headers @{ "Authorization" = "Bearer $SearchToken"; "Content-Type" = "application/json" } `
@@ -69,7 +69,7 @@ try {
 }
 $DonePdfs = @($Response.value | ForEach-Object { $_.source_file } | Where-Object { $_ })
 Write-Host "  index has summary records for $($DonePdfs.Count) PDFs"
-
+ 
 # Step 2: List PDFs in the storage container
 Write-Host "==> Step 2: listing PDFs in container $Container"
 $BlobJson = az storage blob list `
@@ -80,22 +80,22 @@ $BlobJson = az storage blob list `
   -o json
 $Blobs = $BlobJson | ConvertFrom-Json
 Write-Host "  container has $($Blobs.Count) PDFs"
-
+ 
 if ($Blobs.Count -eq 0) {
   Write-Host "ERROR: container is empty or you lack permission" -ForegroundColor Red
   exit 1
 }
-
+ 
 # Step 3: Find stuck PDFs = in container but no summary record
 $Now = Get-Date
 $RecentCutoff = $Now.AddMinutes(-30)
-
+ 
 $Stuck = @($Blobs | Where-Object {
   $name = $_.name
   $modified = [DateTime]$_.modified
   ($name -notin $DonePdfs) -and ($IncludeRecent -or ($modified -lt $RecentCutoff))
 })
-
+ 
 if ($Stuck.Count -eq 0) {
   Write-Host ""
   Write-Host "==> No stuck PDFs found." -ForegroundColor Green
@@ -104,7 +104,7 @@ if ($Stuck.Count -eq 0) {
   Write-Host "     Use --IncludeRecent to also retry those.)"
   exit 0
 }
-
+ 
 # Cap at $Max to prevent runaway
 $Stuck = $Stuck | Select-Object -First $Max
 Write-Host ""
@@ -112,7 +112,7 @@ Write-Host "==> Found $($Stuck.Count) stuck PDF(s) to heal:" -ForegroundColor Ye
 $Stuck | ForEach-Object {
   Write-Host "  - $($_.name)  (last_modified=$($_.modified))" -ForegroundColor Yellow
 }
-
+ 
 # Step 4: Bump metadata on each stuck blob
 Write-Host ""
 Write-Host "==> Step 3: bumping lastModified on $($Stuck.Count) blobs"
@@ -124,11 +124,33 @@ $ErrorActionPreference = 'Continue'
 foreach ($s in $Stuck) {
   $name = $s.name
   Write-Host "  - $name" -NoNewline
+ 
+  # Read existing metadata first so we don't wipe operator-set keys
+  # (operationalarea, functionalarea, doctype, etc.)
+  $existingRaw = az storage blob metadata show `
+    --account-name $StorageAcct `
+    --container-name $Container `
+    --name $name `
+    --auth-mode login 2>&1
+  $metaArgs = @("force_reindex=$Stamp")
+  if ($LASTEXITCODE -eq 0 -and $existingRaw) {
+    try {
+      $existing = $existingRaw | ConvertFrom-Json
+      foreach ($key in $existing.PSObject.Properties.Name) {
+        if ($key -ne 'force_reindex') {
+          $metaArgs += "$key=$($existing.$key)"
+        }
+      }
+    } catch {
+      # If parse fails, proceed with just force_reindex (old behavior)
+    }
+  }
+ 
   $null = az storage blob metadata update `
     --account-name $StorageAcct `
     --container-name $Container `
     --name $name `
-    --metadata "force_reindex=$Stamp" `
+    --metadata @metaArgs `
     --auth-mode login 2>&1
   if ($LASTEXITCODE -eq 0) {
     Write-Host "  -> updated" -ForegroundColor Green
@@ -139,13 +161,13 @@ foreach ($s in $Stuck) {
   }
 }
 $ErrorActionPreference = $prevEAP
-
+ 
 if ($Updated.Count -eq 0) {
   Write-Host ""
   Write-Host "ERROR: no blobs were updated. Aborting." -ForegroundColor Red
   exit 1
 }
-
+ 
 # Step 5: Reset failed-items state for updated blobs
 Write-Host ""
 Write-Host "==> Step 4: clearing failed-items list for updated blobs"
@@ -154,7 +176,7 @@ $BlobUrls = $Updated | ForEach-Object {
 }
 $ResetUrl = "$SearchEp/indexers/$IndexerName/resetdocs?api-version=2024-05-01-preview"
 $ResetBody = @{ datasourceDocumentIds = $BlobUrls } | ConvertTo-Json -Depth 3
-
+ 
 try {
   Invoke-RestMethod -Uri $ResetUrl -Method POST `
     -Headers @{ "Authorization" = "Bearer $SearchToken"; "Content-Type" = "application/json" } `
@@ -164,7 +186,7 @@ try {
   Write-Host "  -> reset failed: $($_.Exception.Message)" -ForegroundColor Yellow
   Write-Host "     Continuing -- metadata bump alone usually triggers reprocessing"
 }
-
+ 
 # Step 6: Trigger indexer run immediately
 Write-Host ""
 Write-Host "==> Step 5: triggering indexer run"
@@ -180,7 +202,7 @@ try {
     Write-Host "  -> run trigger failed: $($_.Exception.Message)" -ForegroundColor Yellow
   }
 }
-
+ 
 # Summary
 Write-Host ""
 Write-Host "=== SUMMARY ===" -ForegroundColor Cyan
@@ -194,3 +216,4 @@ Write-Host "Expected: all healed PDFs done in 1-3 hours."
 Write-Host ""
 Write-Host "Monitor with:"
 Write-Host "  python scripts/check_index.py --config $Config --coverage"
+ 

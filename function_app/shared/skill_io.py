@@ -1,6 +1,6 @@
 """
 Azure AI Search Custom WebApi Skill request/response envelope.
-
+ 
 Each route receives:
 {
   "values": [
@@ -8,7 +8,7 @@ Each route receives:
     ...
   ]
 }
-
+ 
 And must return:
 {
   "values": [
@@ -16,7 +16,7 @@ And must return:
     ...
   ]
 }
-
+ 
 CRITICAL contract: a single record cannot return BOTH `data` and
 `errors` populated at the same time. Azure Search rejects such
 responses with: "Web Api response contains both data and errors.
@@ -26,17 +26,17 @@ failure in `errors`. The indexer logs the error in its execution
 status; the chunk doesn't land in the index, which is the right
 outcome — a partially-processed chunk would mislead retrieval.
 """
-
+ 
 import json
 import logging
 from collections.abc import Callable
 from typing import Any
-
+ 
 import azure.functions as func
-
+ 
 from .config import ConfigError
-
-
+ 
+ 
 def handle_skill_request(
     req: func.HttpRequest,
     record_processor: Callable[[dict[str, Any]], dict[str, Any]],
@@ -51,7 +51,7 @@ def handle_skill_request(
         # 'InternalServerError'" with no useful detail.
         logging.warning("skill request body parse failed: %s", exc)
         return func.HttpResponse("Invalid JSON body", status_code=400)
-
+ 
     if not isinstance(body, dict):
         return func.HttpResponse("Body must be a JSON object", status_code=400)
     values_in = body.get("values") or []
@@ -60,7 +60,7 @@ def handle_skill_request(
             "Body 'values' must be a list", status_code=400,
         )
     values_out = []
-
+ 
     for record in values_in:
         record_id = record.get("recordId", "0")
         data_in = record.get("data", {}) or {}
@@ -93,7 +93,7 @@ def handle_skill_request(
                 "errors": [{"message": f"{type(exc).__name__}: {exc}"}],
                 "warnings": [],
             })
-
+ 
     return func.HttpResponse(
         json.dumps({"values": values_out}),
         mimetype="application/json",

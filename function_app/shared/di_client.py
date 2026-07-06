@@ -1,27 +1,27 @@
 """
 Azure Document Intelligence REST client.
-
+ 
 Calls the prebuilt-layout model directly so we can access the structured
 figures[] and tables[] arrays that the built-in DocumentIntelligenceLayoutSkill
 does not surface. Built-in skill remains in the skillset for the markdown
 text path; this client is for the figure/table enrichment path.
-
+ 
 Pre-analysis cache: if a .di.json file exists alongside the PDF in blob
 storage, we read that instead of calling DI live. This removes the 230-second
 Azure Search WebApi skill timeout constraint for large PDFs. Run
 scripts/preanalyze.py before the indexer to populate the cache.
 """
-
+ 
 from __future__ import annotations
-
+ 
 import json
 import logging
 import time
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
-
+ 
 import httpx
-
+ 
 from .config import optional_env, required_env
 from .credentials import (
     DI_SCOPE,
@@ -29,7 +29,7 @@ from .credentials import (
     bearer_token,
     use_managed_identity,
 )
-
+ 
 # Module-level shared HTTP client. Without this, every fetch_cached_*
 # call constructs a fresh httpx.Client(), paying TCP + TLS handshake on
 # each invocation (~50-150ms). For a PDF with 200 figures × 2 fetches
@@ -45,16 +45,16 @@ _SHARED_CLIENT = httpx.Client(
     # without bloating per-worker memory significantly (~1MB).
     limits=httpx.Limits(max_connections=50, max_keepalive_connections=25),
 )
-
-
+ 
+ 
 def _endpoint() -> str:
     return required_env("DI_ENDPOINT").rstrip("/")
-
-
+ 
+ 
 def _api_version() -> str:
     return optional_env("DI_API_VERSION", "2024-11-30")
-
-
+ 
+ 
 def _auth_headers() -> dict[str, str]:
     """
     Header set for DI requests. MI path uses a bearer token; key path uses
@@ -63,8 +63,8 @@ def _auth_headers() -> dict[str, str]:
     if use_managed_identity():
         return {"Authorization": f"Bearer {bearer_token(DI_SCOPE)}"}
     return {"Ocp-Apim-Subscription-Key": required_env("DI_API_KEY")}
-
-
+ 
+ 
 def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
     """
     Submit a PDF to the prebuilt-layout model and poll until the result is ready.
@@ -77,7 +77,7 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
     )
     auth = _auth_headers()
     headers = {**auth, "Content-Type": "application/pdf"}
-
+ 
     submit = _SHARED_CLIENT.post(url, headers=headers, content=pdf_bytes, timeout=180.0)
     if submit.status_code not in (200, 202):
         raise RuntimeError(
@@ -86,7 +86,7 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
     op_loc = submit.headers.get("operation-location")
     if not op_loc:
         raise RuntimeError("DI submit missing operation-location header")
-
+ 
     deadline = time.time() + timeout_s
     backoff = 2.0
     while time.time() < deadline:
@@ -105,16 +105,16 @@ def analyze_layout(pdf_bytes: bytes, timeout_s: int = 210) -> dict[str, Any]:
             raise RuntimeError(f"DI analyze failed: {body}")
         time.sleep(backoff)
         backoff = min(backoff * 1.25, 8.0)
-
+ 
     raise TimeoutError("DI analyze timed out")
-
-
+ 
+ 
 def _split_blob_url(blob_url: str) -> tuple[str, str] | None:
     """
     Split an https blob URL into (base, decoded_filename), preserving
     proper URL encoding for the cache lookups built off it. Returns None
     if the URL has no path segment.
-
+ 
     blob_url comes in from the indexer as `metadata_storage_path`, which
     Azure Search emits already URL-encoded. We rebuild cache URLs by
     swapping the filename for `_dicache/<filename>.<suffix>`, so we need
@@ -137,13 +137,13 @@ def _split_blob_url(blob_url: str) -> tuple[str, str] | None:
         base = base[:-1]
     encoded_filename = parts.path[last_slash + 1 :]
     return base, encoded_filename
-
-
+ 
+ 
 def _build_cache_url(blob_url: str, suffix: str) -> str | None:
     """
     Build a `<base>/_dicache/<filename>.<suffix>` URL with proper URL
     encoding on the filename. Returns None if blob_url is malformed.
-
+ 
     Critical: the input blob_url's filename is already URL-encoded
     (Azure Search emits it that way), so we use it as-is in the cache
     URL. We never decode-then-reencode here because that risks double-
@@ -154,8 +154,8 @@ def _build_cache_url(blob_url: str, suffix: str) -> str | None:
         return None
     base, encoded_filename = parts
     return f"{base}/_dicache/{encoded_filename}.{suffix}"
-
-
+ 
+ 
 def _build_cache_url_with_id(blob_url: str, prefix: str, id_value: str) -> str | None:
     """
     Build `<base>/_dicache/<filename>.<prefix>.<id>.json` for per-figure
@@ -167,8 +167,8 @@ def _build_cache_url_with_id(blob_url: str, prefix: str, id_value: str) -> str |
     base, encoded_filename = parts
     safe_id = quote(id_value or "", safe="")
     return f"{base}/_dicache/{encoded_filename}.{prefix}.{safe_id}.json"
-
-
+ 
+ 
 def _storage_auth_headers() -> dict[str, str]:
     """Auth headers for blob fetches. MI path uses bearer; otherwise
     relies on a SAS token appended to the URL by callers."""
@@ -178,8 +178,8 @@ def _storage_auth_headers() -> dict[str, str]:
             "x-ms-version": "2023-11-03",
         }
     return {}
-
-
+ 
+ 
 def _apply_sas_if_needed(url: str) -> str:
     """If MI is disabled and STORAGE_BLOB_SAS is set, append it. Idempotent."""
     if use_managed_identity():
@@ -188,15 +188,15 @@ def _apply_sas_if_needed(url: str) -> str:
     if sas and "?" not in url:
         return f"{url}?{sas}"
     return url
-
-
+ 
+ 
 def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
                          max_retries: int = 3) -> httpx.Response | None:
     """
     GET helper that retries on HTTP 429 (rate-limited). On other transient
     errors (timeout, connection reset) we let the caller decide; this helper
     is used by cache lookups where None on miss is normal.
-
+ 
     Returns the Response on terminal status (any 2xx, 404, 4xx other than
     429), or None if all retries exhausted.
     """
@@ -211,7 +211,7 @@ def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
             attempt += 1
             time.sleep(min(1.0 * (2 ** attempt), 10.0))
             continue
-
+ 
         if resp.status_code != 429:
             return resp
         if attempt >= max_retries:
@@ -226,13 +226,13 @@ def _http_get_with_retry(url: str, headers: dict[str, str], timeout_s: float,
         logging.info("blob GET 429, sleeping %.1fs before retry", wait_s)
         time.sleep(wait_s)
         attempt += 1
-
-
+ 
+ 
 def fetch_blob_bytes(blob_url: str) -> bytes:
     """
     Fetch a blob over HTTPS. The url passed in by the indexer is
     metadata_storage_path -- the unauthenticated blob URL.
-
+ 
     Auth priority:
       1. Managed identity (production). Requires the Function App's MI to
          have the 'Storage Blob Data Reader' role on the account.
@@ -242,25 +242,50 @@ def fetch_blob_bytes(blob_url: str) -> bytes:
     """
     headers = _storage_auth_headers()
     fetch_url = _apply_sas_if_needed(blob_url)
-
+ 
     resp = _SHARED_CLIENT.get(fetch_url, headers=headers, timeout=180.0)
     if resp.status_code != 200:
         raise RuntimeError(
             f"blob fetch failed: {resp.status_code} {resp.text[:200]}"
         )
     return resp.content
-
-
+ 
+ 
+def fetch_blob_metadata(blob_url: str) -> dict[str, str]:
+    """
+    Fetch user-defined metadata from a blob via a HEAD request.
+ 
+    Returns a dict of lowercase key -> value for all x-ms-meta-* headers.
+    Returns empty dict on failure (non-fatal; taxonomy fields will be null).
+    """
+    headers = _storage_auth_headers()
+    fetch_url = _apply_sas_if_needed(blob_url)
+    try:
+        resp = _SHARED_CLIENT.head(fetch_url, headers=headers, timeout=10.0)
+        if resp.status_code != 200:
+            logging.warning("fetch_blob_metadata: HEAD %d for %s", resp.status_code, blob_url)
+            return {}
+        meta: dict[str, str] = {}
+        for k, v in resp.headers.items():
+            lower_k = k.lower()
+            if lower_k.startswith("x-ms-meta-"):
+                meta[lower_k[len("x-ms-meta-"):]] = v
+        return meta
+    except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        logging.warning("fetch_blob_metadata: %s for %s", exc, blob_url)
+        return {}
+ 
+ 
 def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:
     """
     Check if a pre-analyzed DI result exists in the _dicache/ subfolder.
     The cache blob path is: <container>/_dicache/<filename>.pdf.di.json
-
+ 
     Returns {"analyzeResult": {...}} on hit, or None on miss.
     Crops are stored as separate per-figure blobs and fetched on demand
     via fetch_cached_crop(). This keeps memory usage low even for PDFs
     with thousands of figures.
-
+ 
     Run scripts/preanalyze.py to populate the cache for large PDFs.
     """
     cache_url = _build_cache_url(blob_url, "di.json")
@@ -271,7 +296,7 @@ def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:
     headers = _storage_auth_headers()
     logging.info("fetch_cached_analysis: GET %s (auth_header=%s)",
                  cache_url, "yes" if headers.get("Authorization") else "no")
-
+ 
     try:
         resp = _http_get_with_retry(fetch_url, headers, timeout_s=20.0)
         if resp is None:
@@ -303,13 +328,13 @@ def fetch_cached_analysis(blob_url: str) -> dict[str, Any] | None:
     except Exception as exc:
         logging.warning("DI cache fetch error for %s: %s", cache_url, exc)
         return None
-
-
+ 
+ 
 def fetch_cached_crop(blob_url: str, figure_id: str) -> dict[str, Any] | None:
     """
     Fetch a single pre-cropped figure from the _dicache/ subfolder.
     Blob path: <container>/_dicache/<filename>.pdf.crop.<figure_id>.json
-
+ 
     Returns {"image_b64": "...", "bbox": {...}} on hit, or None on miss.
     """
     crop_url = _build_cache_url_with_id(blob_url, "crop", figure_id)
@@ -317,7 +342,7 @@ def fetch_cached_crop(blob_url: str, figure_id: str) -> dict[str, Any] | None:
         return None
     fetch_url = _apply_sas_if_needed(crop_url)
     headers = _storage_auth_headers()
-
+ 
     try:
         resp = _http_get_with_retry(fetch_url, headers, timeout_s=30.0)
         if resp is None:
@@ -339,13 +364,13 @@ def fetch_cached_crop(blob_url: str, figure_id: str) -> dict[str, Any] | None:
         logging.warning("crop cache error for %s/%s: %s",
                         blob_url, figure_id, exc)
         return None
-
-
+ 
+ 
 def fetch_cached_sections(blob_url: str) -> list[dict[str, Any]] | None:
     """
     Fetch pre-built section_index from sidecar blob.
     Blob path: <container>/_dicache/<filename>.pdf.sections.json
-
+ 
     Returns the section list on hit, None on miss. The section_index is
     expensive to build at function-app runtime for huge PDFs (3-5 min
     on documents with 2700+ sections, blowing past the 230s WebApi skill
@@ -357,7 +382,7 @@ def fetch_cached_sections(blob_url: str) -> list[dict[str, Any]] | None:
         return None
     fetch_url = _apply_sas_if_needed(sections_url)
     headers = _storage_auth_headers()
-
+ 
     try:
         resp = _http_get_with_retry(fetch_url, headers, timeout_s=20.0)
         if resp is None:
@@ -381,13 +406,13 @@ def fetch_cached_sections(blob_url: str) -> list[dict[str, Any]] | None:
         logging.warning("sections sidecar fetch error for %s: %s",
                         sections_url, exc)
         return None
-
-
+ 
+ 
 def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
     """
     Check if a pre-computed process-document output exists.
     Blob path: <container>/_dicache/<filename>.pdf.output.json
-
+ 
     Returns the full output dict on hit, or None on miss.
     """
     output_url = _build_cache_url(blob_url, "output.json")
@@ -395,7 +420,7 @@ def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
         return None
     fetch_url = _apply_sas_if_needed(output_url)
     headers = _storage_auth_headers()
-
+ 
     try:
         resp = _http_get_with_retry(fetch_url, headers, timeout_s=20.0)
         if resp is None:
@@ -432,13 +457,13 @@ def fetch_precomputed_output(blob_url: str) -> dict[str, Any] | None:
     except Exception as exc:
         logging.warning("pre-computed output error for %s: %s", output_url, exc)
         return None
-
-
+ 
+ 
 def fetch_precomputed_vision(blob_url: str, figure_id: str) -> dict[str, Any] | None:
     """
     Fetch pre-computed vision analysis for a single figure.
     Blob path: <container>/_dicache/<filename>.pdf.vision.<figure_id>.json
-
+ 
     Returns the vision result dict on hit, or None on miss.
     """
     vision_url = _build_cache_url_with_id(blob_url, "vision", figure_id)
@@ -446,7 +471,7 @@ def fetch_precomputed_vision(blob_url: str, figure_id: str) -> dict[str, Any] | 
         return None
     fetch_url = _apply_sas_if_needed(vision_url)
     headers = _storage_auth_headers()
-
+ 
     try:
         resp = _http_get_with_retry(fetch_url, headers, timeout_s=30.0)
         if resp is None:
@@ -469,3 +494,4 @@ def fetch_precomputed_vision(blob_url: str, figure_id: str) -> dict[str, Any] | 
         logging.warning("pre-computed vision error for %s/%s: %s",
                         blob_url, figure_id, exc)
         return None
+ 

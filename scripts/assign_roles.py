@@ -1,22 +1,22 @@
 """
 Cross-platform RBAC bootstrapper.
-
+ 
 Reads deploy.config.json, discovers principal IDs of every managed
 identity in the system, and assigns the roles defined in
 docs/RUNBOOK.md §5 (Identity & role assignments). Idempotent —
 re-running is safe; existing assignments are skipped.
-
+ 
 Used by
 both:
   - Jenkinsfile.deploy   (after Bicep provisioning, before deploy_search.py)
   - One-time bootstrap on a developer machine
-
+ 
 Usage:
     python scripts/assign_roles.py --config deploy.config.json
     python scripts/assign_roles.py --config deploy.config.json --dry-run
     python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
     python scripts/assign_roles.py --config deploy.config.json --jenkins-principal-id <oid>
-
+ 
 What it grants
 --------------
 A. Deploy principal (the user/SP running this script):
@@ -26,24 +26,24 @@ A. Deploy principal (the user/SP running this script):
    - Cognitive Services OpenAI User on AOAI
    - Cognitive Services User       on Document Intelligence
    - Cosmos DB Built-in Data Contributor on Cosmos DB (if configured)
-
+ 
 B. Search service managed identity:
    - Storage Blob Data Reader      on Storage account
    - Cognitive Services OpenAI User on AOAI
    - Cognitive Services User       on AI Services account
-
+ 
 C. Function App managed identity:
    - Storage Blob Data Reader      on Storage account
    - Cognitive Services OpenAI User on AOAI
    - Cognitive Services User       on Document Intelligence
    - Search Index Data Reader      on Search service
-
+ 
 D. Jenkins agent identity (optional, only with --jenkins-principal-id):
    - Same as deploy principal
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import json
 import os
@@ -51,17 +51,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
+ 
 # Cosmos data-plane built-in role definition IDs.
 # These are NOT regular Azure RBAC roles — they're SQL data-plane role
 # definitions and need a different `az` command (cosmosdb sql role).
 COSMOS_DATA_CONTRIBUTOR_ROLE_ID = "00000000-0000-0000-0000-000000000002"
-
-
+ 
+ 
 def _az_bin() -> str:
     return "az.cmd" if os.name == "nt" else "az"
-
-
+ 
+ 
 def az(args: list[str], timeout: float = 60.0, *, check: bool = True) -> str:
     """Run an az CLI command. Raises RuntimeError on non-zero exit if check=True."""
     cmd = [_az_bin()] + args
@@ -74,8 +74,8 @@ def az(args: list[str], timeout: float = 60.0, *, check: bool = True) -> str:
             f"az exit {r.returncode}: {' '.join(args[:6])}\nstderr: {r.stderr.strip()[:500]}"
         )
     return r.stdout.strip()
-
-
+ 
+ 
 def _resource_id(account_name: str, rg: str, kind: str) -> str:
     """Return the ARM resource id for a Cognitive Services / Storage /
     Search account. `kind` selects the az subcommand."""
@@ -90,8 +90,8 @@ def _resource_id(account_name: str, rg: str, kind: str) -> str:
     if kind == "cosmos":
         return az(["cosmosdb", "show", "-n", account_name, "-g", rg, "--query", "id", "-o", "tsv"])
     raise ValueError(f"unknown kind: {kind}")
-
-
+ 
+ 
 def _principal_id(name: str, rg: str, kind: str) -> str:
     """Return the principalId of a system-assigned MI."""
     if kind == "search":
@@ -101,8 +101,8 @@ def _principal_id(name: str, rg: str, kind: str) -> str:
         return az(["functionapp", "identity", "show", "-n", name, "-g", rg,
                    "--query", "principalId", "-o", "tsv"])
     raise ValueError(f"unknown principal kind: {kind}")
-
-
+ 
+ 
 def _signed_in_principal() -> tuple[str, str]:
     """Return (object_id, principal_type) for the currently logged-in
     az identity. Works for both users and service principals."""
@@ -110,7 +110,7 @@ def _signed_in_principal() -> tuple[str, str]:
     info = json.loads(raw)
     user = info.get("user") or {}
     principal_type = "ServicePrincipal" if user.get("type") == "servicePrincipal" else "User"
-
+ 
     if principal_type == "User":
         oid = az(["ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"])
     else:
@@ -120,8 +120,8 @@ def _signed_in_principal() -> tuple[str, str]:
             raise RuntimeError("could not determine signed-in service principal appId")
         oid = az(["ad", "sp", "show", "--id", app_id, "--query", "id", "-o", "tsv"])
     return oid, principal_type
-
-
+ 
+ 
 def grant_rbac(principal_id: str, principal_type: str, role: str, scope: str,
                *, dry_run: bool, label: str) -> bool:
     """Idempotent role assignment. Returns True if a new assignment was
@@ -129,7 +129,7 @@ def grant_rbac(principal_id: str, principal_type: str, role: str, scope: str,
     if dry_run:
         print(f"  [dry-run] would grant {role} -> {label} on {scope.split('/')[-1]}")
         return False
-
+ 
     # Check existing first to keep output clean.
     existing = az(
         [
@@ -147,7 +147,7 @@ def grant_rbac(principal_id: str, principal_type: str, role: str, scope: str,
             return False
     except Exception:
         pass
-
+ 
     az(
         [
             "role", "assignment", "create",
@@ -161,8 +161,8 @@ def grant_rbac(principal_id: str, principal_type: str, role: str, scope: str,
     )
     print(f"  +    {role} -> {label}")
     return True
-
-
+ 
+ 
 def grant_cosmos_data_role(principal_id: str, cosmos_account: str, rg: str,
                             *, dry_run: bool) -> bool:
     """Cosmos DB data-plane role grants use a different az command.
@@ -171,7 +171,7 @@ def grant_cosmos_data_role(principal_id: str, cosmos_account: str, rg: str,
     if dry_run:
         print(f"  [dry-run] would grant Cosmos DB Data Contributor -> {principal_id[:8]}... on {cosmos_account}")
         return False
-
+ 
     # Check if already assigned.
     existing = az(
         [
@@ -189,7 +189,7 @@ def grant_cosmos_data_role(principal_id: str, cosmos_account: str, rg: str,
                 return False
     except Exception:
         pass
-
+ 
     cosmos_id = _resource_id(cosmos_account, rg, "cosmos")
     az(
         [
@@ -204,8 +204,8 @@ def grant_cosmos_data_role(principal_id: str, cosmos_account: str, rg: str,
     )
     print(f"  +    Cosmos DB Data Contributor -> {cosmos_account}")
     return True
-
-
+ 
+ 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Cross-platform RBAC bootstrapper")
     ap.add_argument("--config", default="deploy.config.json")
@@ -221,9 +221,9 @@ def main() -> int:
                     help="Sleep this many seconds after assigning to let RBAC propagate "
                          "before exiting. Recommended 300 in CI.")
     args = ap.parse_args()
-
+ 
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
-
+ 
     # Pull resource names from config.
     func_name = cfg["functionApp"]["name"]
     func_rg = cfg["functionApp"]["resourceGroup"]
@@ -238,14 +238,14 @@ def main() -> int:
     di_name = di_endpoint.replace("https://", "").split(".")[0]
     aisvc_url = cfg["aiServices"]["subdomainUrl"]
     aisvc_name = aisvc_url.replace("https://", "").split(".")[0]
-
+ 
     cosmos_cfg = cfg.get("cosmos") or {}
     cosmos_endpoint = cosmos_cfg.get("endpoint", "")
     cosmos_name = (
         cosmos_endpoint.replace("https://", "").split(".")[0]
         if cosmos_endpoint else ""
     )
-
+ 
     print(f"Resource group       : {func_rg}")
     print(f"Function App         : {func_name}")
     print(f"Search service       : {search_name}")
@@ -256,17 +256,17 @@ def main() -> int:
     if cosmos_name:
         print(f"Cosmos DB            : {cosmos_name}")
     print()
-
+ 
     print("Looking up resource IDs and principal IDs...")
     storage_id = _resource_id(storage_name, storage_rg, "storage")
     search_id = _resource_id(search_name, func_rg, "search")
     aoai_id = _resource_id(aoai_name, func_rg, "cognitive")
     di_id = _resource_id(di_name, func_rg, "cognitive")
     aisvc_id = _resource_id(aisvc_name, func_rg, "cognitive")
-
+ 
     search_mi = _principal_id(search_name, func_rg, "search")
     func_mi = _principal_id(func_name, func_rg, "functionapp")
-
+ 
     if not search_mi:
         raise SystemExit(
             f"\nABORT: Search service '{search_name}' has no system-assigned MI.\n"
@@ -278,11 +278,11 @@ def main() -> int:
             f"\nABORT: Function App '{func_name}' has no system-assigned MI.\n"
             f"  Enable: az functionapp identity assign -n {func_name} -g {func_rg}"
         )
-
+ 
     deploy_oid, deploy_type = _signed_in_principal() if not args.skip_deploy_principal else ("", "")
-
+ 
     granted = 0
-
+ 
     # --- A. Deploy principal grants ---
     if not args.skip_deploy_principal:
         print(f"\nA. Granting deploy principal ({deploy_type} {deploy_oid[:8]}...) roles:")
@@ -300,7 +300,7 @@ def main() -> int:
                 granted += 1
     else:
         print("\nA. Skipping deploy principal grants (--skip-deploy-principal)")
-
+ 
     # --- B. Search service MI grants ---
     print(f"\nB. Granting Search service MI ({search_mi[:8]}...) roles:")
     for role, scope, label in [
@@ -310,7 +310,7 @@ def main() -> int:
     ]:
         if grant_rbac(search_mi, "ServicePrincipal", role, scope, dry_run=args.dry_run, label=label):
             granted += 1
-
+ 
     # --- C. Function App MI grants ---
     print(f"\nC. Granting Function App MI ({func_mi[:8]}...) roles:")
     for role, scope, label in [
@@ -324,7 +324,7 @@ def main() -> int:
     if cosmos_name:
         if grant_cosmos_data_role(func_mi, cosmos_name, func_rg, dry_run=args.dry_run):
             granted += 1
-
+ 
     # --- D. Optional Jenkins agent grants ---
     if args.jenkins_principal_id:
         print(f"\nD. Granting Jenkins agent ({args.jenkins_principal_id[:8]}...) roles:")
@@ -342,17 +342,17 @@ def main() -> int:
             if grant_cosmos_data_role(args.jenkins_principal_id, cosmos_name, func_rg,
                                         dry_run=args.dry_run):
                 granted += 1
-
+ 
     print(f"\n{granted} new assignment(s) created. Existing assignments were left in place.")
-
+ 
     if args.wait_for_propagation > 0 and not args.dry_run and granted > 0:
         print(f"\nWaiting {args.wait_for_propagation}s for RBAC propagation...")
         time.sleep(args.wait_for_propagation)
-
+ 
     print("\nDone.")
     return 0
-
-
+ 
+ 
 if __name__ == "__main__":
     try:
         sys.exit(main())

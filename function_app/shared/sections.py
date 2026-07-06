@@ -1,21 +1,21 @@
 """
 Walk DI's analyzeResult to build a flat section index that maps a page
 number to header_1/header_2/header_3 and the section's text content.
-
+ 
 DI's "sections" are nested by hierarchy. Each section has elements[]
 that reference paragraphs/figures/tables via JSON pointer paths like
 "/paragraphs/0". A paragraph's bounding regions tell us which page it
 sits on; we use those to compute (start_page, end_page) for each
 section, then resolve headers by walking up the section tree.
 """
-
+ 
 import re
 from typing import Any
-
+ 
 PARAGRAPH_REF_RE = re.compile(r"^/paragraphs/(\d+)$")
 SECTION_REF_RE = re.compile(r"^/sections/(\d+)$")
-
-
+ 
+ 
 def _paragraph_pages(paragraphs: list[dict[str, Any]], idx: int) -> list[int]:
     if idx < 0 or idx >= len(paragraphs):
         return []
@@ -26,20 +26,20 @@ def _paragraph_pages(paragraphs: list[dict[str, Any]], idx: int) -> list[int]:
         if isinstance(pn, int):
             pages.append(pn)
     return pages
-
-
+ 
+ 
 def _paragraph_role(paragraphs: list[dict[str, Any]], idx: int) -> str:
     if idx < 0 or idx >= len(paragraphs):
         return ""
     return (paragraphs[idx].get("role") or "").lower()
-
-
+ 
+ 
 def _paragraph_content(paragraphs: list[dict[str, Any]], idx: int) -> str:
     if idx < 0 or idx >= len(paragraphs):
         return ""
     return paragraphs[idx].get("content") or ""
-
-
+ 
+ 
 def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Returns a list of section descriptors. Each item:
@@ -52,29 +52,29 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
         "page_end": int,
         "content": str,        # concatenated paragraph content for this section
       }
-
+ 
     Header inheritance: walking sections in document order, we keep a
     running stack of (level, title). When a sectionHeading is encountered
     inside a section, we update the stack at the appropriate level.
     """
     sections = analyze_result.get("sections", []) or []
     paragraphs = analyze_result.get("paragraphs", []) or []
-
+ 
     # First pass: walk the section tree in DFS order so we can carry
     # header_1/2/3 as we descend.
     visited = [False] * len(sections)
     flat: list[dict[str, Any]] = []
-
+ 
     def walk(section_idx: int, hdr_stack: list[tuple[int, str]]):
         if section_idx < 0 or section_idx >= len(sections) or visited[section_idx]:
             return
         visited[section_idx] = True
         section = sections[section_idx]
-
+ 
         local_stack = list(hdr_stack)
         para_indices: list[int] = []
         child_section_indices: list[int] = []
-
+ 
         for ref in section.get("elements", []) or []:
             m_p = PARAGRAPH_REF_RE.match(ref)
             if m_p:
@@ -84,7 +84,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
             if m_s:
                 child_section_indices.append(int(m_s.group(1)))
                 continue
-
+ 
         # Update header stack from heading-role paragraphs.
         # Track the heading paragraph's own page so we can anchor the
         # section's page_start to where the heading actually appears,
@@ -102,7 +102,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
                 if not title:
                     continue
                 level = 1 if role == "title" else _guess_heading_level(title, local_stack)
-
+ 
                 # Dedup guard: skip pushing a heading whose normalized text
                 # already exists at any level on the stack. Technical manuals
                 # frequently emit the chapter title twice — once tagged
@@ -123,25 +123,25 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
                         if pages:
                             heading_page = min(pages)
                     continue
-
+ 
                 local_stack = [(lvl, txt) for (lvl, txt) in local_stack if lvl < level]
                 local_stack.append((level, title))
                 if heading_page is None:
                     pages = _paragraph_pages(paragraphs, pidx)
                     if pages:
                         heading_page = min(pages)
-
+ 
         h1 = _stack_at(local_stack, 1)
         h2 = _stack_at(local_stack, 2)
         h3 = _stack_at(local_stack, 3)
-
+ 
         page_set = set()
         body_chunks: list[str] = []
         for pidx in para_indices:
             for pn in _paragraph_pages(paragraphs, pidx):
                 page_set.add(pn)
             body_chunks.append(_paragraph_content(paragraphs, pidx))
-
+ 
         if page_set:
             # Prefer the heading paragraph's page as page_start. Fall back
             # to min(page_set) only when this section has no heading (e.g.
@@ -156,16 +156,16 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
                 "page_end": max(page_set),
                 "content": "\n".join([c for c in body_chunks if c]),
             })
-
+ 
         for child_idx in child_section_indices:
             walk(child_idx, local_stack)
-
+ 
     if sections:
         walk(0, [])
         for i in range(len(sections)):
             if not visited[i]:
                 walk(i, [])
-
+ 
     # Orphan-paragraph capture. Any paragraphs not referenced by any
     # section's elements[] are unreachable through the walk above —
     # their content still flows through DI's markdown stream (so the
@@ -188,7 +188,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
             m_p = PARAGRAPH_REF_RE.match(ref)
             if m_p:
                 referenced_para_indices.add(int(m_p.group(1)))
-
+ 
     orphans_by_page: dict[int, list[str]] = {}
     for pidx, para in enumerate(paragraphs):
         if pidx in referenced_para_indices:
@@ -204,7 +204,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         for pn in _paragraph_pages(paragraphs, pidx):
             orphans_by_page.setdefault(pn, []).append(content)
-
+ 
     # Compute the set of pages already covered by at least one real
     # section. We only emit orphan sections for pages that NO real
     # section covers — otherwise the orphan would compete with the
@@ -216,7 +216,7 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
     for s in flat:
         for p in range(s["page_start"], s["page_end"] + 1):
             real_section_covered_pages.add(p)
-
+ 
     next_idx = len(sections) + 100000
     for page in sorted(orphans_by_page):
         if page in real_section_covered_pages:
@@ -236,10 +236,10 @@ def build_section_index(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
             "is_orphan": True,  # explicit flag for find_section_for_page
         })
         next_idx += 1
-
+ 
     return flat
-
-
+ 
+ 
 def _norm_header(s: str) -> str:
     """Aggressive normalization for header equality comparisons.
     Lower-cases, collapses whitespace, drops punctuation noise so
@@ -247,14 +247,14 @@ def _norm_header(s: str) -> str:
     Used by the heading-stack dedup guard in walk()."""
     if not s:
         return ""
-    s = re.sub(r"[\s ]+", " ", s).strip().lower()
+    s = re.sub(r"[\s ]+", " ", s).strip().lower()
     # Treat various dashes and stray punctuation as equivalent so
     # OCR / typography variations don't defeat dedup.
     s = re.sub(r"[–—―\-]+", "-", s)
     s = re.sub(r"[.,:;]+$", "", s)
     return s
-
-
+ 
+ 
 def _guess_heading_level(title: str, stack: list[tuple[int, str]]) -> int:
     """
     Cheap heuristic for level when DI only tells us 'sectionHeading'.
@@ -267,15 +267,15 @@ def _guess_heading_level(title: str, stack: list[tuple[int, str]]) -> int:
     if stack:
         return min(3, stack[-1][0] + 1)
     return 2
-
-
+ 
+ 
 def _stack_at(stack: list[tuple[int, str]], level: int) -> str:
     for lvl, txt in stack:
         if lvl == level:
             return txt
     return ""
-
-
+ 
+ 
 def find_section_for_page(
     sections_index: list[dict[str, Any]],
     page_number: int,
@@ -284,7 +284,7 @@ def find_section_for_page(
     Return the most-specific section whose page range covers page_number.
     Most-specific = smallest page span among matches; ties broken by
     document order (later wins, since deeper sections are visited later).
-
+ 
     Orphan sections (synthetic "(orphan paragraphs)" entries) are always
     deprioritized — a real section with ANY page span beats an orphan
     section, even when the orphan has a smaller span. This prevents
@@ -303,8 +303,8 @@ def find_section_for_page(
         -s["section_idx"],                         # deepest tie-breaker
     ))
     return matches[0]
-
-
+ 
+ 
 def find_section_for_page_range(
     sections_index: list[dict[str, Any]],
     page_start: int,
@@ -315,7 +315,7 @@ def find_section_for_page_range(
     where the start page may be a section-boundary edge case (the table
     starts at the bottom of the previous section's last page but the
     bulk of its content is in the next section).
-
+ 
     Strategy:
       1. If page_end is None or equals page_start, defer to
          find_section_for_page (single-page case).
@@ -330,7 +330,7 @@ def find_section_for_page_range(
     """
     if page_end is None or page_end <= page_start:
         return find_section_for_page(sections_index, page_start)
-
+ 
     # Tier 1: full containment.
     fully_containing = [
         s for s in sections_index
@@ -346,7 +346,7 @@ def find_section_for_page_range(
             -s["section_idx"],
         ))
         return fully_containing[0]
-
+ 
     # Tier 2: majority overlap. Compute, for each section that overlaps
     # the range at all, the count of pages in [page_start, page_end]
     # that fall within the section's range. Pick the section with the
@@ -368,28 +368,28 @@ def find_section_for_page_range(
     if best is not None:
         # Re-extract section in 4th position (we expanded the tuple).
         return best[3]
-
+ 
     # Tier 3: defer to legacy single-page lookup on page_start.
     return find_section_for_page(sections_index, page_start)
-
-
+ 
+ 
 # Typography normalization for fuzzy substring matching. DI extracts the
 # same logical character (em-dash, NBSP, smart quote) inconsistently across
 # paragraphs vs. captions vs. body text, so a literal `find()` of a caption
 # inside its section content silently fails when one path has "—" and the
 # other has " - " or " – ". This map collapses the common mismatches.
 _CAPTION_NORMALIZE_TABLE = str.maketrans({
-    " ": " ",  # NBSP
+    " ": " ",  # NBSP
     " ": " ", " ": " ", " ": " ",  # en/em/thin space
-    "​": "",   # zero-width space
+    "": "",   # zero-width space
     "‐": "-", "‑": "-", "‒": "-",  # hyphen variants
     "–": "-", "—": "-", "―": "-",  # en/em/horizontal-bar
     "‘": "'", "’": "'",                 # smart single quotes
     "“": '"', "”": '"',                 # smart double quotes
     "­": "",   # soft hyphen
 })
-
-
+ 
+ 
 def _normalize_for_caption_match(s: str) -> str:
     """Normalize a string for caption / anchor substring matching:
     typography variants collapsed, whitespace runs reduced to a single
@@ -398,8 +398,8 @@ def _normalize_for_caption_match(s: str) -> str:
     if not s:
         return ""
     return re.sub(r"\s+", " ", s.translate(_CAPTION_NORMALIZE_TABLE)).strip()
-
-
+ 
+ 
 def extract_surrounding_text(
     section_content: str,
     anchor: str,
@@ -410,7 +410,7 @@ def extract_surrounding_text(
     return up to `chars` characters before and after it. Otherwise return
     the first 2*chars characters of the section. Strips simple repeating
     header/footer noise.
-
+ 
     Match strategy (most-precise-first):
       1. Literal `find()` on the cleaned section content. Fast path.
       2. Typography-normalized match (NBSP→space, em-dash→hyphen, smart
@@ -465,8 +465,8 @@ def extract_surrounding_text(
                     end = min(len(norm_section), p_idx + len(probe) + chars)
                     return norm_section[start:end].strip()
     return cleaned[: 2 * chars].strip()
-
-
+ 
+ 
 _RUNNING_ARTIFACT_PATTERNS = [
     # "Page 215", "Page 215 of 600". Stripped only at page-block boundaries
     # so a body sentence like "see Page 215 for fault clearing" survives.
@@ -486,7 +486,7 @@ _RUNNING_ARTIFACT_PATTERNS = [
     # Same logic for lone Roman numerals — DI markers handle the page-
     # numbering use case; re-introducing a regex strip would drop
     # legitimate content like "Phase III" rendered alone on a wrap line.
-
+ 
     # revision / version footers commonly stamped on every page of a
     # technical manual: "Rev. 3.2", "Revision 4", "Version 1.0",
     # "Issue 2.1 -- March 2024". Position-gated below.
@@ -510,8 +510,8 @@ _RUNNING_ARTIFACT_PATTERNS = [
     re.compile(r"\d{4}[\-/]\d{1,2}[\-/]\d{1,2}"),
     re.compile(r"\d{1,2}[\-/]\d{1,2}[\-/]\d{2,4}"),
 ]
-
-
+ 
+ 
 # Matches the DI markdown markers that delimit page boundaries inside a
 # section's content. We split on these to identify per-page blocks and
 # then only strip artifact lines at the top/bottom of each block.
@@ -519,8 +519,8 @@ _PAGE_MARKER_RE = re.compile(
     r'<!--\s*Page(?:Break|Number\s*=\s*"[^"]*")\s*-->',
     re.IGNORECASE,
 )
-
-
+ 
+ 
 def _strip_artifacts_in_block(block: str) -> str:
     """Strip running artifacts only at the top/bottom 2 non-empty lines
     of a single page-block. Lines in the middle of a block are preserved
@@ -540,7 +540,7 @@ def _strip_artifacts_in_block(block: str) -> str:
     eligible: set[int] = set()
     eligible.update(idx for idx, _ in non_empty[:2])
     eligible.update(idx for idx, _ in non_empty[-2:])
-
+ 
     out: list[str] = []
     for i, ln in enumerate(lines):
         s = ln.strip()
@@ -550,15 +550,15 @@ def _strip_artifacts_in_block(block: str) -> str:
             continue
         out.append(s)
     return "\n".join(out)
-
-
+ 
+ 
 def _strip_running_artifacts(text: str) -> str:
     """Strip lines that look like repeating page headers/footers, but only
     at the top/bottom of each page-block. The page-block boundaries come
     from DI's `<!-- PageBreak -->` and `<!-- PageNumber="..." -->`
     markers when present; otherwise the entire input is treated as one
     block.
-
+ 
     Why position-gate: a `fullmatch`-anywhere strip silently drops any
     line that happens to look like a footer (a lone "1", a date, a
     part number) regardless of where it sits in the document. For
@@ -581,3 +581,4 @@ def _strip_running_artifacts(text: str) -> str:
     # No markers — whole text is one block. Used by extract_surrounding_text
     # which operates on concatenated paragraph content (already marker-free).
     return _strip_artifacts_in_block(text)
+ 

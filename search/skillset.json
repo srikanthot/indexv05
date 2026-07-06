@@ -1,9 +1,9 @@
 {
   "name": "<SKILLSET_NAME>",
   "description": "Multimodal manual skillset v2: layout + DI-direct figure/table enrichment + per-figure vision + per-context embeddings",
-
+ 
   "skills": [
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Util.DocumentIntelligenceLayoutSkill",
       "name": "layout-skill",
@@ -18,7 +18,7 @@
         { "name": "markdown_document", "targetName": "markdownDocument" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Text.SplitSkill",
       "name": "split-pages",
@@ -35,7 +35,7 @@
         { "name": "textItems", "targetName": "pages" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "process-document-skill",
@@ -58,10 +58,13 @@
         { "name": "effective_date", "targetName": "effective_date" },
         { "name": "document_number", "targetName": "document_number" },
         { "name": "processing_status", "targetName": "doc_processing_status" },
-        { "name": "skill_version", "targetName": "doc_skill_version" }
+        { "name": "skill_version", "targetName": "doc_skill_version" },
+        { "name": "operationalarea", "targetName": "doc_operationalarea" },
+        { "name": "functionalarea", "targetName": "doc_functionalarea" },
+        { "name": "doctype", "targetName": "doc_doctype" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "extract-page-label-skill",
@@ -122,7 +125,7 @@
         { "name": "skill_version", "targetName": "text_skill_version" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "analyze-diagram-skill",
@@ -187,7 +190,7 @@
         { "name": "language", "targetName": "dgm_language" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "shape-table-skill",
@@ -253,7 +256,7 @@
         { "name": "language", "targetName": "tbl_language" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "build-semantic-string-text",
@@ -279,7 +282,7 @@
         { "name": "chunk_for_semantic", "targetName": "text_chunk_for_semantic" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "build-semantic-string-diagram",
@@ -303,7 +306,7 @@
         { "name": "chunk_for_semantic", "targetName": "dgm_chunk_for_semantic" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Custom.WebApiSkill",
       "name": "build-doc-summary-skill",
@@ -340,7 +343,7 @@
         { "name": "skill_version", "targetName": "sum_skill_version" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-text-chunks",
@@ -357,7 +360,7 @@
         { "name": "embedding", "targetName": "text_vector" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-diagram-chunks",
@@ -374,7 +377,7 @@
         { "name": "embedding", "targetName": "dgm_text_vector" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-table-chunks",
@@ -391,7 +394,7 @@
         { "name": "embedding", "targetName": "tbl_text_vector" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-table-row-chunks",
@@ -408,7 +411,7 @@
         { "name": "embedding", "targetName": "row_text_vector" }
       ]
     },
-
+ 
     {
       "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-summary",
@@ -426,16 +429,16 @@
       ]
     }
   ],
-
+ 
   "cognitiveServices": {
     "@odata.type": "#Microsoft.Azure.Search.AIServicesByIdentity",
     "subdomainUrl": "<AI_SERVICES_SUBDOMAIN_URL>",
     "identity": null
   },
-
+ 
   "indexProjections": {
     "selectors": [
-
+ 
       {
         "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "text_parent_id",
@@ -487,13 +490,13 @@
           { "name": "text_vector", "source": "/document/markdownDocument/*/pages/*/text_vector" },
           { "name": "processing_status", "source": "/document/markdownDocument/*/pages/*/text_processing_status" },
           { "name": "skill_version", "source": "/document/markdownDocument/*/pages/*/text_skill_version" },
-          { "name": "operationalarea", "source": "/document/operationalarea" },
-          { "name": "functionalarea",  "source": "/document/functionalarea" },
-          { "name": "doctype",         "source": "/document/doctype" },
-          { "name": "filetype",        "source": "/document/filetype" }
+          { "name": "operationalarea", "source": "/document/doc_operationalarea" },
+          { "name": "functionalarea",  "source": "/document/doc_functionalarea" },
+          { "name": "doctype",         "source": "/document/doc_doctype" },
+          { "name": "filetype",        "source": "/document/metadata_storage_file_extension" }
         ]
       },
-
+ 
       {
         "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "dgm_parent_id",
@@ -538,13 +541,13 @@
           { "name": "embedding_version", "source": "/document/enriched_figures/*/dgm_embedding_version" },
           { "name": "last_indexed_at", "source": "/document/enriched_figures/*/dgm_last_indexed_at" },
           { "name": "language", "source": "/document/enriched_figures/*/dgm_language" },
-          { "name": "operationalarea", "source": "/document/operationalarea" },
-          { "name": "functionalarea",  "source": "/document/functionalarea" },
-          { "name": "doctype",         "source": "/document/doctype" },
-          { "name": "filetype",        "source": "/document/filetype" }
+          { "name": "operationalarea", "source": "/document/doc_operationalarea" },
+          { "name": "functionalarea",  "source": "/document/doc_functionalarea" },
+          { "name": "doctype",         "source": "/document/doc_doctype" },
+          { "name": "filetype",        "source": "/document/metadata_storage_file_extension" }
         ]
       },
-
+ 
       {
         "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "tbl_parent_id",
@@ -585,13 +588,13 @@
           { "name": "language", "source": "/document/enriched_tables/*/tbl_language" },
           { "name": "processing_status", "source": "/document/enriched_tables/*/tbl_processing_status" },
           { "name": "skill_version", "source": "/document/enriched_tables/*/tbl_skill_version" },
-          { "name": "operationalarea", "source": "/document/operationalarea" },
-          { "name": "functionalarea",  "source": "/document/functionalarea" },
-          { "name": "doctype",         "source": "/document/doctype" },
-          { "name": "filetype",        "source": "/document/filetype" }
+          { "name": "operationalarea", "source": "/document/doc_operationalarea" },
+          { "name": "functionalarea",  "source": "/document/doc_functionalarea" },
+          { "name": "doctype",         "source": "/document/doc_doctype" },
+          { "name": "filetype",        "source": "/document/metadata_storage_file_extension" }
         ]
       },
-
+ 
       {
         "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "tbl_row_parent_id",
@@ -631,13 +634,13 @@
           { "name": "last_indexed_at", "source": "/document/enriched_tables/*/tbl_table_rows/*/last_indexed_at" },
           { "name": "chunk_token_count", "source": "/document/enriched_tables/*/tbl_table_rows/*/chunk_token_count" },
           { "name": "language", "source": "/document/enriched_tables/*/tbl_table_rows/*/language" },
-          { "name": "operationalarea", "source": "/document/operationalarea" },
-          { "name": "functionalarea",  "source": "/document/functionalarea" },
-          { "name": "doctype",         "source": "/document/doctype" },
-          { "name": "filetype",        "source": "/document/filetype" }
+          { "name": "operationalarea", "source": "/document/doc_operationalarea" },
+          { "name": "functionalarea",  "source": "/document/doc_functionalarea" },
+          { "name": "doctype",         "source": "/document/doc_doctype" },
+          { "name": "filetype",        "source": "/document/metadata_storage_file_extension" }
         ]
       },
-
+ 
       {
         "targetIndexName": "<INDEX_NAME>",
         "parentKeyFieldName": "sum_parent_id",
@@ -660,10 +663,10 @@
           { "name": "text_vector", "source": "/document/sum_text_vector" },
           { "name": "processing_status", "source": "/document/sum_processing_status" },
           { "name": "skill_version", "source": "/document/sum_skill_version" },
-          { "name": "operationalarea", "source": "/document/operationalarea" },
-          { "name": "functionalarea",  "source": "/document/functionalarea" },
-          { "name": "doctype",         "source": "/document/doctype" },
-          { "name": "filetype",        "source": "/document/filetype" }
+          { "name": "operationalarea", "source": "/document/doc_operationalarea" },
+          { "name": "functionalarea",  "source": "/document/doc_functionalarea" },
+          { "name": "doctype",         "source": "/document/doc_doctype" },
+          { "name": "filetype",        "source": "/document/metadata_storage_file_extension" }
         ]
       }
     ],

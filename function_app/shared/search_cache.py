@@ -1,9 +1,9 @@
 """
 Image-hash cache lookup against the existing index.
-
+ 
 Skips re-running the vision model if a previous indexing run already
 processed an identical image (same parent_id + image_hash).
-
+ 
 Hardening:
 - OData string-literal escaping to prevent filter injection (and to
   survive any unexpected characters in parent_id or image_hash).
@@ -13,20 +13,20 @@ Hardening:
 - 429 retry with Retry-After honoured (capped) — Search rate limits
   used to silently kill cache hits during peak indexing.
 """
-
+ 
 from __future__ import annotations
-
+ 
 import logging
 import re
 import time
 from functools import lru_cache
 from typing import Any
-
+ 
 import httpx
-
+ 
 from .config import feature_enabled, optional_env, required_env
 from .credentials import SEARCH_SCOPE, bearer_token, use_managed_identity
-
+ 
 # Fields the cache reads back from a previous successful diagram record.
 # Whitelisted explicitly so this never tries to SELECT a field that has
 # been removed from the index schema.
@@ -42,27 +42,27 @@ SELECT_FIELDS = [
     "figure_bbox",
     "figure_id",
 ]
-
+ 
 # Acceptable values for the filter inputs. Anything outside this regex
 # is rejected before it touches the OData string. Hashes are hex; parent
 # ids come from _short_hash which is also hex; figure ids are alnum +
 # '_' + '-'.
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
-
-
+ 
+ 
 def _odata_escape(value: str) -> str:
     """Escape an OData string literal: single quotes are doubled."""
     return (value or "").replace("'", "''")
-
-
+ 
+ 
 def _safe_token(value: str) -> str | None:
     if not value:
         return None
     if SAFE_TOKEN_RE.match(value):
         return value
     return None
-
-
+ 
+ 
 def _enabled() -> bool:
     if not optional_env("SEARCH_ENDPOINT"):
         return False
@@ -79,8 +79,8 @@ def _enabled() -> bool:
     if use_managed_identity():
         return True
     return feature_enabled("SEARCH_ENDPOINT", "SEARCH_ADMIN_KEY")
-
-
+ 
+ 
 def _auth_header() -> dict[str, str]:
     if use_managed_identity():
         return {"Authorization": f"Bearer {bearer_token(SEARCH_SCOPE)}"}
@@ -88,8 +88,8 @@ def _auth_header() -> dict[str, str]:
     if not key:
         return {}
     return {"api-key": key}
-
-
+ 
+ 
 @lru_cache(maxsize=1)
 def _index_url() -> str:
     endpoint = optional_env("SEARCH_ENDPOINT").rstrip("/")
@@ -97,13 +97,13 @@ def _index_url() -> str:
     # this so we wouldn't get here with the env var unset.
     index_name = required_env("SEARCH_INDEX_NAME")
     return f"{endpoint}/indexes/{index_name}/docs/search?api-version=2024-05-01-preview"
-
-
+ 
+ 
 def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
                           timeout_s: float = 5.0,
                           max_retries: int = 1) -> httpx.Response | None:
     """POST that retries on HTTP 429 with Retry-After.
-
+ 
     Tightened defaults (was timeout=10s, max_retries=2): worst-case
     wall clock = 2 attempts × (5s timeout + 15s Retry-After) = 40s,
     well within the 230s skill budget even when chained with a phash
@@ -111,7 +111,7 @@ def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
     + phash) = 240s, BLOWING the 230s timeout BEFORE the vision call
     even started -- a direct explanation for "0-doc cycles when
     Search index was throttling".
-
+ 
     Cache lookups are an OPTIMIZATION (skip vision on hit). If Search
     is throttling, the right move is fail-fast and run vision; that
     keeps the indexer making progress at the cost of duplicate vision
@@ -148,13 +148,13 @@ def _post_with_429_retry(url: str, json_body: dict, headers: dict[str, str],
         logging.info("search_cache POST 429, sleeping %.1fs", wait_s)
         time.sleep(wait_s)
         attempt += 1
-
-
+ 
+ 
 def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] | None:
     """
     Find a previous diagram record with the same parent + image hash that
     completed successfully. Returns the cached fields, or None.
-
+ 
     Returns None (not raises) on:
       - feature disabled (env vars not set)
       - empty/invalid inputs
@@ -164,7 +164,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
         return None
     if not parent_id or not image_hash or image_hash == "noimage":
         return None
-
+ 
     safe_parent = _safe_token(parent_id)
     safe_hash = _safe_token(image_hash)
     if not safe_parent or not safe_hash:
@@ -173,7 +173,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
             parent_id, image_hash,
         )
         return None
-
+ 
     body = {
         "search": "*",
         "filter": (
@@ -186,7 +186,7 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
         "top": 1,
     }
     headers = {"Content-Type": "application/json", **_auth_header()}
-
+ 
     resp = _post_with_429_retry(_index_url(), body, headers, timeout_s=5.0)
     if resp is None:
         return None
@@ -202,12 +202,12 @@ def lookup_existing_by_hash(parent_id: str, image_hash: str) -> dict[str, Any] |
     except Exception as exc:
         logging.warning("hash cache parse error: %s", exc)
         return None
-
-
+ 
+ 
 def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
     """Cross-PDF figure dedup via perceptual hash. Looks up any prior
     diagram record across the entire index whose image_phash matches.
-
+ 
     Gated by env flag SEARCH_CACHE_CROSS_PARENT=true (default off).
     Reason: it changes dedup semantics — a shared OEM nameplate
     appearing in 50 different manuals collapses to ONE vision call
@@ -216,7 +216,7 @@ def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
     semantically misleading when the same image carries different
     contextual meaning. Only enable after evaluating false-positive
     rate on your corpus.
-
+ 
     Returns None (not raises) on every failure mode. Callers should
     fall through to the live vision call when None is returned.
     """
@@ -226,11 +226,11 @@ def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
         return None
     if not image_phash:
         return None
-
+ 
     safe_phash = _safe_token(image_phash)
     if not safe_phash:
         return None
-
+ 
     body = {
         "search": "*",
         "filter": (
@@ -257,3 +257,4 @@ def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
     except Exception as exc:
         logging.warning("phash cache parse error: %s", exc)
         return None
+ 

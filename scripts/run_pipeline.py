@@ -1,24 +1,24 @@
 """
 End-to-end pipeline orchestrator.
-
+ 
 One command runs the full operational loop:
   1. reconcile.py        --- detect added/edited/deleted PDFs, purge stale data
   2. preanalyze.py --incremental   --- run DI + Vision for any new/edited PDF
   3. wait for indexer    --- poll status until idle (success or known error)
   4. check_index.py --coverage --write-status   --- report state, persist to Cosmos
-
+ 
 This is what Jenkins runs nightly and what an operator runs after
 uploading new PDFs. It is safe to run repeatedly; every step is
 idempotent.
-
+ 
 Usage:
     python scripts/run_pipeline.py --config deploy.config.json
     python scripts/run_pipeline.py --config deploy.config.json --skip-reconcile
     python scripts/run_pipeline.py --config deploy.config.json --max-wait-minutes 60
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import json
 import subprocess
@@ -26,23 +26,23 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-
+ 
 import httpx
 from azure.identity import DefaultAzureCredential
-
+ 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cosmos_writer  # noqa: E402
-
+ 
 API_VERSION = "2024-05-01-preview"
 SEARCH_SCOPE = "https://search.azure.us/.default"
-
+ 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
+ 
+ 
 def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
+ 
+ 
 def _git_sha() -> str:
     try:
         out = subprocess.run(
@@ -54,8 +54,8 @@ def _git_sha() -> str:
     except Exception:
         pass
     return ""
-
-
+ 
+ 
 def run_step(label: str, cmd: list[str], allow_fail: bool = False) -> tuple[int, str]:
     """Run a subprocess step and stream its output. Returns (returncode, output)."""
     print()
@@ -68,8 +68,8 @@ def run_step(label: str, cmd: list[str], allow_fail: bool = False) -> tuple[int,
     if rc != 0 and not allow_fail:
         print(f"\nSTEP FAILED: {label} (exit {rc})")
     return rc, ""
-
-
+ 
+ 
 def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int) -> dict:
     """Poll indexer status until it's not 'inProgress'. Returns the
     final lastResult dict (may indicate success, transientFailure, or
@@ -79,13 +79,13 @@ def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int) ->
     deadline = time.time() + max_minutes * 60
     backoff = 15.0
     last_status = None
-
+ 
     print()
     print("=" * 70)
     print(f"  STEP: wait for indexer {indexer_name} to settle")
     print(f"  Polling every ~{int(backoff)}s, max {max_minutes} min")
     print("=" * 70)
-
+ 
     while time.time() < deadline:
         token = cred.get_token(SEARCH_SCOPE).token
         with httpx.Client(timeout=30.0) as c:
@@ -103,11 +103,11 @@ def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int) ->
         if last_status != "inProgress" and last_run_status != "inProgress":
             return last_result
         time.sleep(backoff)
-
+ 
     print(f"  timeout: indexer still {last_status} after {max_minutes} min")
     return {"status": "timeout", "itemsProcessed": 0}
-
-
+ 
+ 
 def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
                      wait_minutes: int, endpoint: str, indexer_name: str,
                      py: str) -> dict:
@@ -119,18 +119,18 @@ def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
        5. Wait for the indexer to drain.
        6. Re-run check_index --coverage --write-status to refresh state.
        Stop when a pass finds nothing left to heal, or max_passes reached.
-
+ 
        Returns a dict of per-pass stats."""
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
     import cosmos_writer  # noqa: WPS433
     from preanalyze import delete_blob, list_cache_blobs
-
+ 
     out = {"passes": [], "error": None}
     if not cosmos_writer._is_configured(cfg):
         out["error"] = "auto-heal requires Cosmos DB configuration"
         return out
-
+ 
     for pass_idx in range(max_passes):
         try:
             db = cosmos_writer._get_database_client(cfg)
@@ -146,17 +146,17 @@ def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
         except Exception as exc:
             out["error"] = f"cosmos read failed: {exc}"
             return out
-
+ 
         print()
         print("=" * 70)
         print(f"  HEAL PASS {pass_idx + 1}/{max_passes}: {len(incomplete)} incomplete PDFs")
         print("=" * 70)
-
+ 
         if not incomplete:
             out["passes"].append({"pass": pass_idx + 1, "incomplete": 0, "healed": 0})
             print("  Nothing to heal. Done.")
             return out
-
+ 
         # Purge stale cache for each incomplete PDF so preanalyze re-runs
         # fully (rather than thinking it's already cached).
         all_cache = list_cache_blobs(cfg)
@@ -171,7 +171,7 @@ def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
                     except Exception as exc:
                         print(f"  warn: could not delete {b}: {exc}", flush=True)
         print(f"  Purged {purged} cache blobs for {len(incomplete)} PDFs")
-
+ 
         # Re-run preanalyze (will re-process just the purged ones).
         rc, _ = run_step(
             f"heal pass {pass_idx + 1}: preanalyze --incremental",
@@ -179,10 +179,10 @@ def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
              "--config", config_path, "--incremental"],
             allow_fail=True,
         )
-
+ 
         # Wait for the indexer to pick up the new cache.
         wait_for_indexer_idle(endpoint, indexer_name, max(wait_minutes // 2, 10))
-
+ 
         # Refresh coverage / pdf_state.
         run_step(
             f"heal pass {pass_idx + 1}: check_index --coverage --write-status",
@@ -191,7 +191,7 @@ def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
              "--triggered-by", f"auto-heal-pass-{pass_idx + 1}"],
             allow_fail=True,
         )
-
+ 
         out["passes"].append({
             "pass": pass_idx + 1,
             "incomplete": len(incomplete),
@@ -199,8 +199,8 @@ def _run_heal_passes(cfg: dict, config_path: str, max_passes: int,
             "preanalyze_exit": rc,
         })
     return out
-
-
+ 
+ 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run full indexing pipeline")
     ap.add_argument("--config", default="deploy.config.json")
@@ -222,20 +222,20 @@ def main() -> int:
                          "identify incomplete PDFs, purge their cache, re-run "
                          "preanalyze on them, wait for indexer.")
     args = ap.parse_args()
-
+ 
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
     endpoint = cfg["search"]["endpoint"].rstrip("/")
     prefix = cfg["search"].get("artifactPrefix") or "mm-manuals"
     indexer_name = f"{prefix}-indexer"
-
+ 
     pipeline_started_at = _now_iso()
     pipeline_t0 = time.time()
     git_sha = _git_sha()
     py = sys.executable or "python"
-
+ 
     overall_rc = 0
     step_results: dict[str, dict] = {}
-
+ 
     # 1. Reconcile.
     if args.skip_reconcile:
         step_results["reconcile"] = {"skipped": True}
@@ -253,7 +253,7 @@ def main() -> int:
         # mark the pipeline as needing attention.
         if rc not in (0, 2):
             overall_rc = max(overall_rc, rc)
-
+ 
     # 2. Preanalyze (incremental).
     if args.skip_preanalyze:
         step_results["preanalyze"] = {"skipped": True}
@@ -268,7 +268,7 @@ def main() -> int:
         step_results["preanalyze"] = {"exit_code": rc}
         if rc != 0:
             overall_rc = max(overall_rc, rc)
-
+ 
     # 3. Wait for the indexer to drain. The indexer's own 15-minute
     # schedule should pick up new caches automatically; we just watch
     # for it to finish whatever batch it's on.
@@ -282,7 +282,7 @@ def main() -> int:
             "errors": len(last.get("errors") or []),
             "warnings": len(last.get("warnings") or []),
         }
-
+ 
     # 4. Coverage + status persistence. check_index.py --write-status
     # both prints coverage AND writes a run_history + pdf_state batch
     # to Cosmos.
@@ -297,7 +297,7 @@ def main() -> int:
     step_results["check_index"] = {"exit_code": rc}
     if rc != 0:
         overall_rc = max(overall_rc, rc)
-
+ 
     # 4.5. Optional auto-heal: detect any PDF the indexer didn't fully
     # process (partial chunks, no summary, missing DI cache) and force a
     # clean re-process for just those files. Bounded by --heal-passes
@@ -310,7 +310,7 @@ def main() -> int:
         step_results["auto_heal"] = heal_results
         if heal_results.get("error"):
             overall_rc = max(overall_rc, 1)
-
+ 
     # 5. Pipeline-level run record.
     cosmos_writer.write_run_record(cfg, {
         "run_type": "full_pipeline",
@@ -321,7 +321,7 @@ def main() -> int:
         "steps": step_results,
         "exit_code": overall_rc,
     })
-
+ 
     print()
     print("=" * 70)
     print(f"  PIPELINE DONE (exit {overall_rc}, "
@@ -329,7 +329,8 @@ def main() -> int:
           f"{sum(1 for s in step_results.values() if s.get('skipped'))} skipped)")
     print("=" * 70)
     return overall_rc
-
-
+ 
+ 
 if __name__ == "__main__":
     sys.exit(main())
+ 

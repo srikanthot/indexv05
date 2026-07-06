@@ -2,16 +2,16 @@ param(
   [string]$Config = 'deploy.config.json'
 )
 $ErrorActionPreference = 'Stop'
-
+ 
 if (-not (Test-Path $Config)) { throw "Config file not found: $Config" }
 $cfg = Get-Content $Config -Raw | ConvertFrom-Json
-
+ 
 $FuncApp = $cfg.functionApp.name
 $Rg = $cfg.functionApp.resourceGroup
 if (-not $FuncApp -or -not $Rg) { throw 'functionApp.name and functionApp.resourceGroup must be set' }
-
+ 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-
+ 
 Write-Host "==> Publishing function code to $FuncApp"
 Push-Location (Join-Path $RepoRoot 'function_app')
 # Capture both exit code and output. `func` doesn't always set $LASTEXITCODE
@@ -21,7 +21,7 @@ Push-Location (Join-Path $RepoRoot 'function_app')
 $publishOutput = & func azure functionapp publish $FuncApp --python --verbose 2>&1 | Tee-Object -Variable rawOut
 $publishExitCode = $LASTEXITCODE
 Pop-Location
-
+ 
 $publishText = ($publishOutput | Out-String)
 $failureMarkers = @(
   'Error Uploading archive',
@@ -32,7 +32,7 @@ $failureMarkers = @(
   'Deployment failed'
 )
 $failureHit = $failureMarkers | Where-Object { $publishText -match [regex]::Escape($_) }
-
+ 
 if ($publishExitCode -ne 0 -or $failureHit) {
   Write-Host ""
   Write-Host "==> ABORT: function publish FAILED" -ForegroundColor Red
@@ -49,17 +49,17 @@ if ($publishExitCode -ne 0 -or $failureHit) {
   Write-Host "NOT continuing with App Settings update because the new code isn't live." -ForegroundColor Red
   throw "func azure functionapp publish failed (see output above)"
 }
-
+ 
 Write-Host "==> Applying App Settings"
-
+ 
 $apiVersion = $cfg.azureOpenAI.apiVersion; if (-not $apiVersion) { $apiVersion = '2024-12-01-preview' }
 $diApi = $cfg.documentIntelligence.apiVersion; if (-not $diApi) { $diApi = '2024-11-30' }
 $prefix = $cfg.search.artifactPrefix; if (-not $prefix) { $prefix = 'mm-manuals' }
 $skillVersion = $cfg.skillVersion; if (-not $skillVersion) { $skillVersion = '1.0.0' }
-
+ 
 # Storage and indexer-name settings used by the auto_heal timer trigger.
 $storageAcctName = ($cfg.storage.accountResourceId -split '/')[-1]
-
+ 
 $settings = @(
   "AUTH_MODE=mi",
   "AOAI_ENDPOINT=$($cfg.azureOpenAI.endpoint)",
@@ -88,7 +88,9 @@ $settings = @(
 if ($cfg.appInsights.connectionString) {
   $settings += "APPLICATIONINSIGHTS_CONNECTION_STRING=$($cfg.appInsights.connectionString)"
 }
-
+ 
 az functionapp config appsettings set -g $Rg -n $FuncApp --settings $settings --output none
-
+ 
 Write-Host "==> Function App $FuncApp ready"
+ 
+ 

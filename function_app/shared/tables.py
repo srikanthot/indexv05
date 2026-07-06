@@ -1,6 +1,6 @@
 """
 Convert DI's tables[] into structured markdown table records.
-
+ 
 Features:
 - Builds a markdown grid honoring rowIndex/columnIndex (no spans collapsed,
   spanned cells repeat their content for readability).
@@ -13,12 +13,12 @@ Features:
   retrieve the relevant row directly without the LLM having to traverse
   a markdown grid.
 """
-
+ 
 import logging
 from typing import Any
-
+ 
 MAX_TABLE_CHARS = 3000
-
+ 
 # Row-record emission: emit per-row records for tables of meaningful size.
 #
 # Lower bound (5): below 5 rows the parent table record is enough; a 3-row
@@ -37,12 +37,12 @@ MAX_TABLE_CHARS = 3000
 # exactly the lookup keys the chatbot needs.
 ROW_RECORD_MIN_ROWS = 5
 ROW_RECORD_MAX_ROWS = 5000
-
-
+ 
+ 
 def _cell_text(cell: dict[str, Any]) -> str:
     return (cell.get("content") or "").replace("|", "\\|").replace("\n", " ").strip()
-
-
+ 
+ 
 def _table_pages(table: dict[str, Any]) -> list[int]:
     pages = set()
     for br in table.get("boundingRegions", []) or []:
@@ -50,17 +50,17 @@ def _table_pages(table: dict[str, Any]) -> list[int]:
         if isinstance(pn, int):
             pages.add(pn)
     return sorted(pages)
-
-
+ 
+ 
 def _table_caption(table: dict[str, Any]) -> str:
     cap = table.get("caption") or {}
     return (cap.get("content") or "").strip()
-
-
+ 
+ 
 _MAX_TABLE_ROWS = 5000
 _MAX_TABLE_COLS = 200
-
-
+ 
+ 
 def _table_to_grid(table: dict[str, Any]) -> list[list[str]]:
     rows = table.get("rowCount") or 0
     cols = table.get("columnCount") or 0
@@ -90,18 +90,18 @@ def _table_to_grid(table: dict[str, Any]) -> list[list[str]]:
                 if 0 <= rr < rows and 0 <= cc < cols:
                     grid[rr][cc] = text
     return grid
-
-
+ 
+ 
 def _header_row_count(table: dict[str, Any]) -> int:
     """How many leading rows of the table are header rows.
-
+ 
     Technical manuals routinely use 2-row or 3-row table headers (super-header
     + sub-header), e.g. a "Voltage" super-header spanning two columns
     above "120/240" and "277/480" sub-headers. The naive "row 0 is the
     header" assumption flattens that hierarchy and the chunk no longer
     answers cell-level questions like "for 200A 4-wire 277/480V, what
     conductor size?".
-
+ 
     Strategy: walk DI's `cells` array and find leading rows where the
     majority of original (non-replicated) cells are tagged
     `kind: "columnHeader"`. Falls back to 1 when DI didn't populate
@@ -114,7 +114,7 @@ def _header_row_count(table: dict[str, Any]) -> int:
     row_count = table.get("rowCount") or 0
     if row_count == 0:
         return 1
-
+ 
     # Group cells by their *original* row position (rowIndex of the
     # cell record itself, not replicated positions covered by spans).
     rows_to_kinds: dict[int, list[str]] = {}
@@ -122,7 +122,7 @@ def _header_row_count(table: dict[str, Any]) -> int:
         ri = cell.get("rowIndex", 0)
         kind = (cell.get("kind") or "").lower()
         rows_to_kinds.setdefault(ri, []).append(kind)
-
+ 
     leading_header_rows = 0
     for r in range(row_count):
         kinds = rows_to_kinds.get(r) or []
@@ -136,24 +136,24 @@ def _header_row_count(table: dict[str, Any]) -> int:
             leading_header_rows += 1
         else:
             break
-
+ 
     return leading_header_rows if leading_header_rows >= 1 else 1
-
-
+ 
+ 
 def _fold_headers(grid: list[list[str]], header_rows: int) -> list[str]:
     """Combine multi-row headers into one header row by joining each
     column's stacked header cells with " — ".
-
+ 
     Input grid:           Output for header_rows=2:
         | "" | Voltage | Voltage |        | Service Class | Voltage — 120/240 | Voltage — 277/480 |
         | Service Class | 120/240 | 277/480 |
         | 200A | 4-wire | 4-wire |
-
+ 
     The folded header preserves the column hierarchy in the embedding
     text so semantic search and the LLM both see the relationship
     between "Voltage" and "277/480" — without that, "200A 4-wire
     277/480" is unanswerable from the table alone.
-
+ 
     Duplicate values stacked in one column (a super-header that spans
     multiple columns is replicated across them by _table_to_grid) are
     de-duplicated so we don't emit "Voltage — Voltage — 120/240"."""
@@ -176,8 +176,8 @@ def _fold_headers(grid: list[list[str]], header_rows: int) -> list[str]:
             seen.append(v)
         folded.append(" — ".join(seen))
     return folded
-
-
+ 
+ 
 def _grid_to_markdown(grid: list[list[str]], header_rows: int = 1) -> str:
     if not grid or not grid[0]:
         return ""
@@ -193,8 +193,8 @@ def _grid_to_markdown(grid: list[list[str]], header_rows: int = 1) -> str:
     for row in grid[header_rows:]:
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
-
-
+ 
+ 
 def _try_merge_continuation(prev: dict[str, Any], curr: dict[str, Any]) -> bool:
     """
     True if `curr` looks like a continuation of `prev`:
@@ -213,8 +213,8 @@ def _try_merge_continuation(prev: dict[str, Any], curr: dict[str, Any]) -> bool:
     if _table_caption(curr):
         return False
     return True
-
-
+ 
+ 
 def _header_block_matches(
     prev_grid: list[list[str]],
     curr_grid: list[list[str]],
@@ -223,7 +223,7 @@ def _header_block_matches(
     """True if curr_grid's first `header_rows` rows match prev_grid's
     first `header_rows` rows. Used to detect headers DI repeats on a
     continuation page so they can be dropped from the merged body.
-
+ 
     Multi-row aware: when a table has 2 or 3 header rows, DI typically
     repeats ALL of them on the continuation. The previous single-row
     check kept rows 1..N-1 of the duplicated header as data rows, which
@@ -236,8 +236,8 @@ def _header_block_matches(
     if len(prev_grid) < header_rows or len(curr_grid) < header_rows:
         return False
     return prev_grid[:header_rows] == curr_grid[:header_rows]
-
-
+ 
+ 
 def _split_oversized(markdown: str) -> list[str]:
     if len(markdown) <= MAX_TABLE_CHARS:
         return [markdown]
@@ -247,7 +247,7 @@ def _split_oversized(markdown: str) -> list[str]:
     header = lines[0]
     sep = lines[1]
     body = lines[2:]
-
+ 
     out: list[str] = []
     cur: list[str] = []
     cur_len = len(header) + len(sep) + 2
@@ -261,21 +261,21 @@ def _split_oversized(markdown: str) -> list[str]:
     if cur:
         out.append("\n".join([header, sep, *cur]))
     return out
-
-
+ 
+ 
 def _build_row_records_for_cluster(
     cluster: list[dict[str, Any]],
     grid: list[list[str]],
     header_rows: int,
 ) -> list[dict[str, Any]]:
     """Render per-row records for the cluster's body rows.
-
+ 
     Each row becomes "{header_1_folded}: {value_1}; {header_2_folded}: {value_2}; ..."
     so a query like "200A 4-wire 277/480V conductor 4/0" hits the row
     directly via BM25 + vector search. The parent's caption and
     section path travel separately on the row record so the chatbot
     can render a "Table 18-3, page 5-7, row 4: ..." citation.
-
+ 
     Returns a list of dicts with row_index, row_text, page (the source
     DI table's first page — close enough for citation), and a
     cluster-relative row_index for ordering. Empty list when the table
@@ -288,7 +288,7 @@ def _build_row_records_for_cluster(
     folded_headers = _fold_headers(grid, header_rows)
     if not folded_headers:
         return []
-
+ 
     # Map merged-grid body rows to their source-table page. Walk the
     # cluster in order, mirroring the merge logic that trims duplicated
     # header blocks on continuation pages so row counts add up correctly.
@@ -312,7 +312,7 @@ def _build_row_records_for_cluster(
         for _ in range(contributed):
             row_to_page.append(page_for_rows)
         prev_grid = tbl_grid
-
+ 
     out: list[dict[str, Any]] = []
     for i, row_cells in enumerate(body_rows):
         # Render as "Header: value" pairs joined with semicolons. Empty
@@ -340,17 +340,17 @@ def _build_row_records_for_cluster(
             "page": page,
         })
     return out
-
-
+ 
+ 
 def _bboxes_for_cluster(cluster: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build per-page union bboxes for a merged-table cluster.
-
+ 
     A cluster is a list of one-or-more DI tables that we treated as
     continuations of the same logical table. Each underlying table
     has its own boundingRegions[*] (one polygon per page it spans);
     we union them per page so the citation UI can highlight the
     *whole* table on each page, including continuation pages.
-
+ 
     Returns: list of {page, x_in, y_in, w_in, h_in}, sorted by page.
     Empty list if no usable bounding regions exist.
     """
@@ -388,8 +388,8 @@ def _bboxes_for_cluster(cluster: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "h_in": round(y1 - y0, 3),
         })
     return out
-
-
+ 
+ 
 def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Returns a list of table record dicts:
@@ -408,12 +408,12 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
     raw_tables = analyze_result.get("tables", []) or []
     if not raw_tables:
         return []
-
+ 
     sorted_tables = sorted(
         raw_tables,
         key=lambda t: (_table_pages(t)[0] if _table_pages(t) else 0),
     )
-
+ 
     # Each merged entry: (cluster_tables, grid, header_rows). header_rows
     # comes from the first table in the cluster (continuation pages
     # repeat the same header structure).
@@ -432,7 +432,7 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
             merged[-1][0].append(tbl)
         else:
             merged.append(([tbl], _table_to_grid(tbl), _header_row_count(tbl)))
-
+ 
     out: list[dict[str, Any]] = []
     for cluster_idx, (cluster, grid, header_rows) in enumerate(merged):
         first = cluster[0]
@@ -447,13 +447,13 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         caption = _table_caption(first)
         md = _grid_to_markdown(grid, header_rows=header_rows)
         cluster_bboxes = _bboxes_for_cluster(cluster)
-
+ 
         # Per-row records (only for tables with 5..80 body rows). All
         # splits of one logical table share the same row-record list —
         # row records are cluster-level, not split-level, since they're
         # already at row granularity.
         row_records = _build_row_records_for_cluster(cluster, grid, header_rows)
-
+ 
         for split_idx, chunk in enumerate(_split_oversized(md)):
             # Count data rows in this split chunk (total lines minus header
             # + separator), so callers see the real shape of the split.
@@ -472,5 +472,6 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
                 # rather than duplicated across every oversized split.
                 "table_rows": row_records if split_idx == 0 else [],
             })
-
+ 
     return out
+ 

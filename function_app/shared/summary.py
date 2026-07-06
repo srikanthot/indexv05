@@ -1,13 +1,13 @@
 """
 build-doc-summary
-
+ 
 One summary record per parent document. Concise (300-500 words).
 Used for high-recall, doc-level retrieval and as a routing signal.
 """
-
+ 
 import json
 from typing import Any
-
+ 
 from .aoai import chat_deployment, get_client
 from .ids import (
     SKILL_VERSION,
@@ -17,9 +17,9 @@ from .ids import (
     summary_chunk_id,
 )
 from .text_utils import build_highlight_text
-
+ 
 SYSTEM_PROMPT = """You are a technical-manual summarizer.
-
+ 
 Given the manual's full text and its top-level section titles, write a
 single dense summary (about 300-500 words) that captures:
   - what equipment/system the manual covers
@@ -27,16 +27,16 @@ single dense summary (about 300-500 words) that captures:
   - critical safety or compliance notes
   - notable diagrams/figures referenced
 Do not invent content. Plain prose only, no markdown."""
-
-
+ 
+ 
 def _coerce_titles(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return [str(value)]
-
-
+ 
+ 
 def _coalesce_markdown(value: Any) -> str:
     """
     Accepts either a single markdown string or a list of section markdown
@@ -47,8 +47,8 @@ def _coalesce_markdown(value: Any) -> str:
     if isinstance(value, list):
         return "\n\n".join([str(v) for v in value if v])
     return str(value)
-
-
+ 
+ 
 def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     source_file = safe_str(data.get("source_file"))
     source_path = safe_str(data.get("source_path"))
@@ -56,10 +56,10 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     primary_text = markdown_text.strip()
     titles = _coerce_titles(data.get("section_titles"))
     pdf_total_pages = safe_int(data.get("pdf_total_pages"), default=None)
-
+ 
     parent_id = parent_id_for(source_path, source_file)
     chunk_id = summary_chunk_id(source_path, source_file)
-
+ 
     # Document-level metadata. Read from input data only -- preanalyze
     # always supplies these as top-level fields on /document (empty
     # string when not extractable). Previous fallback to
@@ -70,7 +70,7 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "effective_date": safe_str(data.get("effective_date")),
         "document_number": safe_str(data.get("document_number")),
     }
-
+ 
     if not primary_text:
         return {
             "chunk_id": chunk_id,
@@ -91,13 +91,13 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             "processing_status": "no_content",
             "skill_version": SKILL_VERSION,
         }
-
+ 
     titles_block = (
         "Top-level section titles:\n- " + "\n- ".join(titles[:40])
         if titles else "Top-level section titles: (none detected)"
     )
     # Cap manual content at 20k chars (was 60k). At 60k chars on
-    # markdown-heavy OCR with tables/symbols, gpt-4.1 calls regularly
+    # markdown-heavy OCR with tables/symbols, gpt-5.1 calls regularly
     # ran 40-90s, eating the entire 60s SDK timeout with no room for
     # the response. 20k chars ≈ 6-8k tokens; calls return in 5-15s
     # consistently. titles_block above gives the model section-level
@@ -108,7 +108,7 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         f"{titles_block}\n\n"
         f"Manual content (truncated):\n{primary_text[:20000]}"
     )
-
+ 
     # Narrowed exception scope (was bare `except Exception`). The bare
     # form silently emitted an empty summary with status="summary_error:..."
     # for every record — INCLUDING permanent AAD / quota / config errors.
@@ -128,7 +128,7 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=900,
+            max_completion_tokens=900,
             # Explicit per-call timeout. Without this the SDK can hang for
             # its default 600s on a stuck socket, well past the 230s
             # Azure WebApi skill timeout, leaving the worker tied up.
@@ -157,12 +157,12 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             # Auth / config / unknown — propagate so the skill envelope
             # surfaces the failure to the indexer.
             raise
-
+ 
     semantic = (
         f"Source: {source_file}\n"
         f"Document summary:\n{summary_text}"
     )
-
+ 
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -181,3 +181,4 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "processing_status": status,
         "skill_version": SKILL_VERSION,
     }
+ 

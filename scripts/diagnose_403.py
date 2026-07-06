@@ -1,21 +1,21 @@
 """
 Diagnose Azure Search 403 errors during deploy_search.py.
-
+ 
 Runs four checks in sequence:
   1. Subscription match — is your az CLI in the same sub as the search service?
   2. Identity match — does the Python token's identity match az CLI's user?
   3. Role visibility — are the required roles actually present on this resource?
   4. Actual 403 body — what does Azure Search itself say?
-
+ 
 Cross-platform (handles az.cmd on Windows correctly).
-
+ 
 Usage:
     python scripts/diagnose_403.py
     python scripts/diagnose_403.py --config path/to/deploy.config.json
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import base64
 import json
@@ -23,14 +23,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-
-
+ 
+ 
 def _az_bin() -> str:
     """Return 'az.cmd' on Windows, 'az' elsewhere — Python's subprocess
     can't find a .cmd file without the .cmd suffix on Windows."""
     return "az.cmd" if os.name == "nt" else "az"
-
-
+ 
+ 
 def az(args: list[str], *, check: bool = False) -> str:
     """Run az command and return stdout. Returns empty string on failure
     when check=False (so we can keep the diagnostic running through
@@ -46,23 +46,23 @@ def az(args: list[str], *, check: bool = False) -> str:
     if check and r.returncode != 0:
         raise RuntimeError(f"az {' '.join(args[:5])} failed: {r.stderr[:300]}")
     return r.stdout.strip()
-
-
+ 
+ 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Diagnose 403 from Azure Search")
     ap.add_argument("--config", default="deploy.config.json")
     args = ap.parse_args()
-
+ 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         print(f"ERROR: config file not found: {cfg_path}")
         return 1
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-
+ 
     endpoint = cfg["search"]["endpoint"].rstrip("/")
     search_name = endpoint.replace("https://", "").split(".")[0]
     rg = cfg["functionApp"]["resourceGroup"]
-
+ 
     print()
     print("=" * 70)
     print("CHECK 1: Subscription match")
@@ -85,14 +85,14 @@ def main() -> int:
     else:
         print(f"  MATCH: NO  <-- this is your bug")
         print(f"  FIX: az account set --subscription {search_sub}")
-
+ 
     print()
     print("=" * 70)
     print("CHECK 2: Identity Python uses vs az CLI uses")
     print("=" * 70)
     az_user = az(["account", "show", "--query", "user.name", "-o", "tsv"])
     print(f"  az CLI user:       {az_user}")
-
+ 
     try:
         from azure.identity import DefaultAzureCredential
         cred = DefaultAzureCredential()
@@ -120,7 +120,7 @@ def main() -> int:
         print(f"  ERROR fetching Python token: {exc}")
         oid = None
         token_obj = None
-
+ 
     print()
     print("=" * 70)
     print("CHECK 3: Roles ACTUALLY visible on this search service")
@@ -161,7 +161,7 @@ def main() -> int:
                     print(f"  FIX: python scripts/assign_roles.py --config {args.config} --wait-for-propagation 300")
                 else:
                     print(f"  OK: required roles present")
-
+ 
     print()
     print("=" * 70)
     print("CHECK 4: The actual 403 body")
@@ -184,7 +184,7 @@ def main() -> int:
         except Exception as exc:
             print(f"  ERROR: {type(exc).__name__}: {exc}")
             print(f"  If SSL error: set $env:SSL_CERT_FILE to your corp CA bundle")
-
+ 
     print()
     print("=" * 70)
     print("WHAT TO DO BASED ON OUTPUT")
@@ -200,7 +200,8 @@ def main() -> int:
     print("    HTML with 'Forcepoint'/etc.  -> corporate proxy blocking *.azure.us")
     print()
     return 0
-
-
+ 
+ 
 if __name__ == "__main__":
     sys.exit(main())
+ 

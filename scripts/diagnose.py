@@ -1,6 +1,6 @@
 """
 Diagnose function app: check settings, test endpoint, check indexer status.
-
+ 
 Usage:
     python scripts/diagnose.py --config deploy.config.json
     python scripts/diagnose.py --config deploy.config.json --cert /path/to/ca.crt
@@ -11,10 +11,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-
+ 
 import httpx
-
-
+ 
+ 
 def az(args: list[str]) -> str:
     # az.cmd on Windows, az on Linux/Mac. The same cross-platform check
     # preanalyze.py and deploy_search.py use; required for Linux Jenkins
@@ -26,32 +26,32 @@ def az(args: list[str]) -> str:
         print(f"  az error: {r.stderr.strip()[:300]}", file=sys.stderr)
         return ""
     return r.stdout.strip()
-
-
+ 
+ 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="deploy.config.json")
     ap.add_argument("--cert", default=None, help="Path to CA bundle for TLS verification (or set SSL_CERT_FILE env var)")
     args = ap.parse_args()
-
+ 
     verify: str | bool = args.cert or os.environ.get("SSL_CERT_FILE") or True
-
+ 
     cfg = json.loads(Path(args.config).read_text())
     rg = cfg["functionApp"]["resourceGroup"]
     fn = cfg["functionApp"]["name"]
     search_ep = cfg["search"]["endpoint"].rstrip("/")
     prefix = cfg["search"].get("artifactPrefix", "mm-manuals")
-
+ 
     print("=" * 60)
     print("1. FUNCTION APP STATUS")
     print("=" * 60)
-
+ 
     host = az(["functionapp", "show", "-g", rg, "-n", fn, "--query", "defaultHostName", "-o", "tsv"])
     print(f"  Hostname: {host}")
-
+ 
     state = az(["functionapp", "show", "-g", rg, "-n", fn, "--query", "state", "-o", "tsv"])
     print(f"  State: {state}")
-
+ 
     # List functions
     funcs_raw = az(["functionapp", "function", "list", "-g", rg, "-n", fn, "-o", "json"])
     if funcs_raw:
@@ -60,12 +60,12 @@ def main():
         print(f"  Registered functions ({len(func_names)}): {func_names}")
     else:
         print("  WARNING: Could not list functions (may indicate startup failure)")
-
+ 
     print()
     print("=" * 60)
     print("2. APP SETTINGS CHECK")
     print("=" * 60)
-
+ 
     settings_raw = az(["functionapp", "config", "appsettings", "list", "-g", rg, "-n", fn, "-o", "json"])
     if settings_raw:
         settings = {s["name"]: s["value"] for s in json.loads(settings_raw)}
@@ -85,17 +85,17 @@ def main():
                     print(f"  OK   {name} = {val}")
             else:
                 print(f"  MISSING  {name}")
-
+ 
         # Show all settings names
         print(f"\n  All settings: {sorted(settings.keys())}")
     else:
         print("  WARNING: Could not fetch app settings")
-
+ 
     print()
     print("=" * 60)
     print("3. FUNCTION ENDPOINT TEST")
     print("=" * 60)
-
+ 
     if host:
         fkey_raw = az(["functionapp", "keys", "list", "-g", rg, "-n", fn, "-o", "json"])
         if fkey_raw:
@@ -132,19 +132,19 @@ def main():
                 print("  No function key found")
         else:
             print("  Could not fetch function keys")
-
+ 
     print()
     print("=" * 60)
     print("4. INDEXER STATUS")
     print("=" * 60)
-
+ 
     indexer_name = f"{prefix}-indexer"
     search_scope = "https://search.azure.us/.default"
     try:
         from azure.identity import AzureCliCredential
         cred = AzureCliCredential()
         token = cred.get_token(search_scope).token
-
+ 
         with httpx.Client(verify=verify, timeout=30) as c:
             url = f"{search_ep}/indexers/{indexer_name}/status?api-version=2024-11-01-preview"
             r = c.get(url, headers={"Authorization": f"Bearer {token}"})
@@ -157,7 +157,7 @@ def main():
                 print(f"  Last run end: {last.get('endTime')}")
                 print(f"  Items processed: {last.get('itemsProcessed')}")
                 print(f"  Items failed: {last.get('itemsFailed')}")
-
+ 
                 errors = last.get("errors", [])
                 if errors:
                     print(f"\n  ERRORS ({len(errors)}):")
@@ -169,7 +169,7 @@ def main():
                             print(f"        details={details[:300]}")
                 else:
                     print("  No errors")
-
+ 
                 warnings = last.get("warnings", [])
                 if warnings:
                     print(f"\n  WARNINGS ({len(warnings)}):")
@@ -179,12 +179,12 @@ def main():
                 print(f"  HTTP {r.status_code}: {r.text[:300]}")
     except Exception as e:
         print(f"  ERROR: {type(e).__name__}: {e}")
-
+ 
     print()
     print("=" * 60)
     print("5. FUNCTION APP LOG STREAM (last errors)")
     print("=" * 60)
-
+ 
     log_raw = az(["webapp", "log", "tail", "-g", rg, "-n", fn, "--timeout", "5"])
     if log_raw:
         # Filter for error/exception lines
@@ -197,9 +197,11 @@ def main():
             print("  No error lines found in recent logs")
     else:
         print("  Could not fetch logs (try checking App Insights in the portal)")
-
+ 
     print("\nDone.")
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
+ 
+ 

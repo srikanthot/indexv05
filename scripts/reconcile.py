@@ -1,27 +1,27 @@
 """
 Reconcile blob storage state with the search index.
-
+ 
 Detects three cases per PDF:
   - ADDED   : in blob, not in index           -> no action (preanalyze + indexer pick it up next run)
   - DELETED : in index, not in blob           -> purge index records + cache blobs + Cosmos state
   - EDITED  : blob's last_modified > last_indexed_at  (per Cosmos pdf_state)
                                               -> purge index records + cache blobs (forces full reanalyse)
   - STABLE  : nothing changed                 -> skip
-
+ 
 Safety:
   - --dry-run prints what would happen without acting.
   - --max-purges (default 2) caps the number of PDFs we'll purge in one
     run. If more candidates are found, the script aborts with a clear
     message. The operator raises the cap intentionally once they trust
     the script.
-
+ 
 Usage:
     python scripts/reconcile.py --config deploy.config.json --dry-run
     python scripts/reconcile.py --config deploy.config.json --max-purges 5
 """
-
+ 
 from __future__ import annotations
-
+ 
 import argparse
 import json
 import logging
@@ -29,14 +29,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
+ 
 import httpx
 from azure.identity import DefaultAzureCredential
-
+ 
 # Make function_app/shared importable (parent_id derivation).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
 from shared.ids import parent_id_for  # noqa: E402
-
+ 
 # Local script imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cosmos_writer  # noqa: E402
@@ -46,11 +46,11 @@ from preanalyze import (  # noqa: E402
     delete_blob,
     list_cache_blobs,
 )
-
+ 
 API_VERSION = "2024-05-01-preview"
 SEARCH_SCOPE = "https://search.azure.us/.default"
-
-
+ 
+ 
 @dataclass
 class ReconcilePlan:
     added: list[str] = field(default_factory=list)
@@ -59,21 +59,21 @@ class ReconcilePlan:
     stable: list[str] = field(default_factory=list)
     blob_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     index_chunks_per_pdf: dict[str, int] = field(default_factory=dict)
-
-
+ 
+ 
 # ---------- helpers ----------
-
+ 
 def _aad_token() -> str:
     return DefaultAzureCredential().get_token(SEARCH_SCOPE).token
-
-
+ 
+ 
 def _list_blob_metadata(cfg: dict) -> dict[str, dict[str, Any]]:
     """Returns {filename: {last_modified: iso, content_length: int}} for
     every PDF blob at the container root. Uses the same az CLI path as
     preanalyze.list_pdfs, but with --query that captures last_modified."""
     import os
     import subprocess
-
+ 
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
     from preanalyze import _get_connection_string  # local import — same module
@@ -101,8 +101,8 @@ def _list_blob_metadata(cfg: dict) -> dict[str, dict[str, Any]]:
             "content_length": item.get("length") or 0,
         }
     return out
-
-
+ 
+ 
 def _query_index_pdfs(endpoint: str, index_name: str, headers: dict) -> dict[str, int]:
     """Returns {source_file: chunk_count} via facet query on the index."""
     url = f"{endpoint}/indexes/{index_name}/docs/search?api-version={API_VERSION}"
@@ -112,8 +112,8 @@ def _query_index_pdfs(endpoint: str, index_name: str, headers: dict) -> dict[str
     resp.raise_for_status()
     facets = resp.json().get("@odata.facets", {}).get("source_file", [])
     return {f["value"]: int(f.get("count", 0)) for f in facets if f.get("value")}
-
-
+ 
+ 
 def _delete_index_records_for_parent(
     endpoint: str,
     index_name: str,
@@ -124,7 +124,7 @@ def _delete_index_records_for_parent(
     """
     Delete every record where parent_id eq '<parent_id>'. Returns the
     number of records deleted.
-
+ 
     Implementation: search for chunk_id keys filtered by parent_id, page
     through them, and POST a batch of @search.action: delete to the
     /docs/index endpoint.
@@ -132,7 +132,7 @@ def _delete_index_records_for_parent(
     deleted_total = 0
     search_url = f"{endpoint}/indexes/{index_name}/docs/search?api-version={API_VERSION}"
     index_url = f"{endpoint}/indexes/{index_name}/docs/index?api-version={API_VERSION}"
-
+ 
     while True:
         body = {
             "search": "*",
@@ -167,8 +167,8 @@ def _delete_index_records_for_parent(
         if len(hits) < max_keys_per_batch:
             break
     return deleted_total
-
-
+ 
+ 
 def _delete_cache_blobs_for_pdf(cfg: dict, pdf_name: str) -> int:
     """Delete every _dicache/<pdf_name>.* blob. Returns deleted count."""
     cache_blobs = list_cache_blobs(cfg)
@@ -182,24 +182,24 @@ def _delete_cache_blobs_for_pdf(cfg: dict, pdf_name: str) -> int:
         except Exception as exc:
             logging.warning("delete cache blob %s failed: %s", b, exc)
     return n
-
-
+ 
+ 
 # ---------- planning ----------
-
+ 
 def build_plan(cfg: dict, endpoint: str, index_name: str, headers: dict) -> ReconcilePlan:
     """Compare blob, index, and Cosmos pdf_state to produce a plan."""
     plan = ReconcilePlan()
-
+ 
     print("Listing PDFs in blob container...")
     plan.blob_meta = _list_blob_metadata(cfg)
     blob_pdfs = set(plan.blob_meta.keys())
     print(f"  {len(blob_pdfs)} PDFs in blob")
-
+ 
     print("Querying index for source_file facet...")
     plan.index_chunks_per_pdf = _query_index_pdfs(endpoint, index_name, headers)
     indexed_pdfs = set(plan.index_chunks_per_pdf.keys())
     print(f"  {len(indexed_pdfs)} PDFs have records in the index")
-
+ 
     # Read existing pdf_state from Cosmos so we know last_indexed_at per PDF.
     last_indexed_at: dict[str, str] = {}
     if cosmos_writer._is_configured(cfg):
@@ -214,7 +214,7 @@ def build_plan(cfg: dict, endpoint: str, index_name: str, headers: dict) -> Reco
             print(f"  {len(last_indexed_at)} PDFs have Cosmos state rows")
         except Exception as exc:
             logging.warning("Cosmos pdf_state read failed: %s", exc)
-
+ 
     # Classify each PDF.
     for pdf in sorted(blob_pdfs | indexed_pdfs):
         in_blob = pdf in blob_pdfs
@@ -239,10 +239,10 @@ def build_plan(cfg: dict, endpoint: str, index_name: str, headers: dict) -> Reco
         else:
             plan.stable.append(pdf)
     return plan
-
-
+ 
+ 
 # ---------- execution ----------
-
+ 
 def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
                  index_name: str, headers: dict, dry_run: bool) -> dict[str, Any]:
     """Carry out the deletes and edit-purges in the plan. Returns a stats
@@ -254,7 +254,7 @@ def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
     }
     container_account = _account_name(cfg)
     container_name = cfg["storage"]["pdfContainerName"]
-
+ 
     targets = [(pdf, "deleted") for pdf in plan.deleted] + [(pdf, "edited") for pdf in plan.edited]
     for pdf, kind in targets:
         # Recompute parent_id the same way the function app does.
@@ -264,12 +264,12 @@ def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
             f"{container_name}/{pdf}"
         )
         parent_id = parent_id_for(source_path, pdf)
-
+ 
         if dry_run:
             print(f"  [dry-run] would purge {pdf} ({kind}, parent_id={parent_id}, "
                   f"chunks={plan.index_chunks_per_pdf.get(pdf, 0)})")
             continue
-
+ 
         # 1. Delete index records for this parent_id.
         try:
             n = _delete_index_records_for_parent(endpoint, index_name, headers, parent_id)
@@ -280,7 +280,7 @@ def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
             logging.warning(err)
             stats["errors"].append(err)
             continue
-
+ 
         # 2. Delete cache blobs.
         try:
             blobs = _delete_cache_blobs_for_pdf(cfg, pdf)
@@ -290,7 +290,7 @@ def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
             err = f"cache purge failed for {pdf}: {exc}"
             logging.warning(err)
             stats["errors"].append(err)
-
+ 
         # 3. For deleted PDFs, also clear Cosmos state.
         if kind == "deleted":
             cosmos_writer.delete_pdf_state(cfg, pdf)
@@ -299,12 +299,12 @@ def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
             # For edited, leave the Cosmos row; preanalyze/check_index
             # will overwrite it on the next run with the new state.
             stats["edited_pdfs"] += 1
-
+ 
     return stats
-
-
+ 
+ 
 # ---------- main ----------
-
+ 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Reconcile blob storage with search index")
     ap.add_argument("--config", default="deploy.config.json")
@@ -322,17 +322,17 @@ def main() -> int:
                          "re-uploaded only to set metadata, and you want the "
                          "existing _dicache/ to be re-used instead of rebuilt.")
     args = ap.parse_args()
-
+ 
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
     endpoint = cfg["search"]["endpoint"].rstrip("/")
     prefix = cfg["search"].get("artifactPrefix") or "mm-manuals"
     index_name = f"{prefix}-index"
-
+ 
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {_aad_token()}",
     }
-
+ 
     # Acquire the same pipeline lock preanalyze uses, so the two can't
     # collide (e.g. reconcile purges a cache blob preanalyze just wrote).
     # Dry-run mode doesn't take the lock — it's read-only.
@@ -347,11 +347,11 @@ def main() -> int:
             return 2
         except Exception as exc:
             print(f"  warning: lock acquire failed: {exc}; proceeding")
-
+ 
     print(f"Reconcile starting (dry_run={args.dry_run}, max_purges={args.max_purges}, "
           f"skip_edits={args.skip_edits})")
     plan = build_plan(cfg, endpoint, index_name, headers)
-
+ 
     # If --skip-edits, clear the edits list so they're treated as STABLE.
     # We keep them in the printed summary as "EDITED (skipped)" so the
     # operator can see what was bypassed.
@@ -359,7 +359,7 @@ def main() -> int:
     if args.skip_edits and plan.edited:
         edits_skipped = list(plan.edited)
         plan.edited = []
-
+ 
     print()
     print(f"  ADDED   : {len(plan.added)}  (no action — preanalyze + indexer will pick them up)")
     if edits_skipped:
@@ -369,14 +369,14 @@ def main() -> int:
         print(f"  EDITED  : {len(plan.edited)}  (will purge index + cache, then preanalyze re-runs)")
     print(f"  DELETED : {len(plan.deleted)} (will purge index + cache + Cosmos state)")
     print(f"  STABLE  : {len(plan.stable)}")
-
+ 
     purge_count = len(plan.deleted) + len(plan.edited)
     if purge_count > args.max_purges and not args.dry_run:
         print()
         print(f"ABORT: {purge_count} PDFs would be purged but --max-purges is {args.max_purges}.")
         print("       Re-run with a higher --max-purges (or --dry-run to inspect first).")
         return 2
-
+ 
     if plan.deleted or plan.edited:
         print()
         print("Executing purges:")
@@ -384,7 +384,7 @@ def main() -> int:
     else:
         stats = {"deleted_pdfs": 0, "edited_pdfs": 0,
                  "chunks_purged": 0, "cache_blobs_purged": 0, "errors": []}
-
+ 
     # Persist a run record (best-effort).
     if not args.dry_run:
         cosmos_writer.write_run_record(cfg, {
@@ -398,7 +398,7 @@ def main() -> int:
             "cache_blobs_purged": stats["cache_blobs_purged"],
             "errors": stats["errors"],
         })
-
+ 
     # Release lock before exit.
     if lock_id is not None:
         try:
@@ -407,14 +407,14 @@ def main() -> int:
             print("  released pipeline lock")
         except Exception as exc:
             print(f"  warning: lock release failed: {exc}")
-
+ 
     print()
     print("Reconcile done.")
     if stats["errors"]:
         print(f"  WARNING: {len(stats['errors'])} errors during execution; see logs")
         return 1
     return 0
-
-
+ 
+ 
 if __name__ == "__main__":
     sys.exit(main())
