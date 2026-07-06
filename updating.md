@@ -1,82 +1,13 @@
-# =========================
-# OS files
-# =========================
-.DS_Store
-Thumbs.db
-Desktop.ini
+Here is the current status update:
 
-# =========================
-# Editors / IDE
-# =========================
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+We are actively working on the open bugs. Currently, there are 17 bugs open. Around 10 bugs are expected to be closed once the new changes are pushed, but I am waiting for the indexer changes to be completed before pushing them. The remaining bugs are still in progress and we are continuing to work on them.
 
-# =========================
-# Environment files
-# =========================
-.env
-.env.*
-!.env.example
+On the indexing side, I am working on shifting from Azure OpenAI to Microsoft Foundry and creating the updated index for it. I am also updating the performance testing setup from GPT-4.1 to GPT-5.1 and preparing the related index changes.
 
-# =========================
-# Python
-# =========================
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage/
-htmlcov/
+In parallel, I am working on the CI/CD Jenkins pipeline setup for this project.
 
-# =========================
-# Node / Next.js
-# =========================
-node_modules/
-.next/
-out/
-dist/
-build/
-*.tsbuildinfo
+The iOS app work has been completed, and we are currently waiting for the app release.
 
-# =========================
-# Logs
-# =========================
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-uvicorn*.log
-*.err.log
+I will keep you posted as we complete the indexer changes and start closing the related bugs.
 
-# =========================
-# Local generated / testing folders
-# Do not push these to GitHub
-# =========================
-handoff_bundle_*/
-handoff_bundle*/
-indexing_handoff_bundle/
-reports/
-evaluation/
-
-# =========================
-# Local diagnostic / testing files
-# Do not push these to GitHub
-# =========================
-deploy.config.json
-diagnose_highlight.py
-index_catalog.json
-
-# =========================
-# Local temp/cache files
-# =========================
-tmp/
-temp/
-.cache/
+Than
