@@ -1,13 +1,9 @@
-Hi Copilot — the pipeline is validated end-to-end on 3 docs. Now we're scaling to
-the 12 documents needed for performance testing (these are bigger: ~40-90MB). This
-round: confirm all 12 are in the container, report the model TPM quotas (we saw a
-429 earlier, so we may need to bump ada-002), and run preanalyze on all of them.
-
-No code edits. Run the steps and print the REPORT block. SSL env as usual; US Gov.
-NOTE: preanalyze on 9 big new docs (the 3 small ones are already done and will be
-skipped by --incremental) may take 1-3 hours — let it run to completion; it is
-resumable if interrupted. If you must, run it in the background and report progress
-via `python scripts/preanalyze.py --config deploy.config.json --status`.
+Hi Copilot — we're switching to a DIFFERENT storage account that already contains
+the 12 performance-test PDFs. Re-point the pipeline to it: find that account,
+update the config, grant the identities access, redeploy the datasource, and run
+preanalyze on all 12. No app code edits (only deploy.config.json's storage block).
+Run the steps and print the REPORT. SSL env as usual; US Gov;
+sub 5c58d830-b35f-458a-ab5d-65ad9d0b9815.
 
 ---
 
@@ -20,40 +16,91 @@ export AOAI_REASONING_EFFORT=low
 az cloud set --name AzureUSGovernment
 az account set --subscription 5c58d830-b35f-458a-ab5d-65ad9d0b9815
 
-# 1. Confirm all 12 PDFs are in the container (upload the missing ones first if fewer than 12)
-SA=$(python -c "import json;print(json.load(open('deploy.config.json'))['storage']['accountResourceId'].rstrip('/').split('/')[-1])")
-CONT=$(python -c "import json;print(json.load(open('deploy.config.json'))['storage']['pdfContainerName'])")
-echo "STORAGE=$SA CONTAINER=$CONT"
-az storage blob list --account-name "$SA" --container-name "$CONT" --auth-mode login --num-results 5000 \
-  --query "[?ends_with(name,'.pdf')].{mb: to_number(properties.contentLength), name:name}" -o tsv \
-  | awk -F'\t' '{tot+=$1;n++; printf "%.1fMB\t%s\n",$1/1048576,$2} END{printf "TOTAL_PDFS=%d TOTAL_MB=%.0f\n",n,tot/1048576}' | sort -rn
+# 1. Find the storage account + container holding the 12 PDFs.
+#    List every storage account, then its containers with PDF counts. Identify the
+#    account+container that has the 12 performance-test PDFs.
+for A in $(az storage account list --query "[].name" -o tsv); do
+  RGN=$(az storage account show -n "$A" --query resourceGroup -o tsv)
+  for C in $(az storage container list --account-name "$A" --auth-mode login --query "[].name" -o tsv 2>/dev/null); do
+    N=$(az storage blob list --account-name "$A" --container-name "$C" --auth-mode login --num-results 5000 --query "length([?ends_with(name,'.pdf')])" -o tsv 2>/dev/null)
+    [ "${N:-0}" -gt 0 ] && echo "ACCOUNT=$A RG=$RGN CONTAINER=$C PDFs=$N"
+  done
+done
+```
 
-# 2. Report the model deployment TPM/capacity (so we know if ada-002 needs a bump)
-az cognitiveservices account deployment list -n psegtmfdryuatv01 -g psegtmrguatv01 \
-  --query "[].{name:name, model:properties.model.name, sku:sku.name, capacity_k_tpm:sku.capacity}" -o table
+Identify the account+container with the 12 PDFs from that list, then set these
+(replace the placeholders) and continue:
 
-# 3. Run preanalyze on all container docs (all phases; skips the 3 already done).
-#    This is the long step. Let it finish. It prints per-PDF vision coverage.
-python scripts/preanalyze.py --config deploy.config.json --phase all --incremental --concurrency 3 --vision-parallel 20
+```bash
+NEW_ACCT=<the account name with 12 PDFs>
+NEW_RG=<its resource group>
+NEW_CONT=<the container name>
+NEW_ID=$(az storage account show -n "$NEW_ACCT" -g "$NEW_RG" --query id -o tsv)
+echo "NEW_ID=$NEW_ID"
 
-# 4. After it finishes, show the status summary
+# 2. Update deploy.config.json storage block: accountResourceId=$NEW_ID, pdfContainerName=$NEW_CONT
+python - <<PY
+import json
+c=json.load(open("deploy.config.json"))
+c.setdefault("storage",{})
+c["storage"]["accountResourceId"]="$NEW_ID"
+c["storage"]["pdfContainerName"]="$NEW_CONT"
+json.dump(c, open("deploy.config.json","w"), indent=2)
+print("updated storage ->", c["storage"]["accountResourceId"], c["storage"]["pdfContainerName"])
+PY
+
+# 3. Enable blob soft delete on the new account if not enabled (the datasource needs it)
+EN=$(az storage account blob-service-properties show --account-name "$NEW_ACCT" --query "deleteRetentionPolicy.enabled" -o tsv 2>/dev/null)
+echo "soft_delete_enabled=$EN"
+if [ "$EN" != "true" ]; then
+  az storage account blob-service-properties update --account-name "$NEW_ACCT" --enable-delete-retention true --delete-retention-days 7 -o none && echo "enabled soft delete"
+fi
+
+# 4. Grant identities access on the NEW storage account (Storage Blob Data Reader for the MIs,
+#    Contributor for your signed-in user so preanalyze can write _dicache). Uses ARM REST to
+#    dodge the MissingSubscription CLI glitch. Role GUIDs: Reader=2a2b9908-6ea1-4ae2-8e65-a410df84e7d1,
+#    Contributor=ba92f5b4-2d11-453d-a403-e96b0029c9fe.
+SUB=5c58d830-b35f-458a-ab5d-65ad9d0b9815
+USER_OID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null)
+FUNC_MI=33182d42-e64e-4449-9e64-fd03f683222e
+SEARCH_MI=4d05c1b2-a915-44a2-b29c-dc614b2601ac
+grant() { # $1=principalId $2=roleGuid $3=principalType
+  AID=$(python -c "import uuid;print(uuid.uuid4())")
+  BODY=$(printf '{"properties":{"roleDefinitionId":"/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/%s","principalId":"%s","principalType":"%s"}}' "$SUB" "$2" "$1" "$3")
+  az rest --method put --url "https://management.usgovcloudapi.net${NEW_ID}/providers/Microsoft.Authorization/roleAssignments/${AID}?api-version=2022-04-01" --body "$BODY" 2>&1 | tail -2 || echo "(exists ok)"
+}
+grant "$FUNC_MI"  2a2b9908-6ea1-4ae2-8e65-a410df84e7d1 ServicePrincipal   # func MI reader
+grant "$SEARCH_MI" 2a2b9908-6ea1-4ae2-8e65-a410df84e7d1 ServicePrincipal  # search MI reader
+[ -n "$USER_OID" ] && grant "$USER_OID" ba92f5b4-2d11-453d-a403-e96b0029c9fe User   # you: contributor (for preanalyze writes)
+echo "USER_OID=$USER_OID"
+sleep 30  # RBAC propagation
+
+# 5. Redeploy search artifacts (datasource now points at the new storage account)
+python scripts/deploy_search.py --config deploy.config.json
+
+# 6. Preanalyze ALL 12 docs in the new container (all phases, from scratch). Long step (1-3h) — let it finish.
+python scripts/preanalyze.py --config deploy.config.json --phase all --concurrency 3 --vision-parallel 20
+
+# 7. Status summary + the model TPM quotas (in case we need to bump ada-002)
 python scripts/preanalyze.py --config deploy.config.json --status
+az cognitiveservices account deployment list -n psegtmfdryuatv01 -g psegtmrguatv01 --query "[].{name:name, model:properties.model.name, capacity_k_tpm:sku.capacity}" -o table
 ```
 
 ### Print this REPORT block
 
 ```
-CONTAINER: TOTAL_PDFS=<n> TOTAL_MB=<n>   (list the 12 names + sizes)
-TPM_QUOTAS: ada-002 capacity=<k TPM>   gpt-5.1 capacity=<k TPM>
-PREANALYZE per-PDF (name: DI ok?, vision total/present/errored/missing, output.json written?):
+NEW_STORAGE: account=<name> container=<name> PDFs=<n>   (list the 12 names + sizes)
+CONFIG_UPDATED: <yes/no>
+SOFT_DELETE: <already-on / enabled-now>
+RBAC: func_reader=<ok/exists>  search_reader=<ok/exists>  user_contributor=<ok/exists/skipped>
+DEPLOY_SEARCH: <ok / error>
+PREANALYZE per-PDF (name: DI ok?, vision total/present/errored/missing, output.json?):
   <one line per PDF>
-ANY_HTTP_400_OR_TEMPERATURE_ERROR: <yes/no>
-RATE_LIMIT_429_COUNT: <how many times did you see "rate limited" / 429 during preanalyze>
-OTHER_ERRORS: <paste any, or none>
-PREANALYZE_STATUS_SUMMARY: <paste the --status output>
+ANY_HTTP_400: <yes/no>   RATE_LIMIT_429_COUNT: <n>
+TPM_QUOTAS: ada-002=<k TPM>  gpt-5.1=<k TPM>
+OTHER_ERRORS: <any, or none>
 ```
 
-If fewer than 12 PDFs are in the container, tell me and upload the missing ones
-before running step 3. If preanalyze is heavily rate-limited (many 429s), report
-that — we'll bump the ada-002 TPM before continuing. Otherwise let it finish and
-give me the REPORT.
+If step 1 doesn't clearly show one container with 12 PDFs, paste me the list and
+stop — I'll tell you which to use. If preanalyze is heavily 429-throttled, report
+it and we'll bump ada-002 TPM. Otherwise let it finish and give me the REPORT.
