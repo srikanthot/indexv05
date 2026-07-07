@@ -19,3 +19,21 @@ python scripts/deploy.py --config deploy.config.json --skip-bootstrap --preanaly
 # In the morning (PowerShell):
 #   Get-Content reports\overnight_run.log -Tail 40
 #   python scripts/check_index.py --config deploy.config.json --coverage
+Hi Jason,
+
+Thank you, and hope your daughter recovers soon.
+
+We can keep the discussion to 30 minutes. I will resend the invite as well.
+
+The main HA items we wanted to confirm are:
+
+1. For production regional redundancy, which secondary region should we use along with Arizona? Should we go with Texas, or is there another recommended GCC High region?
+
+2. For Cosmos DB, do you recommend single-write multi-region with failover, or multi-write for our chatbot use case?
+
+3. For Azure AI Search, should we increase the replica count from 1 to 2 or 3 for production? Also, does increasing replicas help only retrieval/query availability, or does it help indexing as well?
+
+4. Can you also help us understand the cost impact for these recommended HA/DR changes, mainly Cosmos DB multi-region, Azure AI Search replicas, App Service scaling, and storage redundancy?
+
+Thanks,
+Srikanth
