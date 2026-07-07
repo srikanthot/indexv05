@@ -1,91 +1,67 @@
-Hi Copilot — great, the GPT-5.1 vision fix is proven (590 figures, 0 errors,
-output.json built for all 3 test PDFs). Now let's run the actual indexer on those
-same 3 PDFs and verify that diagram/table/vector records land in the index.
-
-Do NOT edit any code. Run the steps and print the REPORT block. Set your usual
-SSL cert env first. If a command errors, stop and tell me the exact error.
-
-The 3 test PDFs from the last step: `GD-GA-CTP.pdf`, `GD-AS-DWM.pdf`, `ED-EO-OPM.pdf`.
+Hi Copilot — deploy_search failed because the index's vectorizer `aoai-vectorizer`
+needs a classic Azure OpenAI endpoint (`*.openai.azure.us`), but our config points
+elsewhere. Before I fix it, I need to see the actual endpoints and how embeddings
+are wired (we added a custom `build_embedding` function, so the setup may have
+changed). This round is READ-ONLY — do NOT edit any code or deploy anything. Just
+run these and print the REPORT block. Set your usual SSL env; we're on US Gov.
 
 ---
 
-### Steps
+### Run these (read-only)
 
 ```bash
-# 0. Environment
 export SSL_CERT_FILE='C:/Users/C90255306/Downloads/combined-ca.crt'
 export REQUESTS_CA_BUNDLE='C:/Users/C90255306/Downloads/combined-ca.crt'
 az cloud set --name AzureUSGovernment
 
-# 1. Refresh the search artifacts (index / skillset / indexer / datasource) to current definitions.
-#    If this errors on an index-schema update, STOP and paste me the error.
-python scripts/deploy_search.py --config deploy.config.json
-
-# 2. Get search endpoint + indexer name
+# 1. What the config currently uses
 python - <<'PY'
 import json
 c=json.load(open("deploy.config.json"))
-ep=c["search"]["endpoint"].rstrip("/")
-prefix=c["search"].get("artifactPrefix") or "mm-manuals"
-print("SEARCH_EP=",ep)
-print("INDEXER=",f"{prefix}-indexer")
-print("INDEX=",f"{prefix}-index")
+ao=c.get("azureOpenAI",{})
+print("azureOpenAI.endpoint     =", ao.get("endpoint"))
+print("azureOpenAI.embedDeployment =", ao.get("embedDeployment"))
+print("azureOpenAI.chatDeployment  =", ao.get("chatDeployment"))
+print("azureOpenAI.visionDeployment=", ao.get("visionDeployment"))
+print("modelProvider =", c.get("modelProvider"))
+print("foundry =", c.get("foundry"))
+print("aiServices =", c.get("aiServices"))
 PY
 
-# 3. Reset + run the indexer (substitute SEARCH_EP / INDEXER from step 2)
-SV=2024-05-01-preview
-az rest --method post --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/reset?api-version=$SV" -o none
-az rest --method post --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/run?api-version=$SV" -o none
-echo "indexer reset+run issued"
+# 2. All Cognitive Services / OpenAI / Foundry accounts (name, kind, endpoint)
+az cognitiveservices account list --query "[].{name:name, kind:kind, endpoint:properties.endpoint, rg:resourceGroup}" -o table
 
-# 4. Poll status until it is no longer inProgress (check every ~30s)
-for i in $(seq 1 40); do
-  S=$(az rest --method get --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/status?api-version=$SV" --query "lastResult.status" -o tsv)
-  echo "poll $i: $S"
-  if [ "$S" != "inProgress" ]; then break; fi
-  sleep 30
-done
+# 3. Full endpoint map for the Foundry resource — look for an 'openai.azure.us' URL in here
+az cognitiveservices account show -n psegtmfdryuatv01 -g psegtmrguatv01 --query "properties.endpoints" -o json
 
-# 5. Final indexer status (status, counts, first errors/warnings)
-az rest --method get --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/status?api-version=$SV" --query "{status:lastResult.status, processed:lastResult.itemsProcessed, failed:lastResult.itemsFailed, errors:lastResult.errors[0:5].errorMessage, warnings:lastResult.warnings[0:5].message}" -o json
-```
+# 4. What models are deployed on the Foundry resource (is an embedding model / ada-002 here?)
+az cognitiveservices account deployment list -n psegtmfdryuatv01 -g psegtmrguatv01 --query "[].{name:name, model:properties.model.name, version:properties.model.version}" -o table
 
-```bash
-# 6. Per-document verification: record_type counts for each test PDF (substitute SEARCH_EP / INDEX)
-for F in "GD-GA-CTP.pdf" "GD-AS-DWM.pdf" "ED-EO-OPM.pdf"; do
-  echo "=== $F ==="
-  for RT in text diagram table table_row summary; do
-    N=$(az rest --method post --resource "https://search.azure.us" \
-        --url "<SEARCH_EP>/indexes/<INDEX>/docs/search?api-version=$SV" \
-        --headers "Content-Type=application/json" \
-        --body "{\"search\":\"*\",\"filter\":\"source_file eq '$F' and record_type eq '$RT'\",\"count\":true,\"top\":0}" \
-        --query "\"@odata.count\"" -o tsv)
-    echo "  $RT: $N"
-  done
-done
-```
+# 5. If there is a SEPARATE Azure OpenAI (kind=OpenAI) resource, list its deployments too.
+#    (Use the name from the step-2 table where kind is 'OpenAI'; skip if none.)
+# az cognitiveservices account deployment list -n <OPENAI_RESOURCE> -g <RG> --query "[].{name:name, model:properties.model.name}" -o table
 
-```bash
-# 7. Confirm vectors + new fields landed (contract + null-rate checks)
-python scripts/smoke_test.py --config deploy.config.json --skip-run
-python scripts/audit_all_retrievable_fields.py --config deploy.config.json
-python scripts/index_query_guide.py --config deploy.config.json --demo
+# 6. How does the skillset embed — built-in AzureOpenAIEmbeddingSkill, or the custom build_embedding skill?
+grep -nE "AzureOpenAIEmbedding|build-embedding|build_embedding|resourceUri|deploymentId" search/skillset.json | head -40
+
+# 7. The index vectorizer block (what resourceUri/deploymentId it expects)
+grep -nE "vectorizer|resourceUri|deploymentId|modelName|\"kind\"" search/index.json | head -20
 ```
 
 ### Print this REPORT block
 
 ```
-DEPLOY_SEARCH: <ok / error>
-INDEXER_STATUS: <success/transientFailure/failed>  processed=<n>  failed=<n>
-INDEXER_ERRORS: <paste first few, or none>
-PER_DOC COUNTS:
-  GD-GA-CTP.pdf  text/diagram/table/table_row/summary = <n/n/n/n/n>
-  GD-AS-DWM.pdf  text/diagram/table/table_row/summary = <n/n/n/n/n>
-  ED-EO-OPM.pdf  text/diagram/table/table_row/summary = <n/n/n/n/n>
-SMOKE_TEST: <pass/fail + key lines>
-AUDIT: <any critical/high findings, or clean>
-VECTOR_DEMO (index_query_guide): <did semantic+vector queries return results? yes/no>
-OTHER_ERRORS: <paste any, or none>
+CONFIG:
+  azureOpenAI.endpoint = <value>
+  embedDeployment = <value>   chatDeployment = <value>   visionDeployment = <value>
+  modelProvider = <value>
+  foundry = <value>
+ACCOUNTS (name/kind/endpoint): <paste the table>
+FOUNDRY_ENDPOINTS_MAP: <paste step 3 json — especially any *.openai.azure.us URL>
+FOUNDRY_DEPLOYMENTS: <paste step 4 table — note any embedding model like text-embedding-ada-002>
+OPENAI_RESOURCE_DEPLOYMENTS: <paste step 5 if a kind=OpenAI resource exists, else 'none'>
+SKILLSET_EMBED: <does it use AzureOpenAIEmbeddingSkill or a custom build_embedding webapi skill? paste the matching lines>
+INDEX_VECTORIZER: <paste step 7 lines>
 ```
 
-If anything errors, stop and give me the error. Otherwise run everything and give me the REPORT block.
+Run everything and give me the REPORT block. Do not deploy or edit anything.
