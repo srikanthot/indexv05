@@ -9,6 +9,7 @@ import json
 from typing import Any
  
 from .aoai import chat_deployment, get_client
+from .config import index_run_id as _index_run_id
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
@@ -88,6 +89,23 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             "document_revision": cover_meta["document_revision"],
             "effective_date": cover_meta["effective_date"],
             "document_number": cover_meta["document_number"],
+            "content_class": "summary_content",
+            "retrieval_eligible_reason": "summary_missing_content",
+            "applies_to_equipment": [],
+            "applies_to_system": [],
+            "applies_to_voltage": [],
+            "procedure_id": "",
+            "procedure_step_id": "",
+            "procedure_step_order": None,
+            "procedure_branch_label": "",
+            "figure_step_linked": False,
+            "figure_linkage_confidence": 0.0,
+            "locator_type": "none",
+            "locator_value": "",
+            "is_locator_artifact": False,
+            "artifact_reason_codes": [],
+            "retrieval_eligible": False,
+            "suggested_for_eval_question": False,
             "processing_status": "no_content",
             "skill_version": SKILL_VERSION,
         }
@@ -101,12 +119,26 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     # ran 40-90s, eating the entire 60s SDK timeout with no room for
     # the response. 20k chars ≈ 6-8k tokens; calls return in 5-15s
     # consistently. titles_block above gives the model section-level
-    # structure to anchor the summary; the first 20k chars of body
-    # text is plenty.
+    # structure to anchor the summary.
+    #
+    # Strategy: sample beginning + middle + end of the manual so later
+    # chapters are represented in the summary. Total ~20k chars.
+    text_len = len(primary_text)
+    if text_len <= 20000:
+        content_sample = primary_text
+    else:
+        head = primary_text[:8000]
+        mid_start = max(8000, text_len // 2 - 3000)
+        mid = primary_text[mid_start:mid_start + 6000]
+        tail = primary_text[-6000:]
+        content_sample = (
+            f"{head}\n\n[...middle of document...]\n\n{mid}"
+            f"\n\n[...end of document...]\n\n{tail}"
+        )
     prompt = (
         f"Source file: {source_file}\n\n"
         f"{titles_block}\n\n"
-        f"Manual content (truncated):\n{primary_text[:20000]}"
+        f"Manual content (sampled from beginning, middle, end):\n{content_sample}"
     )
  
     # Narrowed exception scope (was bare `except Exception`). The bare
@@ -120,6 +152,7 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
     # count toward maxFailedItemsPerBatch and surface in the indexer
     # dashboard.
     try:
+        from .config import model_gen_kwargs
         client = get_client()
         resp = client.chat.completions.create(
             model=chat_deployment(),
@@ -127,8 +160,8 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,
-            max_completion_tokens=900,
+            # temperature/token policy centralized -- reasoning-model safe.
+            **model_gen_kwargs(2000),
             # Explicit per-call timeout. Without this the SDK can hang for
             # its default 600s on a stuck socket, well past the 230s
             # Azure WebApi skill timeout, leaving the worker tied up.
@@ -178,7 +211,27 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "document_revision": cover_meta["document_revision"],
         "effective_date": cover_meta["effective_date"],
         "document_number": cover_meta["document_number"],
+        "content_class": "summary_content",
+        "retrieval_eligible_reason": (
+            "eligible_summary_content" if bool(status == "ok") else "summary_generation_failed"
+        ),
+        "applies_to_equipment": [],
+        "applies_to_system": [],
+        "applies_to_voltage": [],
+        "procedure_id": "",
+        "procedure_step_id": "",
+        "procedure_step_order": None,
+        "procedure_branch_label": "",
+        "figure_step_linked": False,
+        "figure_linkage_confidence": 0.0,
+        "locator_type": "none",
+        "locator_value": "",
+        "is_locator_artifact": False,
+        "artifact_reason_codes": [],
+        "retrieval_eligible": bool(status == "ok"),
+        "suggested_for_eval_question": bool(status == "ok"),
         "processing_status": status,
         "skill_version": SKILL_VERSION,
+        "index_run_id": _index_run_id(),
     }
  

@@ -374,6 +374,7 @@ def _extract_json(text: str) -> dict[str, Any]:
  
  
 def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
+    from .config import model_gen_kwargs
     client = get_client()
     user_content = [
         {"type": "text", "text": user_text},
@@ -388,9 +389,10 @@ def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        temperature=0.0,
-        max_completion_tokens=1500,
         response_format={"type": "json_object"},
+        # temperature/token policy centralized -- reasoning-model safe
+        # (GPT-5.1 rejects temperature!=1). See config.model_gen_kwargs.
+        **model_gen_kwargs(4000),
         # Explicit per-call timeout. Vision calls on stuck Gov Cloud
         # sockets can hang up to the SDK default 600s, blowing past the
         # 230s skill timeout and tying up function workers.
@@ -419,6 +421,30 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     # highlights uniformly across record types: parse JSON → iterate the
     # array → for each entry draw a rect on entry.page.
     bbox_json = json.dumps([bbox], separators=(",", ":")) if bbox else ""
+    line_bboxes_list = []
+    chunk_bboxes_list = []
+    if bbox:
+        line_bboxes_list = [{
+            "page": page_number,
+            "x_in": bbox.get("x_in"),
+            "y_in": bbox.get("y_in"),
+            "w_in": bbox.get("w_in"),
+            "h_in": bbox.get("h_in"),
+            "confidence": 0.9,
+            "reading_order": 1,
+        }]
+        chunk_bboxes_list = [{
+            "page": page_number,
+            "x_in": bbox.get("x_in"),
+            "y_in": bbox.get("y_in"),
+            "w_in": bbox.get("w_in"),
+            "h_in": bbox.get("h_in"),
+            "source": "figure_region",
+            "confidence": 0.95,
+        }]
+    line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
+    chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
+    bbox_mode_available = [m for m, ok in (("chunk", bool(chunk_bboxes_list)), ("line", bool(line_bboxes_list))) if ok]
  
     # Decode base64 ONCE and share across both hash functions. Without
     # this both functions independently decoded the same 5MB string,
@@ -453,6 +479,13 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "record_type": "diagram",
         "figure_id": figure_id,
         "figure_bbox": bbox_json,
+        "line_bboxes": line_bboxes_json,
+        "chunk_bboxes": chunk_bboxes_json,
+        "bbox_mode_available": bbox_mode_available,
+        "page_width_in": 8.5,
+        "page_height_in": 11.0,
+        "bbox_padding_hint_in": 0.05,
+        "bbox_version": "2.0.0",
         "image_hash": img_hash,
         # Perceptual hash — robust to PyMuPDF rendering non-determinism
         # across font subsetting / antialias / DPI tile cache. Used for
@@ -463,6 +496,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "physical_pdf_page": page_number,
         "physical_pdf_page_end": page_number,
         "physical_pdf_pages": physical_pdf_pages,
+        "multi_page_figure": bool(data.get("multi_page_figure")),
         "printed_page_label": printed_label,
         "printed_page_label_end": printed_label,
         "printed_page_label_is_synthetic": bool(printed_label),
@@ -490,7 +524,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "document_number": safe_str(data.get("document_number")),
     }
     import datetime as _dt
-    from .config import optional_env as _opt_env
+    from .config import index_run_id as _idx_run_id, optional_env as _opt_env
     base_record["document_revision"] = cover_meta["document_revision"]
     base_record["effective_date"] = cover_meta["effective_date"]
     base_record["document_number"] = cover_meta["document_number"]
@@ -498,6 +532,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "EMBEDDING_MODEL_VERSION", "text-embedding-ada-002"
     )
     base_record["last_indexed_at"] = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    base_record["index_run_id"] = _idx_run_id()
     base_record["language"] = "en"
  
     def _finalize(record: dict[str, Any]) -> dict[str, Any]:
@@ -515,6 +550,33 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         ref = record.get("figure_ref") or ""
         norm = normalize_figure_ref(ref)
         record["figures_referenced_normalized"] = [norm] if norm else []
+        status = safe_str(record.get("processing_status"))
+        record["retrieval_eligible"] = bool(
+            status in ("ok", "precomputed", "cache_hit", "cache_hit_phash")
+            and safe_str(record.get("header_1")).strip()
+            and isinstance(record.get("physical_pdf_page"), int)
+        )
+        record["content_class"] = "figure_content"
+        record["retrieval_eligible_reason"] = (
+            "eligible_figure_content"
+            if record["retrieval_eligible"]
+            else "ineligible_missing_header_or_page_or_status"
+        )
+        record["applies_to_equipment"] = []
+        record["applies_to_system"] = [
+            x for x in [safe_str(record.get("header_1")), safe_str(record.get("header_2"))] if x
+        ]
+        record["applies_to_voltage"] = []
+        record["figure_step_linked"] = bool(record.get("figure_ref"))
+        record["figure_linkage_confidence"] = 0.6 if record.get("figure_ref") else 0.0
+        record["locator_type"] = "none"
+        record["locator_value"] = ""
+        record["is_locator_artifact"] = False
+        record["artifact_reason_codes"] = []
+        record["suggested_for_eval_question"] = bool(
+            status == "ok"
+            and record["retrieval_eligible"]
+        )
         return record
  
     if not image_b64:
@@ -528,6 +590,28 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                     # Same list-wrapping rationale as the primary path —
                     # keeps the citation contract uniform across record types.
                     bbox_json = json.dumps([bbox], separators=(",", ":")) if bbox else ""
+                    if bbox:
+                        line_bboxes_list = [{
+                            "page": page_number,
+                            "x_in": bbox.get("x_in"),
+                            "y_in": bbox.get("y_in"),
+                            "w_in": bbox.get("w_in"),
+                            "h_in": bbox.get("h_in"),
+                            "confidence": 0.9,
+                            "reading_order": 1,
+                        }]
+                        chunk_bboxes_list = [{
+                            "page": page_number,
+                            "x_in": bbox.get("x_in"),
+                            "y_in": bbox.get("y_in"),
+                            "w_in": bbox.get("w_in"),
+                            "h_in": bbox.get("h_in"),
+                            "source": "figure_region",
+                            "confidence": 0.95,
+                        }]
+                    line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
+                    chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
+                    bbox_mode_available = [m for m, ok in (("chunk", bool(chunk_bboxes_list)), ("line", bool(line_bboxes_list))) if ok]
                 logging.info("fetched crop from cache for %s/%s", source_file, figure_id)
                 # Recompute hash + chunk_id + bbox_json because they were
                 # originally computed on empty image_b64. phash stays
@@ -539,6 +623,9 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 base_record["chunk_id"] = chunk_id
                 base_record["image_hash"] = img_hash
                 base_record["figure_bbox"] = bbox_json
+                base_record["line_bboxes"] = line_bboxes_json
+                base_record["chunk_bboxes"] = chunk_bboxes_json
+                base_record["bbox_mode_available"] = bbox_mode_available
  
     if not image_b64:
         return _finalize({
@@ -587,6 +674,10 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             p_description = safe_str(precomputed.get("description")).strip()
             p_figure_ref = safe_str(precomputed.get("figure_ref")).strip()
             p_ocr_text = safe_str(precomputed.get("ocr_text")).strip()
+            if not p_description:
+                # Keep records retrieval-safe even when precomputed cache has
+                # an empty description payload for a figure.
+                p_description = safe_str(caption) or safe_str(surrounding) or "diagram content"
             p_has_diagram = (
                 bool(precomputed.get("is_useful"))
                 and p_category in USEFUL_CATEGORIES
@@ -611,6 +702,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
                 **base_record,
                 "has_diagram": p_has_diagram,
                 "diagram_description": full_desc,
+                "diagram_ocr_text": p_ocr_text,
                 "diagram_category": p_category,
                 "figure_ref": p_figure_ref,
                 "processing_status": "precomputed",
@@ -745,8 +837,10 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         **base_record,
         "has_diagram": has_diagram,
         "diagram_description": full_description,
+        "diagram_ocr_text": ocr_text,
         "diagram_category": category,
         "figure_ref": figure_ref,
         "processing_status": status,
     })
+ 
  

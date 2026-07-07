@@ -167,12 +167,45 @@ def _get_aoai_key(cfg: dict) -> str:
         return _aoai_key_cache
  
  
+def _model_provider(cfg: dict) -> str:
+    return str((cfg.get("modelProvider") or "aoai")).strip().lower()
+ 
+ 
+def _get_foundry_key(cfg: dict) -> str:
+    global _aoai_key_cache
+    if _aoai_key_cache is not None:
+        return _aoai_key_cache
+    with _aoai_key_lock:
+        if _aoai_key_cache is not None:
+            return _aoai_key_cache
+        ep = (cfg.get("foundry") or {}).get("projectEndpoint", "").rstrip("/")
+        if not ep:
+            raise RuntimeError("foundry.projectEndpoint missing in deploy config")
+        resource_name = ep.split("//")[1].split(".")[0]
+        rg = (cfg.get("foundry") or {}).get("resourceGroup") or cfg["functionApp"]["resourceGroup"]
+        raw = _run_az([
+            "az", "cognitiveservices", "account", "keys", "list",
+            "--name", resource_name, "--resource-group", rg, "-o", "json",
+        ])
+        _aoai_key_cache = json.loads(raw)["key1"]
+        return _aoai_key_cache
+ 
+ 
 def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int = 3) -> dict:
-    ep = cfg["azureOpenAI"]["endpoint"].rstrip("/")
-    deployment = cfg["azureOpenAI"]["visionDeployment"]
-    api_ver = cfg["azureOpenAI"].get("apiVersion", "2024-12-01-preview")
-    api_key = _get_aoai_key(cfg)
-    url = f"{ep}/openai/deployments/{deployment}/chat/completions?api-version={api_ver}"
+    provider = _model_provider(cfg)
+    if provider == "foundry":
+        fcfg = cfg.get("foundry") or {}
+        ep = (fcfg.get("projectEndpoint") or "").rstrip("/")
+        deployment = fcfg.get("chatModel") or fcfg.get("visionModel") or ""
+        api_ver = fcfg.get("apiVersion", "2024-05-01-preview")
+        api_key = _get_foundry_key(cfg)
+        url = f"{ep}/models/chat/completions?api-version={api_ver}"
+    else:
+        ep = cfg["azureOpenAI"]["endpoint"].rstrip("/")
+        deployment = cfg["azureOpenAI"]["visionDeployment"]
+        api_ver = cfg["azureOpenAI"].get("apiVersion", "2024-12-01-preview")
+        api_key = _get_aoai_key(cfg)
+        url = f"{ep}/openai/deployments/{deployment}/chat/completions?api-version={api_ver}"
  
     body = {
         "messages": [
@@ -182,10 +215,24 @@ def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
             ]},
         ],
-        "temperature": 0.0,
-        "max_completion_tokens": 1500,
         "response_format": {"type": "json_object"},
     }
+    # Reasoning-model-safe generation params (GPT-5.1 rejects temperature!=1).
+    # Omit temperature by default; set AOAI_TEMPERATURE for a classic model.
+    # Give max_completion_tokens headroom -- reasoning tokens draw from it.
+    _raw_max = os.environ.get("AOAI_MAX_COMPLETION_TOKENS", "").strip()
+    body["max_completion_tokens"] = int(_raw_max) if _raw_max.isdigit() else 4000
+    _temp = os.environ.get("AOAI_TEMPERATURE", "").strip()
+    if _temp:
+        try:
+            body["temperature"] = float(_temp)
+        except ValueError:
+            pass
+    _effort = os.environ.get("AOAI_REASONING_EFFORT", "").strip()
+    if _effort:
+        body["reasoning_effort"] = _effort
+    if provider == "foundry":
+        body["model"] = deployment
     headers = {"api-key": api_key, "Content-Type": "application/json"}
  
     ssl_verify: str | bool = os.environ.get("SSL_CERT_FILE") or True
@@ -866,6 +913,14 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
         original_bytes = fetch_blob(cfg, pdf_name)
         size_mb = len(original_bytes) / (1024 * 1024)
  
+        # Compute and persist source hash for lifecycle tracking.
+        # This hash enables change detection: if a PDF is re-uploaded
+        # with the same name but different content, the hash changes
+        # and reconcile knows to invalidate cache + index records.
+        source_hash = hashlib.sha256(original_bytes).hexdigest()
+        hash_blob_name = f"_dicache/{pdf_name}.source_hash"
+        upload_blob(cfg, hash_blob_name, source_hash.encode("utf-8"))
+ 
         # If the file isn't a PDF, try to convert it via LibreOffice so
         # the rest of the pipeline (DI submission, PyMuPDF cropping,
         # vision) works uniformly. If LibreOffice isn't available, fall
@@ -1242,7 +1297,7 @@ def _load_figures_supplement(cfg: dict, pdf_name: str) -> list[dict]:
         print(f"    supplement load failed for {pdf_name}: {exc}", flush=True)
         return []
  
-  
+ 
 # -- Phase B: Vision analysis (parallel within each PDF) --
  
 _VISION_MAX_ATTEMPTS = 3
@@ -1413,9 +1468,12 @@ def phase_vision(cfg: dict, pdf_name: str, force: bool, vision_parallel: int = 2
         # Pre-cache the AOAI key before spawning threads so 20 threads
         # don't race to call az CLI simultaneously.
         try:
-            _get_aoai_key(cfg)
+            if _model_provider(cfg) == "foundry":
+                _get_foundry_key(cfg)
+            else:
+                _get_aoai_key(cfg)
         except Exception as exc:
-            return f"  FAIL-vision  {pdf_name}: could not fetch AOAI key: {exc}"
+            return f"  FAIL-vision  {pdf_name}: could not fetch model key: {exc}"
  
         print(f"  vision {pdf_name}: {len(fig_tasks)} figures, {vision_parallel} parallel...", flush=True)
         t0 = time.time()
@@ -1541,15 +1599,18 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             fig_id = figure.get("id") or f"fig_{fig_idx}"
             page = None
             polygon = None
+            all_figure_pages = set()
             for br in figure.get("boundingRegions", []) or []:
                 p = br.get("pageNumber")
                 poly = br.get("polygon")
-                if isinstance(p, int) and poly:
-                    page = p
-                    polygon = poly
-                    break
+                if isinstance(p, int):
+                    all_figure_pages.add(p)
+                    if poly and page is None:
+                        page = p
+                        polygon = poly
             if not page or not polygon or len(polygon) < 4:
                 continue
+            is_multi_page_figure = len(all_figure_pages) > 1
  
             passes, _ = _passes_triage(polygon)
             if not passes:
@@ -1599,6 +1660,8 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             fig_data = {
                 "figure_id": fig_id,
                 "page_number": page,
+                "diagram_pages": sorted(all_figure_pages),
+                "multi_page_figure": is_multi_page_figure,
                 "caption": caption,
                 "image_b64": "",
                 "bbox": bbox,
@@ -1698,6 +1761,9 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                     row["pdf_total_pages"] = pdf_total_pages
             enriched_tables.append({
                 "table_index": tbl["index"],
+                "cluster_id": tbl.get("cluster_id", ""),
+                "split_index": tbl.get("split_index", 0),
+                "split_count": tbl.get("split_count", 1),
                 "table_rows": row_records,
                 "page_start": tbl["page_start"],
                 "page_end": tbl["page_end"],
@@ -1760,10 +1826,20 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                       flush=True)
                 output_status = "partial_vision"
  
+        # Read source_hash if previously computed in phase_di.
+        source_hash = ""
+        hash_blob = f"_dicache/{pdf_name}.source_hash"
+        if blob_exists(cfg, hash_blob):
+            try:
+                source_hash = fetch_blob(cfg, hash_blob).decode("utf-8").strip()
+            except Exception:
+                pass
+ 
         output = {
             "enriched_figures": enriched_figures,
             "enriched_tables": enriched_tables,
             "pdf_total_pages": pdf_total_pages,
+            "source_hash": source_hash,
             # Top-level cover_meta so build-doc-summary can read it from
             # /document/document_revision (no per-item enriched_* path).
             "document_revision": document_revision,
@@ -1780,6 +1856,30 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         }
         output_bytes = json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         upload_blob(cfg, output_name, output_bytes)
+ 
+        # Write page-level manifest for coverage/quality validation.
+        manifest = {
+            "source_file": pdf_name,
+            "source_hash": source_hash,
+            "pdf_total_pages": pdf_total_pages,
+            "skill_version": SKILL_VERSION,
+            "processing_status": output_status,
+            "figures_total": len(enriched_figures),
+            "figures_useful": sum(1 for f in enriched_figures if f.get("vision_has_diagram")),
+            "figures_multi_page": sum(1 for f in enriched_figures if f.get("multi_page_figure")),
+            "tables_total": len(enriched_tables),
+            "table_rows_total": sum(len(t.get("table_rows", [])) for t in enriched_tables),
+            "vision_coverage": {
+                "total": vision_total,
+                "present": vision_present,
+                "missing": vision_missing,
+                "errored": vision_errored,
+            },
+            "di_warnings": di_warnings,
+        }
+        manifest_blob = f"_dicache/{pdf_name}.manifest.json"
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+        upload_blob(cfg, manifest_blob, manifest_bytes)
  
         vision_ok = sum(1 for f in enriched_figures if f.get("vision_has_diagram"))
         return f"  ok-output  {pdf_name} ({len(enriched_figures)} figs, {vision_ok} useful, {len(enriched_tables)} tables)"
@@ -1966,7 +2066,7 @@ def status_report(cfg: dict) -> None:
                 "-- re-run `preanalyze --incremental` to heal.")
     print(msg)
  
- 
+  
 # -- Cleanup: remove orphaned cache --
  
 def cleanup_orphans(cfg: dict) -> None:
