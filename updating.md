@@ -24,7 +24,7 @@ PY
 
 # THE FULL RUN (preanalyze -> deploy_search -> reset+run -> heal loop x8 -> coverage). Long; let it finish.
 mkdir -p reports
-python scripts/deploy.py --config deploy.config.json --skip-bootstrap --preanalyze-vision-parallel 20 --heal-max-iterations 8 --heal-wait-minutes 60 2>&1 | tee reports/overnight_run.log
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap --preanalyze-vision-parallel 40 --heal-max-iterations 8 --heal-wait-minutes 60 2>&1 | tee reports/overnight_run.log
 ```
 
 # In the morning:
