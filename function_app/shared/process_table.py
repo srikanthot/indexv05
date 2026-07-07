@@ -15,7 +15,7 @@ import datetime
 import json
 from typing import Any
  
-from .config import optional_env
+from .config import index_run_id as _index_run_id, optional_env
 from .ids import (
     SKILL_VERSION,
     chunk_content_hash,
@@ -25,6 +25,7 @@ from .ids import (
     table_chunk_id,
     table_row_chunk_id,
 )
+from .table_row_quality import classify_table_row
 from .text_utils import build_highlight_text
  
  
@@ -72,6 +73,16 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     parent_id = safe_str(data.get("parent_id")) or parent_id_for(source_path, source_file)
  
     table_index = safe_str(data.get("table_index"), "0")
+    # Table coherence: cluster_id groups all splits of one logical table;
+    # split_index and split_count locate this record within that group.
+    table_cluster_id_raw = safe_str(data.get("cluster_id"), "")
+    table_split_index = safe_int(data.get("split_index"), default=0)
+    table_split_count = safe_int(data.get("split_count"), default=1)
+    # Derive cluster_id as parent_id + cluster_idx for global uniqueness.
+    # Falls back to parsing table_index ("0_1" -> cluster "0") for compat.
+    if not table_cluster_id_raw:
+        parts = table_index.split("_", 1)
+        table_cluster_id_raw = parts[0] if parts else "0"
     page_start = safe_int(data.get("page_start"), default=None)
     page_end = safe_int(data.get("page_end"), default=page_start)
     markdown = safe_str(data.get("markdown"))
@@ -91,6 +102,37 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(bboxes_in, list):
         bboxes_list = [b for b in bboxes_in if isinstance(b, dict)]
     table_bbox_json = json.dumps(bboxes_list, separators=(",", ":")) if bboxes_list else ""
+    chunk_bboxes_list = [
+        {
+            "page": b.get("page"),
+            "x_in": b.get("x_in"),
+            "y_in": b.get("y_in"),
+            "w_in": b.get("w_in"),
+            "h_in": b.get("h_in"),
+            "source": "table_region",
+            "confidence": 0.95,
+        }
+        for b in bboxes_list
+        if isinstance(b, dict)
+    ]
+    line_bboxes_list = [
+        {
+            "page": b.get("page"),
+            "x_in": b.get("x_in"),
+            "y_in": b.get("y_in"),
+            "w_in": b.get("w_in"),
+            "h_in": b.get("h_in"),
+            "confidence": 0.9,
+            "reading_order": i + 1,
+        }
+        for i, b in enumerate(bboxes_list)
+        if isinstance(b, dict)
+    ]
+    chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
+    line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
+    bbox_mode_available = [m for m, ok in (("chunk", bool(chunk_bboxes_list)), ("line", bool(line_bboxes_list))) if ok]
+    page_width_in = 8.5
+    page_height_in = 11.0
  
     chunk_id = table_chunk_id(source_path, source_file, table_index)
     chunk_for_semantic = _build_semantic({
@@ -148,6 +190,9 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
  
     raw_rows = data.get("table_rows") or []
     row_records: list[dict[str, Any]] = []
+    table_scope_tags = [x for x in [h1.strip(), h2.strip(), caption.strip()] if x]
+    table_columns = [f"column_{i + 1}" for i in range(col_count)] if col_count > 0 else []
+    table_integrity_score = 0.95 if markdown and row_count > 0 and col_count > 0 else 0.0
     for raw_row in raw_rows:
         if not isinstance(raw_row, dict):
             continue
@@ -175,6 +220,27 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         row_semantic = "\n".join(row_semantic_parts)
  
         row_printed = str(row_page) if row_page is not None else ""
+        row_quality = classify_table_row(
+            source_file=source_file,
+            header_1=h1,
+            header_2=h2,
+            header_3=h3,
+            table_caption=caption,
+            row_text=row_text,
+        )
+        row_retrieval = bool(
+            row_quality.get("retrieval_eligible")
+            and h1.strip()
+            and isinstance(row_page, int)
+            and bool(f"{parent_id}_{table_cluster_id_raw}".strip())
+        )
+        row_quality["retrieval_eligible"] = row_retrieval
+        row_quality["suggested_for_eval_question"] = bool(
+            row_retrieval and row_quality.get("suggested_for_eval_question")
+        )
+        row_cells = [p.strip() for p in row_text.split(";") if p.strip()]
+        if row_cells and not table_columns:
+            table_columns = [p.split(":", 1)[0].strip() for p in row_cells if ":" in p]
         row_records.append({
             "chunk_id": row_chunk_id,
             "parent_id": parent_id,
@@ -186,6 +252,13 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             # bboxes — frontend can dim the parent table and accent the
             # row by index if it wants). Same JSON shape as the parent.
             "table_bbox": table_bbox_json,
+            "line_bboxes": line_bboxes_json,
+            "chunk_bboxes": chunk_bboxes_json,
+            "bbox_mode_available": bbox_mode_available,
+            "page_width_in": page_width_in,
+            "page_height_in": page_height_in,
+            "bbox_padding_hint_in": 0.05,
+            "bbox_version": "2.0.0",
             "header_1": h1,
             "header_2": h2,
             "header_3": h3,
@@ -202,6 +275,33 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             # the surrounding context.
             "table_caption": caption,
             "table_parent_chunk_id": chunk_id,
+            "table_cluster_id": f"{parent_id}_{table_cluster_id_raw}",
+            "table_variant_id": f"{parent_id}_{table_cluster_id_raw}",
+            "table_scope_tags": table_scope_tags,
+            "table_columns": table_columns,
+            "table_row_cells": row_cells,
+            "table_header_rows_count": 1,
+            "table_integrity_score": table_integrity_score,
+            "content_role": "actual_content",
+            "content_class": "table_content",
+            "retrieval_eligible_reason": (
+                "eligible_table_row_content"
+                if row_retrieval
+                else "ineligible_row_quality_or_missing_header_or_page"
+            ),
+            "applies_to_equipment": [],
+            "applies_to_system": [x for x in [h1.strip(), h2.strip()] if x],
+            "applies_to_voltage": [],
+            "procedure_id": "",
+            "procedure_step_id": "",
+            "procedure_step_order": None,
+            "procedure_branch_label": "",
+            "figure_step_linked": False,
+            "figure_linkage_confidence": 0.0,
+            "locator_type": "none",
+            "locator_value": "",
+            "is_locator_artifact": False,
+            "artifact_reason_codes": [],
             "table_row_index": row_index,
             "source_file": source_file,
             "source_path": source_path,
@@ -215,6 +315,8 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             "language": "en",
             "processing_status": "ok",
             "skill_version": SKILL_VERSION,
+            "index_run_id": _index_run_id(),
+            **row_quality,
         })
  
     # Content hash for re-embedding gate. When the markdown content of
@@ -235,6 +337,13 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "chunk_content_hash": content_hash,
         "highlight_text": highlight,
         "table_bbox": table_bbox_json,
+        "line_bboxes": line_bboxes_json,
+        "chunk_bboxes": chunk_bboxes_json,
+        "bbox_mode_available": bbox_mode_available,
+        "page_width_in": page_width_in,
+        "page_height_in": page_height_in,
+        "bbox_padding_hint_in": 0.05,
+        "bbox_version": "2.0.0",
         "header_1": h1,
         "header_2": h2,
         "header_3": h3,
@@ -252,6 +361,56 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "table_row_count": row_count,
         "table_col_count": col_count,
         "table_caption": caption,
+        "table_cluster_id": f"{parent_id}_{table_cluster_id_raw}",
+        "table_variant_id": f"{parent_id}_{table_cluster_id_raw}",
+        "table_scope_tags": table_scope_tags,
+        "table_columns": table_columns,
+        "table_row_cells": [],
+        "table_header_rows_count": 1,
+        "table_integrity_score": table_integrity_score,
+        "content_role": "actual_content",
+        "content_class": "table_content",
+        "retrieval_eligible_reason": (
+            "eligible_table_content"
+            if bool(
+                h1.strip()
+                and isinstance(page_start, int)
+                and bool(f"{parent_id}_{table_cluster_id_raw}".strip())
+            )
+            else "ineligible_missing_header_or_page_or_cluster"
+        ),
+        "applies_to_equipment": [],
+        "applies_to_system": [x for x in [h1.strip(), h2.strip()] if x],
+        "applies_to_voltage": [],
+        "procedure_id": "",
+        "procedure_step_id": "",
+        "procedure_step_order": None,
+        "procedure_branch_label": "",
+        "figure_step_linked": False,
+        "figure_linkage_confidence": 0.0,
+        "locator_type": "none",
+        "locator_value": "",
+        "is_locator_artifact": False,
+        "artifact_reason_codes": [],
+        "table_split_index": table_split_index,
+        "table_split_count": table_split_count,
+        "table_row_quality": "",
+        "table_row_quality_reason_codes": [],
+        "table_row_is_header_like": False,
+        "table_row_is_index_like": False,
+        "table_row_is_placeholder_like": False,
+        "table_row_token_count": 0,
+        "table_row_char_count": 0,
+        "table_row_semantic_key": "",
+        "table_row_semantic_value": "",
+        "table_context_path": " > ".join([x for x in [h1, h2, h3, caption] if x]),
+        "table_row_search_text": "",
+        "retrieval_eligible": bool(
+            h1.strip()
+            and isinstance(page_start, int)
+            and bool(f"{parent_id}_{table_cluster_id_raw}".strip())
+        ),
+        "suggested_for_eval_question": False,
         "source_file": source_file,
         "source_path": source_path,
         # Cover metadata + ops fields -- parity with text records.
@@ -264,6 +423,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "language": "en",
         "processing_status": "ok",
         "skill_version": SKILL_VERSION,
+        "index_run_id": _index_run_id(),
         # List of pre-built per-row records ready for indexProjection.
         # Empty list when the table has fewer than 5 or more than 80 body
         # rows (cf. ROW_RECORD_MIN/MAX_ROWS in tables.py).

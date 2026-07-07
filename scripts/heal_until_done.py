@@ -194,14 +194,31 @@ def _trigger_indexer_run(client: httpx.Client, endpoint: str, indexer_name: str,
     print("  run: triggered", flush=True)
  
  
+def _reset_indexer(client: httpx.Client, endpoint: str, indexer_name: str,
+                   token: str) -> None:
+    """POST /indexers/<name>/reset to clear a stuck run's change-tracking state."""
+    url = f"{endpoint}/indexers/{indexer_name}/reset?api-version={API_VERSION}"
+    r = client.post(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Length": "0",
+    })
+    if r.status_code not in (200, 202, 204):
+        raise RuntimeError(f"indexer reset failed: {r.status_code} {r.text[:300]}")
+    print("  reset: accepted", flush=True)
+ 
+ 
 def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
-                    token: str, *, max_minutes: int) -> None:
+                    cred: DefaultAzureCredential, *, max_minutes: int,
+                    reset_after_zero_minutes: int) -> dict[str, bool]:
     """Block until the indexer is no longer reporting inProgress, or the
     deadline elapses. Mirrors run_pipeline.wait_for_indexer_idle."""
     url = f"{endpoint}/indexers/{indexer_name}/status?api-version={API_VERSION}"
     deadline = time.time() + max_minutes * 60
     backoff = 30
+    zero_started_at: float | None = None
     while time.time() < deadline:
+        # Re-acquire token every poll so long waits don't hit 401 expiry loops.
+        token = cred.get_token(SEARCH_SCOPE).token
         r = client.get(url, headers={"Authorization": f"Bearer {token}"})
         if r.status_code != 200:
             print(f"  status fetch returned {r.status_code}; retrying", flush=True)
@@ -211,14 +228,30 @@ def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
         top_status = (body.get("status") or "unknown").lower()
         last = body.get("lastResult") or {}
         last_status = (last.get("status") or "unknown").lower()
-        items = last.get("itemsProcessed", "?")
+        items = int(last.get("itemsProcessed") or 0)
         print(f"  indexer={top_status}  lastResult={last_status}  items={items}",
               flush=True)
+ 
+        if top_status == "running" and last_status == "inprogress" and items == 0:
+            if zero_started_at is None:
+                zero_started_at = time.time()
+            stagnant_secs = time.time() - zero_started_at
+            if reset_after_zero_minutes > 0 and stagnant_secs >= reset_after_zero_minutes * 60:
+                print("  detected stagnant in-progress run with 0 items; "
+                      "requesting indexer reset/restart", flush=True)
+                return {"idle": False, "stagnant": True}
+        else:
+            zero_started_at = None
+ 
         if top_status != "inprogress" and last_status != "inprogress":
-            return
+            return {"idle": True, "stagnant": False}
         time.sleep(backoff)
-    print(f"  timeout: indexer still in-progress after {max_minutes} min "
-          "(continuing to next iteration)", flush=True)
+    print(
+        f"  timeout: indexer still in-progress after {max_minutes} min "
+        "(continuing to next iteration)",
+        flush=True,
+    )
+    return {"idle": False, "stagnant": False, "timed_out_running": True}
  
  
 def _now_stamp() -> str:
@@ -233,9 +266,9 @@ def main() -> int:
     ap.add_argument("--max-iterations", type=int, default=8,
                     help="Hard cap on iterations (default 8). Worst-case wall "
                          "time = max-iterations * (wait-minutes + grace-minutes).")
-    ap.add_argument("--wait-minutes", type=int, default=30,
+    ap.add_argument("--wait-minutes", type=int, default=90,
                     help="Max minutes to wait for the indexer to go idle each "
-                         "iteration (default 30). Big PDFs need 5-15 min each "
+                         "iteration (default 90). Big PDFs need 5-15 min each "
                          "through the full skill pipeline.")
     ap.add_argument("--grace-minutes", type=int, default=5,
                     help="Extra sleep after the indexer goes idle, so downstream "
@@ -244,6 +277,17 @@ def main() -> int:
     ap.add_argument("--max-per-iteration", type=int, default=20,
                     help="Cap the number of stuck blobs bumped per iteration "
                          "(default 20). Mirrors force_reindex_blobs.ps1.")
+    ap.add_argument("--reset-after-zero-minutes", type=int, default=0,
+                    help="If indexer stays running/inProgress with 0 items "
+                         "for this many minutes, force indexer reset + rerun "
+                         "(default 0 = disabled).")
+    ap.add_argument("--wait-only-sleep-seconds", type=int, default=180,
+                    help="When indexer is still running after wait timeout, "
+                         "sleep this long and continue waiting WITHOUT rebumping "
+                         "metadata (default 180).")
+    ap.add_argument("--repeat-stuck-fail-streak", type=int, default=4,
+                    help="Fail only after this many unchanged stuck-set "
+                         "iterations (default 4).")
     args = ap.parse_args()
  
     cfg_path = Path(args.config)
@@ -271,6 +315,7 @@ def main() -> int:
     cred = DefaultAzureCredential()
     previous_stuck: set[str] | None = None
     repeat_streak = 0
+    wait_only_mode = False
  
     with httpx.Client(timeout=60.0) as client:
         for it in range(1, args.max_iterations + 1):
@@ -297,10 +342,10 @@ def main() -> int:
                 repeat_streak += 1
                 print(f"  Stuck set unchanged from previous iteration "
                       f"(streak={repeat_streak}).")
-                if repeat_streak >= 2:
+                if repeat_streak >= args.repeat_stuck_fail_streak:
                     print()
-                    print(f"FAIL: same {len(stuck)} PDF(s) stuck across 2 "
-                          "consecutive iterations.")
+                    print(f"FAIL: same {len(stuck)} PDF(s) stuck across "
+                          f"{args.repeat_stuck_fail_streak} consecutive iterations.")
                     print("These PDFs are failing deterministically. Investigate with:")
                     print(f"  python scripts/check_index.py --config "
                           f"{args.config} --bad")
@@ -312,30 +357,65 @@ def main() -> int:
                 repeat_streak = 0
             previous_stuck = set(stuck)
  
-            to_bump = sorted(stuck)[: args.max_per_iteration]
-            print(f"  Bumping metadata on {len(to_bump)} blob(s):")
-            stamp = _now_stamp()
-            bumped: list[str] = []
-            for name in to_bump:
-                ok = _bump_blob_metadata(storage_acct, container, name, stamp)
-                print(f"    {'ok ' if ok else 'FAIL'}  {name}")
-                if ok:
-                    bumped.append(name)
+            if wait_only_mode:
+                print("  Wait-only mode: indexer is still running; skipping metadata bump/resetdocs.")
+            else:
+                to_bump = sorted(stuck)[: args.max_per_iteration]
+                print(f"  Bumping metadata on {len(to_bump)} blob(s):")
+                stamp = _now_stamp()
+                bumped: list[str] = []
+                for name in to_bump:
+                    ok = _bump_blob_metadata(storage_acct, container, name, stamp)
+                    print(f"    {'ok ' if ok else 'FAIL'}  {name}")
+                    if ok:
+                        bumped.append(name)
  
-            if not bumped:
-                print("  no blobs could be updated (storage failures); aborting")
-                return 1
+                if not bumped:
+                    print("  no blobs could be updated (storage failures); aborting")
+                    return 1
  
-            blob_urls = [
-                f"https://{storage_acct}.{storage_suffix}/{container}/{n}"
-                for n in bumped
-            ]
-            _reset_failed_items(client, search_ep, indexer_name, blob_urls, token)
-            _trigger_indexer_run(client, search_ep, indexer_name, token)
+                blob_urls = [
+                    f"https://{storage_acct}.{storage_suffix}/{container}/{n}"
+                    for n in bumped
+                ]
+                _reset_failed_items(client, search_ep, indexer_name, blob_urls, token)
+                _trigger_indexer_run(client, search_ep, indexer_name, token)
  
             print(f"  Waiting up to {args.wait_minutes} min for indexer to drain...")
-            _wait_for_idle(client, search_ep, indexer_name, token,
-                          max_minutes=args.wait_minutes)
+            wait_result = _wait_for_idle(
+                client,
+                search_ep,
+                indexer_name,
+                cred,
+                max_minutes=args.wait_minutes,
+                reset_after_zero_minutes=args.reset_after_zero_minutes,
+            )
+ 
+            if wait_result.get("stagnant"):
+                wait_only_mode = False
+                token = cred.get_token(SEARCH_SCOPE).token
+                try:
+                    _reset_indexer(client, search_ep, indexer_name, token)
+                    _trigger_indexer_run(client, search_ep, indexer_name, token)
+                except Exception as exc:
+                    print(f"  reset/rerun failed: {exc}", flush=True)
+                # Let the next iteration perform a full recheck and retry cycle.
+                print()
+                continue
+ 
+            if wait_result.get("timed_out_running"):
+                wait_only_mode = True
+                # Don't treat unchanged stuck-set as deterministic failure while
+                # a long-running run is still active.
+                previous_stuck = None
+                repeat_streak = 0
+                print(f"  Indexer still running. Sleeping {args.wait_only_sleep_seconds}s "
+                      "and continuing wait-only mode.")
+                time.sleep(max(0, args.wait_only_sleep_seconds))
+                print()
+                continue
+ 
+            wait_only_mode = False
  
             if args.grace_minutes > 0:
                 print(f"  Grace sleep {args.grace_minutes} min for skill "

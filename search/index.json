@@ -13,11 +13,20 @@
     { "name": "sum_parent_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "record_type", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "record_subtype", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "content_class", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "retrieval_eligible_reason", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
  
     { "name": "chunk", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "chunk_for_semantic", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": false, "sortable": false, "facetable": false },
     { "name": "highlight_text", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "text_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "line_bboxes", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "chunk_bboxes", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "bbox_mode_available", "type": "Collection(Edm.String)", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "page_width_in", "type": "Edm.Double", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "page_height_in", "type": "Edm.Double", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "bbox_padding_hint_in", "type": "Edm.Double", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "bbox_version", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "pdf_total_pages", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "page_resolution_method", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "safety_callout", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
@@ -52,8 +61,10 @@
     { "name": "pages_referenced", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "figure_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "diagram_description", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "diagram_ocr_text", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "diagram_category", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true, "analyzer": "keyword" },
     { "name": "has_diagram", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "multi_page_figure", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
  
     { "name": "table_row_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_col_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
@@ -61,10 +72,50 @@
     { "name": "table_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_row_index", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
     { "name": "table_parent_chunk_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_cluster_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_split_index", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "table_split_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_row_quality", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": true },
+    { "name": "table_row_quality_reason_codes", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_row_is_header_like", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_row_is_index_like", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_row_is_placeholder_like", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_row_token_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "table_row_char_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "table_row_semantic_key", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_row_semantic_value", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_context_path", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_row_search_text", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_variant_id", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_scope_tags", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_columns", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_row_cells", "type": "Collection(Edm.String)", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_header_rows_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "table_integrity_score", "type": "Edm.Double", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+ 
+    { "name": "applies_to_equipment", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "applies_to_system", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "applies_to_voltage", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+ 
+    { "name": "procedure_id", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "procedure_step_id", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "procedure_step_order", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "procedure_branch_label", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "figure_step_linked", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "figure_linkage_confidence", "type": "Edm.Double", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+ 
+    { "name": "locator_type", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "locator_value", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "is_locator_artifact", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "artifact_reason_codes", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+ 
+    { "name": "retrieval_eligible", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "suggested_for_eval_question", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
  
     { "name": "source_file", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": true, "facetable": true },
     { "name": "source_url", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "source_path", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "source_hash", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
  
     { "name": "surrounding_context", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": false, "sortable": false, "facetable": false },
  
@@ -73,6 +124,7 @@
     { "name": "chunk_token_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
     { "name": "embedding_version", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "last_indexed_at", "type": "Edm.DateTimeOffset", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
+    { "name": "index_run_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "equipment_ids", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "language", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "chunk_quality_score", "type": "Edm.Double", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
@@ -87,6 +139,35 @@
   ],
  
   "similarity": { "@odata.type": "#Microsoft.Azure.Search.BM25Similarity" },
+ 
+  "scoringProfiles": [
+    {
+      "name": "safety-boost",
+      "text": { "weights": { "callouts": 2.0, "chunk": 1.0 } },
+      "functions": [
+        {
+          "type": "tag",
+          "fieldName": "callouts",
+          "boost": 3.0,
+          "tag": { "tagsParameter": "safetytags" }
+        }
+      ],
+      "functionAggregation": "sum"
+    },
+    {
+      "name": "freshness-boost",
+      "functions": [
+        {
+          "type": "freshness",
+          "fieldName": "last_indexed_at",
+          "boost": 1.5,
+          "freshness": { "boostingDuration": "P30D" },
+          "interpolation": "linear"
+        }
+      ],
+      "functionAggregation": "sum"
+    }
+  ],
  
   "semantic": {
     "defaultConfiguration": "mm-semantic-config",
@@ -140,3 +221,4 @@
     "compressions": []
   }
 }
+ 

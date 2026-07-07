@@ -139,14 +139,24 @@ def check_config(config_path: Path) -> tuple[Check, dict | None]:
         ("storage", "accountResourceId"),
         ("storage", "pdfContainerName"),
         ("documentIntelligence", "endpoint"),
-        ("azureOpenAI", "endpoint"),
-        ("azureOpenAI", "chatDeployment"),
-        ("azureOpenAI", "visionDeployment"),
-        ("azureOpenAI", "embedDeployment"),
         ("functionApp", "name"),
         ("functionApp", "resourceGroup"),
         ("search", "endpoint"),
     ]
+    provider = str((cfg.get("modelProvider") or "aoai")).strip().lower()
+    if provider == "foundry":
+        required_paths.extend([
+            ("foundry", "projectEndpoint"),
+            ("foundry", "chatModel"),
+            ("foundry", "embedModel"),
+        ])
+    else:
+        required_paths.extend([
+            ("azureOpenAI", "endpoint"),
+            ("azureOpenAI", "chatDeployment"),
+            ("azureOpenAI", "visionDeployment"),
+            ("azureOpenAI", "embedDeployment"),
+        ])
     missing = []
     for path in required_paths:
         node: object = cfg

@@ -1,9 +1,11 @@
 """
-Azure OpenAI client wrapper.
+Model client wrapper.
  
-Prefers managed-identity auth (AUTH_MODE=mi, the default). Falls back to
-API key auth when AUTH_MODE=key is set or AOAI_API_KEY is provided and
-MI is disabled.
+Supports:
+    - AOAI mode (default): Azure OpenAI endpoint + deployment names
+    - Foundry mode: Foundry project endpoint + model names
+ 
+Set MODEL_PROVIDER to `aoai` or `foundry`.
  
 The `openai` package is imported lazily inside get_client() rather than
 at module top-level so that:
@@ -19,6 +21,9 @@ defensive dev-time UX, not a license to skip the dependency.
 """
  
 from functools import lru_cache
+from types import SimpleNamespace
+ 
+import httpx
  
 from .config import optional_env, required_env
 from .credentials import (
@@ -30,12 +35,16 @@ from .credentials import (
  
 @lru_cache(maxsize=1)
 def get_client():
-    """Returns an AzureOpenAI client. Imported lazily so that loading
-    this module does not require the `openai` package — only calling
-    this function does."""
+    """Return a provider-aware chat client.
+ 
+    Imported lazily so loading this module does not require `openai`
+    unless AOAI mode is used.
+    """
+    provider = optional_env("MODEL_PROVIDER", "aoai").lower()
+    if provider == "foundry":
+        return _FoundryClient()
+ 
     from openai import AzureOpenAI
-    # 2024-12-01-preview is the minimum API version that supports gpt-5.1
-    # chat + vision deployments. Override via AOAI_API_VERSION app setting.
     api_version = optional_env("AOAI_API_VERSION", "2024-12-01-preview")
     endpoint = required_env("AOAI_ENDPOINT")
  
@@ -76,9 +85,58 @@ def get_client():
  
  
 def vision_deployment() -> str:
+    if optional_env("MODEL_PROVIDER", "aoai").lower() == "foundry":
+        return required_env("FOUNDRY_CHAT_MODEL")
     return required_env("AOAI_VISION_DEPLOYMENT")
  
  
 def chat_deployment() -> str:
+    if optional_env("MODEL_PROVIDER", "aoai").lower() == "foundry":
+        return required_env("FOUNDRY_CHAT_MODEL")
     return required_env("AOAI_CHAT_DEPLOYMENT")
+ 
+ 
+class _FoundryClient:
+    """Small adapter that exposes chat.completions.create()."""
+ 
+    def __init__(self):
+        self.chat = _FoundryChatAPI()
+ 
+ 
+class _FoundryChatAPI:
+    def __init__(self):
+        self.completions = _FoundryCompletionsAPI()
+ 
+ 
+class _FoundryCompletionsAPI:
+    def create(self, **kwargs):
+        endpoint = required_env("FOUNDRY_PROJECT_ENDPOINT").rstrip("/")
+        api_version = optional_env("FOUNDRY_API_VERSION", "2024-05-01-preview")
+        timeout = float(kwargs.pop("timeout", 60.0))
+        model = kwargs.pop("model", "") or required_env("FOUNDRY_CHAT_MODEL")
+ 
+        payload = dict(kwargs)
+        payload["model"] = model
+ 
+        headers = {"Content-Type": "application/json"}
+        if use_managed_identity():
+            headers["Authorization"] = f"Bearer {bearer_token_provider(AOAI_SCOPE)()}"
+        else:
+            headers["api-key"] = required_env("FOUNDRY_API_KEY")
+ 
+        url = f"{endpoint}/models/chat/completions?api-version={api_version}"
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Foundry chat API {resp.status_code}: {resp.text[:300]}")
+ 
+        data = resp.json()
+        content = ""
+        try:
+            content = data["choices"][0]["message"]["content"] or ""
+        except Exception:
+            content = ""
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
  

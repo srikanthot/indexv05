@@ -68,24 +68,36 @@ def _max_blobs_per_run() -> int:
  
  
 def _list_done_source_files(search_endpoint: str, index_name: str) -> set[str]:
-    """Return source_file values that have a `summary` record in the index."""
+    """Return source_file values that have a `summary` record in the index.
+    Paginates through all results so corpora >1000 PDFs are fully covered."""
     token = bearer_token(SEARCH_SCOPE)
     url = f"{search_endpoint.rstrip('/')}/indexes/{index_name}/docs/search?api-version={_SEARCH_API_VERSION}"
-    body = {
-        "search": "*",
-        "filter": "record_type eq 'summary'",
-        "select": "source_file",
-        "top": 1000,
-    }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
-    with httpx.Client(timeout=30.0) as c:
-        resp = c.post(url, json=body, headers=headers)
-    if resp.status_code != 200:
-        logging.warning("auto_heal: index query failed: %d %s",
-                        resp.status_code, resp.text[:200])
-        return set()
-    data = resp.json()
-    return {h.get("source_file") for h in data.get("value", []) if h.get("source_file")}
+    out: set[str] = set()
+    skip = 0
+    while True:
+        body = {
+            "search": "*",
+            "filter": "record_type eq 'summary'",
+            "select": "source_file",
+            "top": 1000,
+            "skip": skip,
+        }
+        with httpx.Client(timeout=30.0) as c:
+            resp = c.post(url, json=body, headers=headers)
+        if resp.status_code != 200:
+            logging.warning("auto_heal: index query failed: %d %s",
+                            resp.status_code, resp.text[:200])
+            break
+        batch = resp.json().get("value", [])
+        for h in batch:
+            sf = h.get("source_file")
+            if sf:
+                out.add(sf)
+        if len(batch) < 1000:
+            break
+        skip += 1000
+    return out
  
  
 def _list_pdfs_in_container(storage_account: str, container: str) -> list[dict[str, Any]]:

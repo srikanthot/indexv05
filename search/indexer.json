@@ -9,16 +9,16 @@
   },
   "parameters": {
     "batchSize": 1,
-    "maxFailedItems": 1000,
-    "maxFailedItemsPerBatch": 1000,
+    "maxFailedItems": 10,
+    "maxFailedItemsPerBatch": 5,
     "configuration": {
       "dataToExtract": "contentAndMetadata",
       "parsingMode": "default",
       "allowSkillsetToReadFileData": true,
       "imageAction": "none",
-      "failOnUnsupportedContentType": false,
+      "failOnUnsupportedContentType": true,
       "failOnUnprocessableDocument": false,
-      "indexedFileNameExtensions": ".pdf,.docx,.pptx,.xlsx"
+      "indexedFileNameExtensions": ".pdf"
     }
   },
   "fieldMappings": [

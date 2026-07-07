@@ -124,4 +124,3 @@ def bearer_token(scope: str) -> str:
         # Exhausted retries -- re-raise the last exception so the
         # calling skill returns a structured error envelope.
         raise last_exc if last_exc else RuntimeError("bearer_token failed")
- 

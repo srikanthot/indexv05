@@ -35,7 +35,7 @@ MAX_TABLE_CHARS = 3000
 # vs v04's 92K. Per-row emission for large tables is the right call for
 # technical-manual retrieval -- index size grows but the rows are
 # exactly the lookup keys the chatbot needs.
-ROW_RECORD_MIN_ROWS = 5
+ROW_RECORD_MIN_ROWS = 2
 ROW_RECORD_MAX_ROWS = 5000
  
  
@@ -454,12 +454,18 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         # already at row granularity.
         row_records = _build_row_records_for_cluster(cluster, grid, header_rows)
  
-        for split_idx, chunk in enumerate(_split_oversized(md)):
+        splits = _split_oversized(md)
+        split_count = len(splits)
+ 
+        for split_idx, chunk in enumerate(splits):
             # Count data rows in this split chunk (total lines minus header
             # + separator), so callers see the real shape of the split.
             chunk_rows = max(0, len(chunk.splitlines()) - 2)
             out.append({
                 "index": f"{cluster_idx}_{split_idx}",
+                "cluster_id": str(cluster_idx),
+                "split_index": split_idx,
+                "split_count": split_count,
                 "page_start": page_start,
                 "page_end": page_end,
                 "markdown": chunk,

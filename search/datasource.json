@@ -17,3 +17,4 @@
     "@odata.type": "#Microsoft.Azure.Search.NativeBlobSoftDeleteDeletionDetectionPolicy"
   }
 }
+ 

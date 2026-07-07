@@ -311,7 +311,43 @@ def main() -> int:
         if heal_results.get("error"):
             overall_rc = max(overall_rc, 1)
  
-    # 5. Pipeline-level run record.
+    # 5. Validation gate: check that required fields are populated
+    # across all record types. This catches silent partial indexing.
+    rc, _ = run_step(
+        "validate_index --strict",
+        [py, str(REPO_ROOT / "scripts" / "validate_index.py"),
+         "--config", args.config, "--strict", "--sample", "10"],
+        allow_fail=True,
+    )
+    step_results["validate_index"] = {"exit_code": rc}
+    if rc != 0:
+        overall_rc = max(overall_rc, rc)
+ 
+    # 6. Page-coordinate integrity gate: required for citation accuracy.
+    # This blocks go-live if chunk page mappings are inconsistent
+    # (non-contiguous page lists, start/end page mismatch against list).
+    rc, _ = run_step(
+        "validate_page_coordinates --strict",
+        [py, str(REPO_ROOT / "scripts" / "validate_page_coordinates.py"),
+         "--config", args.config, "--strict"],
+        allow_fail=True,
+    )
+    step_results["validate_page_coordinates"] = {"exit_code": rc}
+    if rc != 0:
+        overall_rc = max(overall_rc, rc)
+ 
+    # 7. Full retrievable-field quality audit (report + trend visibility).
+    rc, _ = run_step(
+        "audit_all_retrievable_fields",
+        [py, str(REPO_ROOT / "scripts" / "audit_all_retrievable_fields.py"),
+         "--config", args.config],
+        allow_fail=True,
+    )
+    step_results["audit_all_retrievable_fields"] = {"exit_code": rc}
+    if rc != 0:
+        overall_rc = max(overall_rc, rc)
+ 
+    # 8. Pipeline-level run record.
     cosmos_writer.write_run_record(cfg, {
         "run_type": "full_pipeline",
         "triggered_by": args.triggered_by,
@@ -333,4 +369,5 @@ def main() -> int:
  
 if __name__ == "__main__":
     sys.exit(main())
+ 
  

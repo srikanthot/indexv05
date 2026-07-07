@@ -118,3 +118,5 @@ def crop_figure_png_b64(
     finally:
         doc.close()
  
+ 
+ 

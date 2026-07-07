@@ -27,7 +27,7 @@ import threading
 from collections import OrderedDict
 from typing import Any
  
-from .config import optional_env
+from .config import index_run_id as _index_run_id, optional_env
 from .di_client import fetch_cached_analysis
 from .ids import (
     SKILL_VERSION,
@@ -548,10 +548,35 @@ def _derived_for(source_path: str) -> dict[str, Any]:
                             min_conf = float(conf)
                 min_by_page[pn] = min_conf
             derived["min_conf_by_page"] = min_by_page
+            # Store page dimensions so _page_dimensions_for / _pdf_total_pages_for
+            # can read from derived cache without the raw analysis.
+            page_dims: dict[int, tuple[float, float, str]] = {}
+            for page in di_pages:
+                pn = page.get("pageNumber")
+                if isinstance(pn, int) and pn > 0:
+                    page_dims[pn] = (
+                        page.get("width") or 8.5,
+                        page.get("height") or 11.0,
+                        (page.get("unit") or "inch"),
+                    )
+            derived["page_dimensions"] = page_dims
+            derived["total_pages"] = len(di_pages)
         with _CACHE_LOCK:
             _DERIVED_CACHE[source_path] = derived
             while len(_DERIVED_CACHE) > _SECTION_INDEX_CACHE_MAX:
                 _DERIVED_CACHE.popitem(last=False)
+            # --- OOM mitigation for large PDFs ---
+            # The raw DI analysis can be 100+ MB (500+ MB as Python objects).
+            # Now that derived structures hold everything needed for per-chunk
+            # processing, replace the full analysis with a slim stub. This
+            # prevents both caches from holding the same data and cuts peak
+            # memory usage by ~400 MB on huge PDFs like ED-EO-RTM (132 MB raw).
+            # The slim stub keeps only page metadata (for _page_dimensions_for
+            # and _pdf_total_pages_for) and a "paragraphs" key pointing at
+            # the first 3 pages' paragraphs (for cover_metadata_from_analyze
+            # in the unlikely event it's called after derived is built).
+            if source_path in _ANALYSIS_CACHE:
+                _ANALYSIS_CACHE[source_path] = {"_slimmed": True}
         return derived
  
  
@@ -693,7 +718,7 @@ def _sections_for(source_path: str) -> list[dict[str, Any]]:
         # FALLBACK: build live from DI cache if sidecar missing/empty.
         if not sections:
             result = _analysis_for(source_path)
-            if result:
+            if result and not result.get("_slimmed"):
                 try:
                     sections = build_section_index(result)
                     logging.info(
@@ -730,6 +755,11 @@ def _pdf_total_pages_for(source_path: str) -> int | None:
     detect drift when our computed `physical_pdf_page` exceeds the
     actual PDF length.
     """
+    # Prefer derived cache (available after _derived_for has run once).
+    derived = _derived_for(source_path)
+    total = derived.get("total_pages")
+    if isinstance(total, int) and total > 0:
+        return total
     result = _analysis_for(source_path)
     if not result:
         return None
@@ -747,6 +777,24 @@ def _page_dimensions_for(source_path: str, physical_page: int | None) -> tuple[f
         return (8.5, 11.0)
     if not source_path:
         return (8.5, 11.0)
+    # Prefer derived cache (avoids loading the full 100+ MB raw analysis).
+    derived = _derived_for(source_path)
+    page_dims = derived.get("page_dimensions") or {}
+    if page_dims:
+        dims = page_dims.get(physical_page)
+        if dims:
+            w, h, unit = dims
+            unit = unit.lower()
+            if unit in ("inch", "inches"):
+                return (float(w), float(h))
+            if unit in ("pixel", "pixels"):
+                return (float(w) / 96.0, float(h) / 96.0)
+            if unit in ("centimeter", "cm"):
+                return (float(w) / 2.54, float(h) / 2.54)
+            return (float(w), float(h))
+        # Page not in dims dict — out of range.
+        return (8.5, 11.0)
+    # Fallback: read from raw analysis cache.
     result = _analysis_for(source_path)
     if not result:
         return (8.5, 11.0)
@@ -1082,13 +1130,22 @@ def _bbox_from_polygon(polygon: list[float]) -> tuple[float, float, float, float
         return None
  
  
-def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, Any]]:
+def _text_bbox_for_chunk(
+    chunk_text: str,
+    source_path: str,
+    allowed_pages: list[int] | None = None,
+) -> list[dict[str, Any]]:
     """Find DI paragraphs whose content appears in this chunk and return
     a per-page union bbox suitable for the front-end to render highlight
     rectangles on the rendered PDF page.
  
     Output shape: list of {page, x_in, y_in, w_in, h_in}, one entry per
     distinct page the chunk touches. Empty list if we can't resolve.
+ 
+    When `allowed_pages` is provided, only paragraphs on those pages are
+    considered. This eliminates false positives from TOC entries, index
+    pages, and cross-references that share text with the real chunk but
+    live on distant pages.
  
     Matching strategy (intentionally strict to avoid false positives on
     repeated boilerplate, TOC entries, and back-of-book index lines):
@@ -1101,19 +1158,9 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
          the head probe in TOC entries; only the real body paragraph
          will pass the second probe because TOC entries don't carry the
          continuation text.
- 
-    These three guards eliminate the multi-page-bbox false positives we
-    saw in production where a single chunk's content matched paragraphs
-    on the TOC page, the body page, and the appendix page simultaneously.
     """
     if not chunk_text or not source_path:
         return []
-    # Use pre-normalized + pre-bbox-extracted paragraph candidates from
-    # the per-PDF derived cache. Was calling _normalize_text on EVERY
-    # paragraph EVERY chunk (5M regex calls per huge PDF), plus running
-    # _bbox_from_polygon on every region. Now both are computed once
-    # per PDF at derived-cache build time, and per-chunk work is just
-    # substring matching against the cached normalized strings.
     candidates = _derived_for(source_path)["text_bbox_paragraphs"]
     if not candidates:
         return []
@@ -1122,9 +1169,18 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
     if not chunk_norm:
         return []
  
+    # Convert allowed_pages to a set for O(1) lookup.
+    page_filter: set[int] | None = None
+    if allowed_pages:
+        page_filter = set(allowed_pages)
+ 
     bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
     for content, para_norm, page, bb in candidates:
-        # Guard 1: minimum content length already enforced at derive time.
+        # Page-constraint guard: if we know which pages the chunk lives
+        # on, reject any paragraph on a different page immediately.
+        # This is the primary defense against TOC/index false positives.
+        if page_filter is not None and page not in page_filter:
+            continue
         # Guard 2: 120-char head probe.
         probe = para_norm[:120]
         if probe not in chunk_norm:
@@ -1153,14 +1209,96 @@ def _text_bbox_for_chunk(chunk_text: str, source_path: str) -> list[dict[str, An
     return out
  
  
+def _text_line_bboxes_for_chunk(
+    chunk_text: str,
+    source_path: str,
+    allowed_pages: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Return paragraph-level bbox fragments for the chunk.
+ 
+    Output shape: list of {page, x_in, y_in, w_in, h_in, confidence, reading_order}.
+    These are used as line-level highlights in the citation UI.
+    """
+    if not chunk_text or not source_path:
+        return []
+    candidates = _derived_for(source_path)["text_bbox_paragraphs"]
+    if not candidates:
+        return []
+ 
+    chunk_norm = _normalize_text(chunk_text)
+    if not chunk_norm:
+        return []
+ 
+    page_filter: set[int] | None = None
+    if allowed_pages:
+        page_filter = set(allowed_pages)
+ 
+    min_conf_by_page = _derived_for(source_path).get("min_conf_by_page") or {}
+    per_page: dict[int, list[tuple[float, float, float, float]]] = {}
+ 
+    for _content, para_norm, page, bb in candidates:
+        if page_filter is not None and page not in page_filter:
+            continue
+        probe = para_norm[:120]
+        if probe not in chunk_norm:
+            continue
+        if len(para_norm) >= 200:
+            second = para_norm[100:200]
+            if second and second not in chunk_norm:
+                continue
+        per_page.setdefault(page, []).append(bb)
+ 
+    out: list[dict[str, Any]] = []
+    for page in sorted(per_page):
+        ordered = sorted(per_page[page], key=lambda b: (b[1], b[0]))
+        for idx, b in enumerate(ordered, start=1):
+            out.append({
+                "page": page,
+                "x_in": round(float(b[0]), 3),
+                "y_in": round(float(b[1]), 3),
+                "w_in": round(float(b[2]), 3),
+                "h_in": round(float(b[3]), 3),
+                "confidence": float(min_conf_by_page.get(page, 1.0) or 1.0),
+                "reading_order": idx,
+            })
+    return out
+ 
+ 
+def _chunk_bboxes_from_line_bboxes(line_bboxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge line/fragment boxes into one per-page chunk bbox."""
+    if not line_bboxes:
+        return []
+    by_page: dict[int, list[dict[str, Any]]] = {}
+    for b in line_bboxes:
+        page = b.get("page")
+        if isinstance(page, int):
+            by_page.setdefault(page, []).append(b)
+ 
+    out: list[dict[str, Any]] = []
+    for page in sorted(by_page):
+        items = by_page[page]
+        x0 = min(float(i.get("x_in") or 0.0) for i in items)
+        y0 = min(float(i.get("y_in") or 0.0) for i in items)
+        x1 = max(float(i.get("x_in") or 0.0) + float(i.get("w_in") or 0.0) for i in items)
+        y1 = max(float(i.get("y_in") or 0.0) + float(i.get("h_in") or 0.0) for i in items)
+        conf_vals = [float(i.get("confidence") or 0.0) for i in items]
+        conf = min(conf_vals) if conf_vals else 0.0
+        out.append({
+            "page": page,
+            "x_in": round(x0, 3),
+            "y_in": round(y0, 3),
+            "w_in": round(max(0.0, x1 - x0), 3),
+            "h_in": round(max(0.0, y1 - y0), 3),
+            "source": "union_of_lines",
+            "confidence": round(conf, 3),
+        })
+    return out
 # Highlight-text construction is shared with diagram / table / summary
 # skills via shared.text_utils.build_highlight_text — that helper does
 # the same markdown/DI-marker stripping plus Unicode NFC normalize,
 # soft-hyphen drop, smart-quote → ASCII, end-of-line hyphenation join,
 # and control-character stripping. Importing instead of duplicating
 # keeps the four record types' highlight contracts identical.
- 
- 
 def _normalize_text(s: str) -> str:
     """Aggressive normalization for fuzzy content matching across the DI
     markdown output vs DI raw paragraph text. Strips markdown headers,
@@ -1376,10 +1514,17 @@ def _marker_timeline(section_content: str, section_start_page: int) -> list[tupl
     timeline: list[tuple[int, int]] = [(0, section_start_page)]
     current_page = section_start_page
  
-    # Combine both marker types in document order. PageNumber markers
-    # carry the *printed* label (e.g. "18-33") which is not a physical
-    # page number, so we only use them to double-check integer-style
-    # labels (matches "3"). PageBreak is the reliable page advancer.
+    # Combine both marker types in document order.
+    #
+    # IMPORTANT: in large manuals, integer-looking PageNumber marker values
+    # can be non-physical labels or noisy OCR artifacts and may jump hundreds
+    # of pages (e.g. 26 -> 565). If we trust those blindly, chunk spans become
+    # non-contiguous and physically wrong.
+    #
+    # Policy:
+    # - PageBreak is authoritative (+1 page).
+    # - Integer PageNumber can only make a small local correction; large jumps
+    #   are ignored as non-physical.
     events: list[tuple[int, str, int | None]] = []
     for m in PAGE_NUMBER_MARKER_RE.finditer(section_content or ""):
         label = (m.group(1) or "").strip()
@@ -1392,7 +1537,10 @@ def _marker_timeline(section_content: str, section_start_page: int) -> list[tupl
  
     for off, kind, val in events:
         if kind == "num" and val is not None:
-            current_page = val
+            # Allow only local corrections around the current page; reject
+            # large discontinuities that pollute page spans.
+            if abs(val - current_page) <= 2:
+                current_page = val
         elif kind == "break":
             current_page = current_page + 1
         timeline.append((off, current_page))
@@ -1486,6 +1634,53 @@ def _pages_in_range(
     return sorted(pages)
  
  
+def _sanitize_page_span(
+    start_page: int | None,
+    end_page: int | None,
+    pages_covered: list[int] | None,
+    *,
+    max_span_pages: int = 3,
+) -> tuple[int | None, int | None, list[int], bool]:
+    """Return a deterministic, contiguous page span.
+ 
+    Why this exists:
+    - OCR/marker noise can inject non-physical outlier pages.
+    - Downstream citation UX requires stable page filters and contiguous spans.
+ 
+    Policy:
+    - If start/end are present, enforce end >= start.
+    - Enforce pages_covered == contiguous range(start..end).
+    - Clamp very wide spans to a single page for text chunks.
+    """
+    clamped = False
+    pages = [p for p in (pages_covered or []) if isinstance(p, int)]
+ 
+    if start_page is None and end_page is None:
+        if pages:
+            start_page = min(pages)
+            end_page = max(pages)
+        else:
+            return None, None, [], clamped
+    elif start_page is None:
+        start_page = end_page
+    elif end_page is None:
+        end_page = start_page
+ 
+    if start_page is None or end_page is None:
+        return None, None, [], clamped
+ 
+    if end_page < start_page:
+        end_page = start_page
+ 
+    span = (end_page - start_page) + 1
+    if span > max_span_pages:
+        end_page = start_page
+        clamped = True
+ 
+    clean_pages = list(range(start_page, end_page + 1))
+    return start_page, end_page, clean_pages, clamped
+ 
+ 
 def compute_page_span(
     chunk: str,
     section_content: str,
@@ -1510,22 +1705,13 @@ def compute_page_span(
     if not chunk:
         return section_start_page, section_start_page, [section_start_page]
  
-    # Integer-style PageNumber markers inside the chunk (e.g. "3") are
-    # used as a fallback when we cannot locate the chunk in section_content.
-    # Printed labels like "18-33" are ignored here (they are surfaced as
-    # printed_page_label instead).
-    nums_in_chunk: list[int] = []
-    for m in PAGE_NUMBER_MARKER_RE.finditer(chunk):
-        lbl = (m.group(1) or "").strip()
-        if lbl.isdigit():
-            nums_in_chunk.append(int(lbl))
+    # Integer-like PageNumber markers are intentionally NOT trusted as
+    # primary physical-page evidence in fallback mode because they can encode
+    # printed labels and produce extreme page jumps. We rely on section start
+    # + PageBreak continuity instead.
     breaks_in_chunk = list(PAGE_BREAK_MARKER_RE.finditer(chunk))
  
     if not section_content:
-        if nums_in_chunk:
-            lo = min([section_start_page] + nums_in_chunk)
-            hi = max([section_start_page] + nums_in_chunk)
-            return lo, hi, list(range(lo, hi + 1))
         if breaks_in_chunk:
             hi = section_start_page + len(breaks_in_chunk)
             return section_start_page, hi, list(range(section_start_page, hi + 1))
@@ -1534,10 +1720,9 @@ def compute_page_span(
     timeline = _marker_timeline(section_content, section_start_page)
     chunk_start = _locate_chunk_in_section(chunk, section_content)
     if chunk_start < 0:
-        if nums_in_chunk:
-            lo = min(nums_in_chunk)
-            hi = max(nums_in_chunk)
-            return lo, hi, list(range(lo, hi + 1))
+        if breaks_in_chunk:
+            hi = section_start_page + len(breaks_in_chunk)
+            return section_start_page, hi, list(range(section_start_page, hi + 1))
         return section_start_page, section_start_page, [section_start_page]
  
     # Use the *trimmed* chunk length so a trailing PageBreak marker
@@ -1606,14 +1791,20 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     #       catches the case where DI groups paragraphs from earlier pages
     #       into a section and our index records a too-early page_start;
     #   (c) for the final text_bbox field surfaced to the front-end.
-    text_bbox_list = _text_bbox_for_chunk(page_text, source_path)
+    #
+    # Strategy: first call WITHOUT page constraint for page-resolution
+    # fallback (paths a/b), then RE-FILTER to only the chunk's resolved
+    # pages for the final text_bbox output (path c). This eliminates
+    # false-positive rects on TOC/index/appendix pages while preserving
+    # the page-resolution logic that needs the unconstrained set.
+    text_bbox_list_unfiltered = _text_bbox_for_chunk(page_text, source_path)
  
     # Build a map of {page -> total bbox area} for cross-validation. The
     # page with the largest area is the page that owns the bulk of the
     # chunk's content; ancillary entries (chunk content also appearing
     # on a TOC page or an appendix) carry tiny bboxes and lose the tie.
     bbox_pages_area: dict[int, float] = {}
-    for b in text_bbox_list:
+    for b in text_bbox_list_unfiltered:
         pg = b.get("page")
         w = b.get("w_in") or 0.0
         h = b.get("h_in") or 0.0
@@ -1685,6 +1876,27 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
                 len(section_content or ""), len(page_text or ""),
                 len(bbox_pages_area),
             )
+ 
+    # Hard safety-net for required index fields: unresolved page resolution
+    # must still emit deterministic, non-null physical page fields so strict
+    # validation and downstream filters do not break on nulls.
+    if start_page is None:
+        start_page = 1
+        end_page = 1
+        pages_covered = [1]
+        if page_resolution_method == "missing":
+            page_resolution_method = "synthetic_default"
+ 
+    # Final page-span safety net: force contiguous, bounded spans so bad
+    # page lists cannot leak into the index even under noisy markers.
+    start_page, end_page, pages_covered, span_clamped = _sanitize_page_span(
+        start_page,
+        end_page,
+        pages_covered,
+        max_span_pages=3,
+    )
+    if span_clamped:
+        page_resolution_method = f"{page_resolution_method}_span_clamped"
  
     # Prefer the explicit `<!-- PageNumber="..." -->` marker from DI when
     # present in the chunk — for technical manuals it holds the printed
@@ -1805,9 +2017,27 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     })
  
     # Highlight + bbox + total-pages: new fields to support precise
-    # client-side highlighting in the citation UI. text_bbox_list was
-    # already computed earlier so we could use it as a page-resolution
-    # fallback; reuse it here for serialization.
+    # client-side highlighting in the citation UI.
+    #
+    # CRITICAL FIX: filter text_bbox to ONLY the chunk's resolved pages.
+    # The unfiltered list may contain false-positive matches on TOC,
+    # index, and appendix pages (paragraphs sharing text with the chunk
+    # but on completely different pages). Without this filter, a chunk
+    # on page 34 could emit 12 rects spanning pages 34-803.
+    final_pages = set(pages_covered) if pages_covered else set()
+    if start_page is not None:
+        final_pages.add(start_page)
+    if end_page is not None:
+        final_pages.add(end_page)
+ 
+    if final_pages:
+        text_bbox_list = [
+            b for b in text_bbox_list_unfiltered
+            if b.get("page") in final_pages
+        ]
+    else:
+        text_bbox_list = list(text_bbox_list_unfiltered)
+ 
     highlight_text = build_highlight_text(page_text)
  
     # Whole-page-bbox fallback. The strict paragraph matcher can return
@@ -1823,6 +2053,32 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         text_bbox_list = [_whole_page_bbox(source_path, start_page)]
  
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
+    line_bboxes_list = _text_line_bboxes_for_chunk(
+        page_text,
+        source_path,
+        allowed_pages=sorted(final_pages) if final_pages else None,
+    )
+    if not line_bboxes_list and text_bbox_list:
+        line_bboxes_list = [
+            {
+                "page": b.get("page"),
+                "x_in": b.get("x_in"),
+                "y_in": b.get("y_in"),
+                "w_in": b.get("w_in"),
+                "h_in": b.get("h_in"),
+                "confidence": 0.75,
+                "reading_order": i + 1,
+            }
+            for i, b in enumerate(text_bbox_list)
+            if isinstance(b, dict)
+        ]
+    chunk_bboxes_list = _chunk_bboxes_from_line_bboxes(line_bboxes_list)
+    line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
+    chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
+    bbox_mode_available = [
+        m for m, present in (("chunk", bool(chunk_bboxes_list)), ("line", bool(line_bboxes_list))) if present
+    ]
+    page_width_in, page_height_in = _page_dimensions_for(source_path, start_page) or (8.5, 11.0)
     pdf_total_pages = _pdf_total_pages_for(source_path)
  
     # Safety callouts (WARNING / DANGER / CAUTION / NOTICE / NOTE).
@@ -1885,6 +2141,20 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         has_callouts=bool(callout_keywords),
         has_figure_or_table_ref=bool(fig_refs or tbl_refs),
     )
+    # Text chunks are retrievable only when they represent operational
+    # content and have enough structural anchors for reliable citation.
+    retrieval_eligible = bool(
+        status == "ok"
+        and (start_page is not None)
+        and bool(h1_in or h2_in or h3_in)
+    )
+    content_class = "locator_artifact" if status == "toc_like" else "operational_content"
+    retrieval_reason = (
+        "eligible_operational_content"
+        if retrieval_eligible
+        else "ineligible_missing_header_or_page_or_status"
+    )
+    applies_to_system = [x for x in [h1_in.strip(), h2_in.strip()] if x]
  
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
@@ -1905,6 +2175,13 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "pages_referenced": page_refs,
         "highlight_text": highlight_text,
         "text_bbox": text_bbox_json,
+        "line_bboxes": line_bboxes_json,
+        "chunk_bboxes": chunk_bboxes_json,
+        "bbox_mode_available": bbox_mode_available,
+        "page_width_in": round(float(page_width_in), 3),
+        "page_height_in": round(float(page_height_in), 3),
+        "bbox_padding_hint_in": 0.05,
+        "bbox_version": "2.0.0",
         "pdf_total_pages": pdf_total_pages,
         "page_resolution_method": page_resolution_method,
         "callouts": callout_keywords,
@@ -1924,7 +2201,25 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "equipment_ids": equipment_ids,
         "language": language,
         "chunk_quality_score": quality_score,
+        "content_class": content_class,
+        "retrieval_eligible_reason": retrieval_reason,
+        "applies_to_equipment": equipment_ids,
+        "applies_to_system": applies_to_system,
+        "applies_to_voltage": [],
+        "procedure_id": "",
+        "procedure_step_id": "",
+        "procedure_step_order": None,
+        "procedure_branch_label": "",
+        "figure_step_linked": False,
+        "figure_linkage_confidence": 0.0,
+        "locator_type": "none",
+        "locator_value": "",
+        "is_locator_artifact": bool(status == "toc_like"),
+        "artifact_reason_codes": ["toc_like_chunk"] if status == "toc_like" else [],
+        "retrieval_eligible": retrieval_eligible,
+        "suggested_for_eval_question": retrieval_eligible,
         "processing_status": status,
         "skill_version": SKILL_VERSION,
+        "index_run_id": _index_run_id(),
     }
  

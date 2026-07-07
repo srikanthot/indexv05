@@ -46,6 +46,16 @@ def _figure_first_page(figure: dict[str, Any]) -> int:
     return 0
  
  
+def _figure_all_pages(figure: dict[str, Any]) -> list[int]:
+    """Return all pages this figure spans (sorted, deduplicated)."""
+    pages = set()
+    for br in figure.get("boundingRegions", []) or []:
+        pn = br.get("pageNumber")
+        if isinstance(pn, int):
+            pages.add(pn)
+    return sorted(pages)
+ 
+ 
 def _figure_polygon(figure: dict[str, Any]) -> list[float]:
     for br in figure.get("boundingRegions", []) or []:
         poly = br.get("polygon")
@@ -142,6 +152,7 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         "enriched_figures": [],
         "enriched_tables": [],
         "pdf_total_pages": None,
+        "source_hash": "",
         "document_revision": "",
         "effective_date": "",
         "document_number": "",
@@ -315,4 +326,5 @@ def process_document(data: dict[str, Any]) -> dict[str, Any]:
         "tables_count": di_table_count,
         "skill_version": SKILL_VERSION,
     }
+ 
  
