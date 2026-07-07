@@ -1,15 +1,10 @@
-Hey Copilot,
+Hi Copilot — thanks for validating. Your results CONFIRM the code fixes are already applied, so everything is correct:
 
-The code fixes for this round are **already applied** in this repo — 4 files were
-updated by me: `function_app/shared/config.py`, `function_app/shared/diagram.py`,
-`function_app/shared/summary.py`, `scripts/preanalyze.py`. They remove a
-GPT-5.1 blocker (the model is a reasoning model and returns HTTP 400 for any
-`temperature != 1`, so the hardcoded temperatures were making every vision/summary
-call fail) and fix a compile error in `preanalyze.py`.
+- `model_gen_kwargs(...)` already exists in `config.py` ✓
+- the `_do_crops` docstring is already 4 spaces ✓
+- the old `temperature=0.0` / `temperature=0.1` blocks show NO_MATCH because they have already been replaced ✓
 
-**Do NOT edit any code.** The files are already correct. Just run the commands
-below and print the REPORT block at the end. If a command errors, stop and tell
-me the error. We are on Azure US-Gov and `az` is already logged in.
+So do **NOT** edit any files — the code is correct as-is. Now just run the commands below and print the REPORT block at the end. We are on Azure US-Gov and `az` is already logged in. If a command errors, stop and tell me the exact error.
 
 ---
 
