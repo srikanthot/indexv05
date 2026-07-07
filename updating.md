@@ -1,61 +1,59 @@
-Hi Copilot — excellent, the indexer finished and all 3 docs are fully indexed
-(diagram counts 25/30/535 match the figures exactly; tables + table_rows landed).
-The pipeline works end-to-end. Two things left: confirm the VECTORS/embeddings
-actually landed (record counts don't prove vectors), and pull a quality baseline
-so we know which fields are well-populated vs empty. READ-ONLY — no edits, no
-reindex. Run and print the REPORT. SSL env as usual; US Gov.
+Hi Copilot — the pipeline is validated end-to-end on 3 docs. Now we're scaling to
+the 12 documents needed for performance testing (these are bigger: ~40-90MB). This
+round: confirm all 12 are in the container, report the model TPM quotas (we saw a
+429 earlier, so we may need to bump ada-002), and run preanalyze on all of them.
+
+No code edits. Run the steps and print the REPORT block. SSL env as usual; US Gov.
+NOTE: preanalyze on 9 big new docs (the 3 small ones are already done and will be
+skipped by --incremental) may take 1-3 hours — let it run to completion; it is
+resumable if interrupted. If you must, run it in the background and report progress
+via `python scripts/preanalyze.py --config deploy.config.json --status`.
 
 ---
 
-### Run these (read-only)
+### Steps
 
 ```bash
 export SSL_CERT_FILE='C:/Users/C90255306/Downloads/combined-ca.crt'
 export REQUESTS_CA_BUNDLE='C:/Users/C90255306/Downloads/combined-ca.crt'
+export AOAI_REASONING_EFFORT=low
 az cloud set --name AzureUSGovernment
 az account set --subscription 5c58d830-b35f-458a-ab5d-65ad9d0b9815
-SV=2024-05-01-preview
-SEARCH_EP=$(python -c "import json;print(json.load(open('deploy.config.json'))['search']['endpoint'].rstrip('/'))")
-PFX=$(python -c "import json;print(json.load(open('deploy.config.json'))['search'].get('artifactPrefix') or 'mm-manuals')")
-INDEXER="${PFX}-indexer"; INDEX="${PFX}-index"
 
-# 1. Final indexer status (should be success, processed=3)
-az rest --method get --resource "https://search.azure.us" --url "$SEARCH_EP/indexers/$INDEXER/status?api-version=$SV" --query "{status:lastResult.status, processed:lastResult.itemsProcessed, failed:lastResult.itemsFailed}" -o json
+# 1. Confirm all 12 PDFs are in the container (upload the missing ones first if fewer than 12)
+SA=$(python -c "import json;print(json.load(open('deploy.config.json'))['storage']['accountResourceId'].rstrip('/').split('/')[-1])")
+CONT=$(python -c "import json;print(json.load(open('deploy.config.json'))['storage']['pdfContainerName'])")
+echo "STORAGE=$SA CONTAINER=$CONT"
+az storage blob list --account-name "$SA" --container-name "$CONT" --auth-mode login --num-results 5000 \
+  --query "[?ends_with(name,'.pdf')].{mb: to_number(properties.contentLength), name:name}" -o tsv \
+  | awk -F'\t' '{tot+=$1;n++; printf "%.1fMB\t%s\n",$1/1048576,$2} END{printf "TOTAL_PDFS=%d TOTAL_MB=%.0f\n",n,tot/1048576}' | sort -rn
 
-# 2. VECTOR CHECK — a semantic+vector query. If it returns hits, embeddings are present and the vectorizer works.
-az rest --method post --resource "https://search.azure.us" \
-  --url "$SEARCH_EP/indexes/$INDEX/docs/search?api-version=$SV" \
-  --headers "Content-Type=application/json" \
-  --body '{"search":"fault indicator installation","top":3,"vectorQueries":[{"kind":"text","text":"fault indicator installation","fields":"text_vector","k":10}],"select":"chunk_id,record_type,source_file,header_1"}' \
-  --query "value[].{rt:record_type, src:source_file, h1:header_1}" -o json
+# 2. Report the model deployment TPM/capacity (so we know if ada-002 needs a bump)
+az cognitiveservices account deployment list -n psegtmfdryuatv01 -g psegtmrguatv01 \
+  --query "[].{name:name, model:properties.model.name, sku:sku.name, capacity_k_tpm:sku.capacity}" -o table
 
-# 3. Contract + smoke (should PASS now that records exist)
-python scripts/smoke_test.py --config deploy.config.json --skip-run
+# 3. Run preanalyze on all container docs (all phases; skips the 3 already done).
+#    This is the long step. Let it finish. It prints per-PDF vision coverage.
+python scripts/preanalyze.py --config deploy.config.json --phase all --incremental --concurrency 3 --vision-parallel 20
 
-# 4. Vector/semantic demo via the guide (its queries use vectorQueries)
-python scripts/index_query_guide.py --config deploy.config.json --demo
-
-# 5. Quality baseline: full-corpus null/empty rates + which NEW fields are populated vs empty
-python scripts/audit_all_retrievable_fields.py --config deploy.config.json
-
-# 6. Contract validation (full corpus, not the default sample of 10)
-python scripts/validate_index.py --config deploy.config.json --sample 0
+# 4. After it finishes, show the status summary
+python scripts/preanalyze.py --config deploy.config.json --status
 ```
 
 ### Print this REPORT block
 
 ```
-INDEXER_FINAL: status=<>  processed=<>  failed=<>
-VECTOR_QUERY: <did step 2 return hits? yes/no; paste the few results>
-SMOKE_TEST: <pass / the issues>
-INDEX_QUERY_DEMO: <did semantic+vector queries return results? yes/no + any error>
-AUDIT — key findings (paste the critical/high section, and especially the
-  populated-rate for these fields per record_type if shown):
-    content_class, retrieval_eligible, table_columns, table_row_cells,
-    table_row_semantic_key/value, applies_to_equipment/system/voltage,
-    procedure_id/step_id, figure_step_linked, figure_linkage_confidence,
-    locator_type, line_bboxes
-VALIDATE_INDEX: <pass/fail + top issues>
+CONTAINER: TOTAL_PDFS=<n> TOTAL_MB=<n>   (list the 12 names + sizes)
+TPM_QUOTAS: ada-002 capacity=<k TPM>   gpt-5.1 capacity=<k TPM>
+PREANALYZE per-PDF (name: DI ok?, vision total/present/errored/missing, output.json written?):
+  <one line per PDF>
+ANY_HTTP_400_OR_TEMPERATURE_ERROR: <yes/no>
+RATE_LIMIT_429_COUNT: <how many times did you see "rate limited" / 429 during preanalyze>
+OTHER_ERRORS: <paste any, or none>
+PREANALYZE_STATUS_SUMMARY: <paste the --status output>
 ```
 
-Run everything and give me the REPORT. Do not reindex or edit anything.
+If fewer than 12 PDFs are in the container, tell me and upload the missing ones
+before running step 3. If preanalyze is heavily rate-limited (many 429s), report
+that — we'll bump the ada-002 TPM before continuing. Otherwise let it finish and
+give me the REPORT.
