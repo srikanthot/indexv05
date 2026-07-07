@@ -1,60 +1,69 @@
-Hi Copilot — thanks for validating. Your results CONFIRM the code fixes are already applied, so everything is correct:
+Hi Copilot — the 404 is fixed and all 8 functions are registered, and the GPT-5.1
+temperature fix is deployed. Now let's PROVE the temperature fix works end-to-end
+by running the precompute step (`scripts/preanalyze.py`) on a SMALL test set of
+**3 PDFs only** — do NOT run the whole corpus.
 
-- `model_gen_kwargs(...)` already exists in `config.py` ✓
-- the `_do_crops` docstring is already 4 spaces ✓
-- the old `temperature=0.0` / `temperature=0.1` blocks show NO_MATCH because they have already been replaced ✓
+The key thing we're checking: with the temperature fix, the GPT-5.1 vision calls
+should now return **zero HTTP 400 errors**, and `output.json` should build with
+figures/tables. (Before the fix, every vision call was 400-ing.)
 
-So do **NOT** edit any files — the code is correct as-is. Now just run the commands below and print the REPORT block at the end. We are on Azure US-Gov and `az` is already logged in. If a command errors, stop and tell me the exact error.
+Do NOT edit any code. Run the steps below and print the REPORT block. We are on
+Azure US-Gov; set the SSL cert env you normally use before running. If a command
+errors, stop and tell me the exact error.
 
 ---
 
-### Run these and capture ALL output
+### Steps
 
 ```bash
-# 1. Confirm the already-applied edits compile
-python -m py_compile function_app/shared/config.py function_app/shared/diagram.py function_app/shared/summary.py scripts/preanalyze.py && echo "COMPILE_OK"
+# 0. Environment (use your usual cert path)
+export SSL_CERT_FILE='C:/Users/C90255306/Downloads/combined-ca.crt'
+export REQUESTS_CA_BUNDLE='C:/Users/C90255306/Downloads/combined-ca.crt'
+export AOAI_REASONING_EFFORT=low   # keeps GPT-5.1 latency low so calls don't time out
 
-# 2. Read resource names from deploy.config.json
+# 1. Show preanalyze's flags so we target only specific PDFs (look for a per-PDF / limit flag)
+python scripts/preanalyze.py --help
+
+# 2. List PDFs in the source container with sizes; we'll pick 3 (ideally 1 small + 2 larger ~30-40MB)
 python - <<'PY'
 import json
 c=json.load(open("deploy.config.json"))
-print("FUNC_APP=", c["functionApp"]["name"])
-print("RG=", c["functionApp"]["resourceGroup"])
-print("MODEL_PROVIDER=", c.get("modelProvider"))
-print("FOUNDRY=", c.get("foundry"))
-print("AOAI_ENDPOINT=", c.get("azureOpenAI", {}).get("endpoint"))
+acct=c["storage"]["accountResourceId"].rstrip("/").split("/")[-1]
+cont=c["storage"]["pdfContainerName"]
+print("STORAGE_ACCOUNT=",acct)
+print("CONTAINER=",cont)
 PY
+# then (substitute the account/container printed above):
+az storage blob list --account-name <STORAGE_ACCOUNT> --container-name <CONTAINER> --auth-mode login --query "[?ends_with(name,'.pdf')].{name:name, mb: to_number(properties.contentLength)}" -o tsv | awk -F'\t' '{printf "%.1fMB\t%s\n", $2/1048576, $1}' | sort -n | head -20
 ```
 
-Using FUNC_APP and RG from step 2, substitute them below:
+Pick **3** PDFs from that list (one small, and if available two around 30-40MB).
+Then run preanalyze on **only those 3**, all phases (di → vision → output), using
+the per-PDF targeting flag you found in step 1's `--help` (it is likely `--pdf`,
+`--only`, or similar — use whatever the help shows). For example, per PDF:
 
 ```bash
-# 3. Set reasoning-effort low (cuts latency so calls don't time out) + show model settings
-az functionapp config appsettings set -g <RG> -n <FUNC_APP> --settings AOAI_REASONING_EFFORT=low --output none
-az functionapp config appsettings list -g <RG> -n <FUNC_APP> --query "[?contains(name,'FOUNDRY')||name=='MODEL_PROVIDER'||contains(name,'AOAI')].{name:name,value:value}" -o table
-
-# 4. Grant the Function App managed identity access to the Foundry resource (GPT-5.1).
-az functionapp identity show -g <RG> -n <FUNC_APP> --query principalId -o tsv
-az resource list --resource-type Microsoft.CognitiveServices/accounts --query "[].{name:name, id:id}" -o table
-#    -> pick the Foundry resource id from that list and run:
-# az role assignment create --assignee <FUNC_PRINCIPAL_ID> --role "Cognitive Services OpenAI User" --scope <FOUNDRY_RESOURCE_ID>
-
-# 5. Redeploy the function app WITH a real remote build (this also fixes the 404 if functions were not registered)
-az functionapp config appsettings set -g <RG> -n <FUNC_APP> --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true --output none
-cd function_app && func azure functionapp publish <FUNC_APP> --python --build remote; cd ..
-
-# 6. THE 404 CHECK — must list 7 functions
-az functionapp function list -g <RG> -n <FUNC_APP> --query "[].name" -o tsv
+python scripts/preanalyze.py --config deploy.config.json --phase all <PER_PDF_FLAG> "<pdf_name_1>"
+python scripts/preanalyze.py --config deploy.config.json --phase all <PER_PDF_FLAG> "<pdf_name_2>"
+python scripts/preanalyze.py --config deploy.config.json --phase all <PER_PDF_FLAG> "<pdf_name_3>"
 ```
 
-### Print this REPORT block (fill in the values)
+If `--help` shows **no** per-PDF flag, STOP and paste me the `--help` output so I
+give you the exact command (do not run preanalyze on the whole container).
+
+After each run, inspect what it printed (it reports vision coverage:
+total / present / errored / missing per PDF) and whether it wrote `output.json`.
+
+### Print this REPORT block
 
 ```
-COMPILE: <COMPILE_OK or the error>
-MODEL_PROVIDER: <value>   FOUNDRY set?: <yes/no>   AOAI_ENDPOINT: <value>
-FUNC_PRINCIPAL: <principalId>   ROLE_ASSIGNED_ON_FOUNDRY: <yes/no>
-PUBLISH: <success / the error tail>
-FUNCTION_LIST (count + names): <paste the tsv>
+PREANALYZE_FLAGS: <paste the per-PDF/limit-related flags from --help>
+TEST_PDFS: <the 3 names + sizes you used>
+PDF_1: DI=<ok/fail>  VISION total/present/errored/missing=<n/n/n/n>  OUTPUT_JSON=<written/no>
+PDF_2: DI=<ok/fail>  VISION total/present/errored/missing=<n/n/n/n>  OUTPUT_JSON=<written/no>
+PDF_3: DI=<ok/fail>  VISION total/present/errored/missing=<n/n/n/n>  OUTPUT_JSON=<written/no>
+ANY_HTTP_400_OR_TEMPERATURE_ERROR: <yes/no>   <-- this is the key result; should be NO now
+OTHER_ERRORS: <paste any errors, or none>
 ```
 
-If anything errors, stop and tell me the error. Otherwise run everything above and give me the REPORT block output.
+If anything errors, stop and give me the error. Otherwise run everything and give me the REPORT block.
