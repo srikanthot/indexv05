@@ -1,69 +1,91 @@
-Hi Copilot — the 404 is fixed and all 8 functions are registered, and the GPT-5.1
-temperature fix is deployed. Now let's PROVE the temperature fix works end-to-end
-by running the precompute step (`scripts/preanalyze.py`) on a SMALL test set of
-**3 PDFs only** — do NOT run the whole corpus.
+Hi Copilot — great, the GPT-5.1 vision fix is proven (590 figures, 0 errors,
+output.json built for all 3 test PDFs). Now let's run the actual indexer on those
+same 3 PDFs and verify that diagram/table/vector records land in the index.
 
-The key thing we're checking: with the temperature fix, the GPT-5.1 vision calls
-should now return **zero HTTP 400 errors**, and `output.json` should build with
-figures/tables. (Before the fix, every vision call was 400-ing.)
+Do NOT edit any code. Run the steps and print the REPORT block. Set your usual
+SSL cert env first. If a command errors, stop and tell me the exact error.
 
-Do NOT edit any code. Run the steps below and print the REPORT block. We are on
-Azure US-Gov; set the SSL cert env you normally use before running. If a command
-errors, stop and tell me the exact error.
+The 3 test PDFs from the last step: `GD-GA-CTP.pdf`, `GD-AS-DWM.pdf`, `ED-EO-OPM.pdf`.
 
 ---
 
 ### Steps
 
 ```bash
-# 0. Environment (use your usual cert path)
+# 0. Environment
 export SSL_CERT_FILE='C:/Users/C90255306/Downloads/combined-ca.crt'
 export REQUESTS_CA_BUNDLE='C:/Users/C90255306/Downloads/combined-ca.crt'
-export AOAI_REASONING_EFFORT=low   # keeps GPT-5.1 latency low so calls don't time out
+az cloud set --name AzureUSGovernment
 
-# 1. Show preanalyze's flags so we target only specific PDFs (look for a per-PDF / limit flag)
-python scripts/preanalyze.py --help
+# 1. Refresh the search artifacts (index / skillset / indexer / datasource) to current definitions.
+#    If this errors on an index-schema update, STOP and paste me the error.
+python scripts/deploy_search.py --config deploy.config.json
 
-# 2. List PDFs in the source container with sizes; we'll pick 3 (ideally 1 small + 2 larger ~30-40MB)
+# 2. Get search endpoint + indexer name
 python - <<'PY'
 import json
 c=json.load(open("deploy.config.json"))
-acct=c["storage"]["accountResourceId"].rstrip("/").split("/")[-1]
-cont=c["storage"]["pdfContainerName"]
-print("STORAGE_ACCOUNT=",acct)
-print("CONTAINER=",cont)
+ep=c["search"]["endpoint"].rstrip("/")
+prefix=c["search"].get("artifactPrefix") or "mm-manuals"
+print("SEARCH_EP=",ep)
+print("INDEXER=",f"{prefix}-indexer")
+print("INDEX=",f"{prefix}-index")
 PY
-# then (substitute the account/container printed above):
-az storage blob list --account-name <STORAGE_ACCOUNT> --container-name <CONTAINER> --auth-mode login --query "[?ends_with(name,'.pdf')].{name:name, mb: to_number(properties.contentLength)}" -o tsv | awk -F'\t' '{printf "%.1fMB\t%s\n", $2/1048576, $1}' | sort -n | head -20
-```
 
-Pick **3** PDFs from that list (one small, and if available two around 30-40MB).
-Then run preanalyze on **only those 3**, all phases (di → vision → output), using
-the per-PDF targeting flag you found in step 1's `--help` (it is likely `--pdf`,
-`--only`, or similar — use whatever the help shows). For example, per PDF:
+# 3. Reset + run the indexer (substitute SEARCH_EP / INDEXER from step 2)
+SV=2024-05-01-preview
+az rest --method post --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/reset?api-version=$SV" -o none
+az rest --method post --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/run?api-version=$SV" -o none
+echo "indexer reset+run issued"
+
+# 4. Poll status until it is no longer inProgress (check every ~30s)
+for i in $(seq 1 40); do
+  S=$(az rest --method get --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/status?api-version=$SV" --query "lastResult.status" -o tsv)
+  echo "poll $i: $S"
+  if [ "$S" != "inProgress" ]; then break; fi
+  sleep 30
+done
+
+# 5. Final indexer status (status, counts, first errors/warnings)
+az rest --method get --resource "https://search.azure.us" --url "<SEARCH_EP>/indexers/<INDEXER>/status?api-version=$SV" --query "{status:lastResult.status, processed:lastResult.itemsProcessed, failed:lastResult.itemsFailed, errors:lastResult.errors[0:5].errorMessage, warnings:lastResult.warnings[0:5].message}" -o json
+```
 
 ```bash
-python scripts/preanalyze.py --config deploy.config.json --phase all <PER_PDF_FLAG> "<pdf_name_1>"
-python scripts/preanalyze.py --config deploy.config.json --phase all <PER_PDF_FLAG> "<pdf_name_2>"
-python scripts/preanalyze.py --config deploy.config.json --phase all <PER_PDF_FLAG> "<pdf_name_3>"
+# 6. Per-document verification: record_type counts for each test PDF (substitute SEARCH_EP / INDEX)
+for F in "GD-GA-CTP.pdf" "GD-AS-DWM.pdf" "ED-EO-OPM.pdf"; do
+  echo "=== $F ==="
+  for RT in text diagram table table_row summary; do
+    N=$(az rest --method post --resource "https://search.azure.us" \
+        --url "<SEARCH_EP>/indexes/<INDEX>/docs/search?api-version=$SV" \
+        --headers "Content-Type=application/json" \
+        --body "{\"search\":\"*\",\"filter\":\"source_file eq '$F' and record_type eq '$RT'\",\"count\":true,\"top\":0}" \
+        --query "\"@odata.count\"" -o tsv)
+    echo "  $RT: $N"
+  done
+done
 ```
 
-If `--help` shows **no** per-PDF flag, STOP and paste me the `--help` output so I
-give you the exact command (do not run preanalyze on the whole container).
-
-After each run, inspect what it printed (it reports vision coverage:
-total / present / errored / missing per PDF) and whether it wrote `output.json`.
+```bash
+# 7. Confirm vectors + new fields landed (contract + null-rate checks)
+python scripts/smoke_test.py --config deploy.config.json --skip-run
+python scripts/audit_all_retrievable_fields.py --config deploy.config.json
+python scripts/index_query_guide.py --config deploy.config.json --demo
+```
 
 ### Print this REPORT block
 
 ```
-PREANALYZE_FLAGS: <paste the per-PDF/limit-related flags from --help>
-TEST_PDFS: <the 3 names + sizes you used>
-PDF_1: DI=<ok/fail>  VISION total/present/errored/missing=<n/n/n/n>  OUTPUT_JSON=<written/no>
-PDF_2: DI=<ok/fail>  VISION total/present/errored/missing=<n/n/n/n>  OUTPUT_JSON=<written/no>
-PDF_3: DI=<ok/fail>  VISION total/present/errored/missing=<n/n/n/n>  OUTPUT_JSON=<written/no>
-ANY_HTTP_400_OR_TEMPERATURE_ERROR: <yes/no>   <-- this is the key result; should be NO now
-OTHER_ERRORS: <paste any errors, or none>
+DEPLOY_SEARCH: <ok / error>
+INDEXER_STATUS: <success/transientFailure/failed>  processed=<n>  failed=<n>
+INDEXER_ERRORS: <paste first few, or none>
+PER_DOC COUNTS:
+  GD-GA-CTP.pdf  text/diagram/table/table_row/summary = <n/n/n/n/n>
+  GD-AS-DWM.pdf  text/diagram/table/table_row/summary = <n/n/n/n/n>
+  ED-EO-OPM.pdf  text/diagram/table/table_row/summary = <n/n/n/n/n>
+SMOKE_TEST: <pass/fail + key lines>
+AUDIT: <any critical/high findings, or clean>
+VECTOR_DEMO (index_query_guide): <did semantic+vector queries return results? yes/no>
+OTHER_ERRORS: <paste any, or none>
 ```
 
 If anything errors, stop and give me the error. Otherwise run everything and give me the REPORT block.
