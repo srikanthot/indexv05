@@ -2,8 +2,8 @@
   "_comment": "Copy to deploy.config.json and fill in identifiers for your existing Azure resources. Every script reads from this single file. NEVER commit deploy.config.json -- it is per-environment and is in .gitignore.",
 
   "functionApp": {
-    "name": "",
-    "resourceGroup": ""
+    "name": "<your-function-app-name>",
+    "resourceGroup": "<your-prod-resource-group>"
   },
 
   "search": {
@@ -11,12 +11,25 @@
     "artifactPrefix": "mm-manuals"
   },
 
+  "_modelProvider_comment": "Set to 'foundry' to use Azure AI Foundry for the chat/vision calls (this is what you deployed). Set to 'aoai' only if you use a classic Azure OpenAI resource. When 'foundry', the function app's summary/vision calls use the 'foundry' block below.",
+  "modelProvider": "foundry",
+
+  "foundry": {
+    "_comment": "Your Azure AI Foundry resource. Used by the FUNCTION APP for chat + vision (summary/diagram). Get these from the Foundry portal -> your project -> Endpoints/Keys. The key is fetched at runtime via 'az cognitiveservices account keys list' on the resource named in projectEndpoint's host.",
+    "projectEndpoint": "https://<your-foundry-resource>.services.ai.azure.us",
+    "resourceGroup": "<your-prod-resource-group>",
+    "chatModel": "<your-foundry-chat-deployment-name>",
+    "embedModel": "<your-foundry-embedding-deployment-name>",
+    "apiVersion": "2024-05-01-preview"
+  },
+
   "azureOpenAI": {
-    "endpoint": "https://<your-aoai>.openai.azure.us",
+    "_comment": "NOT a separate Azure OpenAI resource. This points at YOUR FOUNDRY resource's OpenAI-compatible endpoint. Azure AI Search's built-in embedding skill + query vectorizer only speak the Azure-OpenAI protocol, so they must use this .openai.azure.us endpoint. endpoint + embedDeployment are the ONLY fields that matter in foundry mode (they feed the search index vectorizer + embedding skillset). embedDeployment MUST be a 1536-dim model (text-embedding-ada-002) to match the index's text_vector field.",
+    "endpoint": "https://<your-foundry-resource>.openai.azure.us",
     "apiVersion": "2024-12-01-preview",
-    "chatDeployment": "gpt-4.1",
-    "visionDeployment": "gpt-4.1",
-    "embedDeployment": "text-embedding-ada-002"
+    "embedDeployment": "text-embedding-ada-002",
+    "chatDeployment": "",
+    "visionDeployment": ""
   },
 
   "documentIntelligence": {
@@ -25,6 +38,7 @@
   },
 
   "aiServices": {
+    "_comment": "The Cognitive/AI Services multi-service account the SKILLSET attaches to (for the DI Layout skill + built-in skills). Its subdomain URL.",
     "subdomainUrl": "https://<your-ai-services>.cognitiveservices.azure.us"
   },
 
@@ -34,7 +48,7 @@
   },
 
   "cosmos": {
-    "_comment": "Optional. If set, scripts persist run history + per-PDF state here so the Power BI dashboard can show progress. Leave blank to disable.",
+    "_comment": "Optional. If set, scripts persist run history + per-PDF state here (used by reconcile edit-detection and the dashboard). Leave blank to disable.",
     "endpoint": "https://<your-cosmos>.documents.azure.us:443/",
     "database": "indexing"
   },
