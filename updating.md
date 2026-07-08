@@ -1,53 +1,53 @@
-Hey Copilot — the indexer failed all 5 docs with "Web API skill response is invalid". That
-means the function app is crashing (HTTP 500) on every call — almost certainly the deployed
-app is missing one of the new shared files or is stale. Please do a CLEAN republish and re-run
-the indexer, then capture the result. Run the whole thing in PowerShell, in order. When it
-finishes, paste me the FULL output from STEP 4 and STEP 5 (that's what I need to see).
+Hey Copilot — the real indexer error is a Python NameError in the extract-page-label skill:
+"NameError: name 'retrieval_eligible' is not defined". The source SHOULD define that variable
+before using it, so either the local page_label.py is a truncated/partial copy, OR the server
+is running stale compiled bytecode. This script checks which, clears stale bytecode, does a
+forced clean redeploy, and re-runs the indexer. Run it all in PowerShell, in order, and paste
+me the output of every line that starts with "===".
 
-# ---- read config (no placeholders to fill) ----
 $cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
-$app = $cfg.functionApp.name
-$rg  = $cfg.functionApp.resourceGroup
+$app = $cfg.functionApp.name; $rg = $cfg.functionApp.resourceGroup
 $ep  = $cfg.search.endpoint.TrimEnd('/')
 $idx = "$($cfg.search.artifactPrefix)-index"
 $ixr = "$($cfg.search.artifactPrefix)-indexer"
-Write-Host "App=$app RG=$rg Index=$idx Indexer=$ixr"
 
-# ---- STEP 1: confirm the LOCAL function_app has ALL the new files (must print OK) ----
-python -c "import sys; sys.path.insert(0,'function_app'); import shared.page_label, shared.process_table, shared.diagram, shared.summary, shared.content_classifiers, shared.procedures, shared.prompt_safety, shared.aoai; print('ALL skill modules import OK')"
-# If this does NOT print 'ALL skill modules import OK', STOP and tell me which import failed
-# (a file is missing or corrupt locally and must be re-copied before publishing).
+# === CHECK A: is the retrieval_eligible DEFINITION present in the local file? ===
+$hit = Select-String -Path function_app/shared/page_label.py -Pattern 'retrieval_eligible = bool\('
+if ($hit) { Write-Host "=== A: DEFINITION PRESENT at line $($hit.LineNumber) ===" }
+else       { Write-Host "=== A: DEFINITION MISSING -- page_label.py is a BAD/partial copy. STOP: re-copy page_label.py from the branch (use the Raw button, Ctrl+A, Ctrl+C), then rerun this script. ===" }
 
-# ---- STEP 2: clean republish of the function code + set the working api-version ----
+# === CHECK B: does the local code actually run end to end? ===
+Write-Host "=== B: running test_unit ==="
+python tests/test_unit.py 2>&1 | Select-String "Results:"
+# If A says MISSING, or B does not print "Results: 291/294 passed", STOP here and re-copy
+# page_label.py from the branch. Do NOT deploy a bad file.
+
+# === STEP C: delete stale compiled bytecode so no old .pyc gets shipped ===
+Get-ChildItem -Path function_app -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host "=== C: cleared __pycache__ ==="
+
+# === STEP D: forced clean republish (restart -> publish -> restart again to reload) ===
 az functionapp restart -g $rg -n $app
-Start-Sleep -Seconds 60
-az functionapp config appsettings set -g $rg -n $app --settings FOUNDRY_API_VERSION=2024-10-21
-Write-Host ("AOAI_ENDPOINT = " + (az functionapp config appsettings list -g $rg -n $app --query "[?name=='AOAI_ENDPOINT'].value" -o tsv))
+Start-Sleep -Seconds 45
 Push-Location function_app
 func azure functionapp publish $app --python --build remote
 Pop-Location
-Start-Sleep -Seconds 60   # let the app warm up after publish
+az functionapp restart -g $rg -n $app
+Start-Sleep -Seconds 60
+Write-Host "=== D: republished + restarted ==="
 
-# ---- STEP 3: redeploy search + reset + re-run the indexer (no preanalyze, no heal loop) ----
+# === STEP E: reset + re-run the indexer ===
 python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze --skip-heal-loop
 
-# ---- STEP 4: wait, then capture the indexer result + errors ----
+# === STEP F: wait, then capture the result ===
 Start-Sleep -Seconds 240
 $tok = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
 $st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
-Write-Host "=== INDEXER STATUS ==="
-Write-Host ("lastResult status : " + $st.lastResult.status)
-Write-Host ("items processed   : " + $st.lastResult.itemsProcessed)
-Write-Host ("items failed      : " + $st.lastResult.itemsFailed)
-Write-Host "=== FIRST 3 ERRORS (this is the key part) ==="
-$st.lastResult.errors   | Select-Object -First 3 | Format-List
-Write-Host "=== FIRST 3 WARNINGS ==="
-$st.lastResult.warnings | Select-Object -First 3 | Format-List
-# NOTE: if 'lastResult status' says 'inProgress', wait another 3-4 minutes and re-run STEP 4.
-
-# ---- STEP 5: how many docs actually landed in the index ----
+Write-Host "=== F STATUS: $($st.lastResult.status)  processed=$($st.lastResult.itemsProcessed)  failed=$($st.lastResult.itemsFailed) ==="
+Write-Host "=== F FIRST ERRORS ==="
+$st.lastResult.errors | Select-Object -First 2 | Format-List
 $body = '{"search":"*","count":true,"top":0}'
 $cnt  = Invoke-RestMethod -Method Post -Uri "$ep/indexes/$idx/docs/search?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok"; "Content-Type" = "application/json" } -Body $body
-Write-Host ("=== TOTAL DOCS IN INDEX: " + $cnt.'@odata.count' + " ===")
+Write-Host "=== F TOTAL DOCS IN INDEX: $($cnt.'@odata.count') ==="
 
-# Paste me EVERYTHING printed by STEP 4 and STEP 5.
+# Paste me every "===" line, especially CHECK A, CHECK B, and STEP F.
