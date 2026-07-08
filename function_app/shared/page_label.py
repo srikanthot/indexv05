@@ -489,6 +489,7 @@ def _derived_for(source_path: str) -> dict[str, Any]:
         derived: dict[str, Any] = {
             "cover_meta": {"document_revision": "", "effective_date": "", "document_number": ""},
             "min_conf_by_page": {},
+            "num_min_conf_by_page": {},
             "paragraphs_by_page": {},
             "pagenumber_by_page": {},
             "pagefurniture_by_page": {},
@@ -537,6 +538,12 @@ def _derived_for(source_path: str) -> dict[str, Any]:
             # Per-page min OCR confidence — once per PDF.
             di_pages = result.get("pages") or []
             min_by_page: dict[int, float | None] = {}
+            # Separate tracker for the worst OCR confidence among NUMERIC words
+            # (any word containing a digit). A mis-read NUMBER -- 240 vs 440,
+            # a torque, a clearance -- is what actually harms a lineman; a shaky
+            # prose word does not. Flagging on numbers makes low_confidence_ocr
+            # a targeted safety signal instead of 99% noise.
+            num_min_by_page: dict[int, float | None] = {}
             # DI line polygons — tight, render-aligned highlight units (finer
             # than paragraph boxes). Built once per PDF while the raw analysis
             # is still resident (it gets slimmed below). Used by
@@ -547,12 +554,19 @@ def _derived_for(source_path: str) -> dict[str, Any]:
                 if not isinstance(pn, int) or pn <= 0:
                     continue
                 min_conf: float | None = None
+                num_min: float | None = None
                 for word in (page.get("words") or []):
                     conf = word.get("confidence")
                     if isinstance(conf, (int, float)):
-                        if min_conf is None or conf < min_conf:
-                            min_conf = float(conf)
+                        c = float(conf)
+                        if min_conf is None or c < min_conf:
+                            min_conf = c
+                        content = word.get("content") or ""
+                        if any(ch.isdigit() for ch in content):
+                            if num_min is None or c < num_min:
+                                num_min = c
                 min_by_page[pn] = min_conf
+                num_min_by_page[pn] = num_min
                 for line in (page.get("lines") or []):
                     lc = (line.get("content") or "").strip()
                     if not lc:
@@ -564,6 +578,7 @@ def _derived_for(source_path: str) -> dict[str, Any]:
                     if bb is not None:
                         line_candidates.append((ln, pn, bb))
             derived["min_conf_by_page"] = min_by_page
+            derived["num_min_conf_by_page"] = num_min_by_page
             derived["text_bbox_lines"] = line_candidates
             # Store page dimensions so _page_dimensions_for / _pdf_total_pages_for
             # can read from derived cache without the raw analysis.
@@ -1083,6 +1098,29 @@ def _ocr_min_confidence_for_pages(source_path: str, pages: list[int] | None) -> 
         if min_conf is None or c < min_conf:
             min_conf = c
     return round(min_conf, 4) if min_conf is not None else None
+
+
+def _numeric_ocr_min_for_pages(source_path: str, pages: list[int] | None) -> float | None:
+    """Worst OCR confidence among NUMERIC words on `pages` (None if no numeric
+    words / no confidence data). This is the safety-relevant OCR signal: a
+    mis-read number (240 vs 440, a torque, a clearance) is what harms a lineman,
+    so we flag on shaky NUMBERS, not shaky prose."""
+    if not source_path or not pages:
+        return None
+    page_set = {p for p in pages if isinstance(p, int)}
+    if not page_set:
+        return None
+    num_by_page = _derived_for(source_path).get("num_min_conf_by_page") or {}
+    if not num_by_page:
+        return None
+    m: float | None = None
+    for pn in page_set:
+        c = num_by_page.get(pn)
+        if c is None:
+            continue
+        if m is None or c < m:
+            m = c
+    return round(m, 4) if m is not None else None
  
  
 def _footnotes_for_pages(source_path: str, pages: list[int] | None) -> list[str]:
@@ -2289,14 +2327,17 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         source_file=source_file,
     )
 
-    # OCR-confidence gate — was computed and never consumed. A low worst-case
-    # word confidence means a digit could be mis-read (240 vs 440), so flag it
-    # for the chatbot to distrust / caveat.
-    # Per-chunk MINIMUM word confidence < floor => flag. 0.85 flagged ~99% of
-    # scanned-manual chunks (one weak word trips a whole chunk), making the flag
-    # useless; 0.6 flags only genuinely poor OCR. Tune via OCR_CONFIDENCE_FLOOR.
-    _ocr_floor = float(optional_env("OCR_CONFIDENCE_FLOOR", "0.6"))
-    low_confidence_ocr = bool(ocr_min_conf is not None and ocr_min_conf < _ocr_floor)
+    # OCR-confidence gate. SAFETY-TARGETED: flag a chunk when a NUMERIC token on
+    # its pages was OCR'd with low confidence -- a mis-read number (240 vs 440, a
+    # torque, a clearance) is the value that harms a lineman, whereas a shaky
+    # prose word is not. We use a HIGH bar for numbers (default 0.90) because a
+    # wrong number is potentially fatal, and numbers are rare enough that this
+    # stays a meaningful signal (not the 99% noise the whole-chunk min produced).
+    # `ocr_min_confidence` (raw per-chunk min) is still emitted for reference.
+    # Tune the numeric bar via NUMERIC_OCR_FLOOR.
+    _num_floor = float(optional_env("NUMERIC_OCR_FLOOR", "0.90"))
+    num_ocr_min = _numeric_ocr_min_for_pages(source_path, pages_covered)
+    low_confidence_ocr = bool(num_ocr_min is not None and num_ocr_min < _num_floor)
 
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),

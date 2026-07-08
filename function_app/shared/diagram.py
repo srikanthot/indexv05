@@ -629,7 +629,10 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         # B5: capture each OCR callout token as a discrete value (was one blob).
         record["figure_callouts"] = _parse_figure_callouts(safe_str(record.get("diagram_ocr_text")))
         record["figure_number"] = safe_str(record.get("figure_ref"))
-        record["figure_title"] = safe_str(record.get("caption"))
+        # Title = the DI-extracted caption (in scope here; it isn't stored on the
+        # record). Stays empty for figures DI gave no caption — honest, not every
+        # figure has one; figure_number + figure_callouts still identify it.
+        record["figure_title"] = caption
         # B5: real figure_step_linked — True only when the figure sits inside a
         # numbered procedure (surrounding text has steps), not merely when a
         # figure_ref exists. Confidence scaled by the strength of the signal.
