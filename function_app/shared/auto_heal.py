@@ -67,9 +67,20 @@ def _max_blobs_per_run() -> int:
         return 20
  
  
-def _list_done_source_files(search_endpoint: str, index_name: str) -> set[str]:
-    """Return source_file values that have a `summary` record in the index.
-    Paginates through all results so corpora >1000 PDFs are fully covered."""
+# processing_status values that mean a document lost figures/tables or was
+# only partially processed — such a doc must NOT count as "done" even if a
+# summary record exists, so the heal loop re-processes it.
+_LOSS_STATUSES = (
+    "needs_preanalyze_output",
+    "all_figures_dropped",
+    "partial_figure_loss",
+    "partial_vision",
+)
+
+
+def _query_source_files(search_endpoint: str, index_name: str, filter_expr: str) -> set[str]:
+    """Return the set of distinct source_file values matching an OData filter.
+    Paginates so corpora >1000 PDFs are fully covered."""
     token = bearer_token(SEARCH_SCOPE)
     url = f"{search_endpoint.rstrip('/')}/indexes/{index_name}/docs/search?api-version={_SEARCH_API_VERSION}"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
@@ -78,7 +89,7 @@ def _list_done_source_files(search_endpoint: str, index_name: str) -> set[str]:
     while True:
         body = {
             "search": "*",
-            "filter": "record_type eq 'summary'",
+            "filter": filter_expr,
             "select": "source_file",
             "top": 1000,
             "skip": skip,
@@ -98,6 +109,28 @@ def _list_done_source_files(search_endpoint: str, index_name: str) -> set[str]:
             break
         skip += 1000
     return out
+
+
+def _list_done_source_files(search_endpoint: str, index_name: str) -> set[str]:
+    """Return source_file values that are FULLY done.
+
+    Previously: any file with a `summary` record counted as done — so a PDF
+    that lost all its figures/tables (but still produced a one-line summary)
+    was silently treated as complete and never re-healed. Now a file is done
+    only if it has a summary AND carries NO loss/partial processing_status on
+    any of its records. Lossy files fall out of the done set and get
+    re-processed by the heal loop."""
+    done = _query_source_files(search_endpoint, index_name, "record_type eq 'summary'")
+    loss_filter = " or ".join(f"processing_status eq '{s}'" for s in _LOSS_STATUSES)
+    lossy = _query_source_files(search_endpoint, index_name, loss_filter)
+    if lossy:
+        logging.warning(
+            "auto_heal: %d source_file(s) have a summary but carry a loss status "
+            "(%s) — excluding from 'done' so they re-process: %s",
+            len(lossy & done), ", ".join(_LOSS_STATUSES),
+            sorted(lossy & done)[:10],
+        )
+    return done - lossy
  
  
 def _list_pdfs_in_container(storage_account: str, container: str) -> list[dict[str, Any]]:

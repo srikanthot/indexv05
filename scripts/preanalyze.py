@@ -192,6 +192,13 @@ def _get_foundry_key(cfg: dict) -> str:
  
  
 def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int = 3) -> dict:
+    # Injection defense: harden the system prompt + fence the untrusted,
+    # document-derived user_text so hidden page instructions can't hijack it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
+    from shared.prompt_safety import UNTRUSTED_CONTENT_INSTRUCTION, wrap_untrusted
+    system_prompt = VISION_SYSTEM_PROMPT + UNTRUSTED_CONTENT_INSTRUCTION
+    user_text = wrap_untrusted(user_text, "figure caption and context")
+
     provider = _model_provider(cfg)
     if provider == "foundry":
         fcfg = cfg.get("foundry") or {}
@@ -209,7 +216,7 @@ def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int
  
     body = {
         "messages": [
-            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": [
                 {"type": "text", "text": user_text},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
@@ -850,8 +857,17 @@ def _is_pdf_done(cfg: dict, pdf_name: str) -> bool:
     # them all" case (decorative borders, table edges, page-number
     # graphics, etc.) — common for PDFs that are tables+text only.
     status = out.get("processing_status") or ""
-    if status in ("ok", "di_missed_images", "partial_vision"):
+    if status in ("ok", "di_missed_images"):
         return True
+    # partial_vision = some figures failed vision enrichment (often transient
+    # API errors). Treat as NOT fully done so the heal loop retries to COMPLETE
+    # them — bounded by --heal-max-iterations, so it can't loop forever. This
+    # stops a partially-enriched PDF being silently accepted as complete.
+    # Operators who want to accept partials can set ACCEPT_PARTIAL_VISION=true.
+    if status == "partial_vision":
+        if os.environ.get("ACCEPT_PARTIAL_VISION", "").strip().lower() in ("1", "true", "yes"):
+            return True
+        return False
  
     # Fallback: older output.json files predating processing_status.
     enriched_count = len(out.get("enriched_figures") or [])

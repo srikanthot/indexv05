@@ -238,9 +238,32 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         row_quality["suggested_for_eval_question"] = bool(
             row_retrieval and row_quality.get("suggested_for_eval_question")
         )
-        row_cells = [p.strip() for p in row_text.split(";") if p.strip()]
-        if row_cells and not table_columns:
-            table_columns = [p.split(":", 1)[0].strip() for p in row_cells if ":" in p]
+        # Structured, collision-free cell binding. The row builder now passes
+        # grid-bound header/value lists, so we must NOT re-parse row_text on
+        # ':'/';' — a value like a "3:1" ratio or "1:00" time would otherwise
+        # be mis-split and re-bound to the wrong column.
+        cell_headers = raw_row.get("cell_headers") or []
+        cell_values = raw_row.get("cell_values") or []
+        all_headers = [h for h in (raw_row.get("all_headers") or []) if h]
+        if cell_headers and cell_values:
+            row_cells = [
+                (f"{h}: {v}" if h else v) for h, v in zip(cell_headers, cell_values)
+            ]
+            if all_headers:
+                # Prefer real column names over the generic "column_N" set.
+                table_columns = all_headers
+        else:
+            # Backward-compat for older cached output.json without structured
+            # cells: best-effort parse (may mis-split ':'/';' values).
+            row_cells = [p.strip() for p in row_text.split(";") if p.strip()]
+            if row_cells and not table_columns:
+                table_columns = [p.split(":", 1)[0].strip() for p in row_cells if ":" in p]
+        # Per-row applicability + hazard tags (safety numbers live in rows).
+        from .content_classifiers import enrich as _enrich_tags
+        from .semantic import _extract_callouts as _row_callouts_fn
+        _row_headers = [x for x in (h1, h2, h3, caption) if x and x.strip()]
+        _row_callouts = _row_callouts_fn(row_text)
+        _row_tags = _enrich_tags(row_text, headers=_row_headers, callouts=_row_callouts)
         row_records.append({
             "chunk_id": row_chunk_id,
             "parent_id": parent_id,
@@ -289,9 +312,16 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
                 if row_retrieval
                 else "ineligible_row_quality_or_missing_header_or_page"
             ),
-            "applies_to_equipment": [],
+            "applies_to_equipment": _row_tags["applies_to_equipment"],
             "applies_to_system": [x for x in [h1.strip(), h2.strip()] if x],
-            "applies_to_voltage": [],
+            "applies_to_voltage": _row_tags["applies_to_voltage"],
+            "applies_to_domain": _row_tags["applies_to_domain"],
+            "hazard_class": _row_tags["hazard_class"],
+            "criticality": _row_tags["criticality"],
+            "is_prohibition": _row_tags["is_prohibition"],
+            "prohibitions": _row_tags["prohibitions"],
+            "governing_callouts": _row_callouts,
+            "safety_callout": bool(_row_callouts),
             "procedure_id": "",
             "procedure_step_id": "",
             "procedure_step_order": None,
@@ -327,6 +357,15 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     content_hash = chunk_content_hash(markdown, length=16)
     # cover_meta, embedding_ver, indexed_at already computed above
     # (before the row-records loop). Reused here for the parent record.
+
+    # Applicability + hazard tags for the parent table (was 0% / hardcoded []).
+    from .content_classifiers import enrich as _enrich_tags
+    from .semantic import _extract_callouts, extract_callout_keywords
+    _tbl_headers = [x for x in (h1, h2, h3) if x and x.strip()]
+    _tbl_text = " ".join([caption or "", markdown or ""])
+    _tbl_callouts = _extract_callouts(markdown)
+    _tbl_tags = _enrich_tags(_tbl_text, headers=_tbl_headers, callouts=_tbl_callouts)
+    _tbl_callout_keywords = extract_callout_keywords(markdown)
  
     return {
         "chunk_id": chunk_id,
@@ -368,6 +407,8 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "table_row_cells": [],
         "table_header_rows_count": 1,
         "table_integrity_score": table_integrity_score,
+        "table_rows_truncated": bool(data.get("rows_truncated")),
+        "table_rows_suppressed_count": safe_int(data.get("rows_suppressed_count"), default=0),
         "content_role": "actual_content",
         "content_class": "table_content",
         "retrieval_eligible_reason": (
@@ -379,9 +420,17 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             )
             else "ineligible_missing_header_or_page_or_cluster"
         ),
-        "applies_to_equipment": [],
+        "applies_to_equipment": _tbl_tags["applies_to_equipment"],
         "applies_to_system": [x for x in [h1.strip(), h2.strip()] if x],
-        "applies_to_voltage": [],
+        "applies_to_voltage": _tbl_tags["applies_to_voltage"],
+        "applies_to_domain": _tbl_tags["applies_to_domain"],
+        "hazard_class": _tbl_tags["hazard_class"],
+        "criticality": _tbl_tags["criticality"],
+        "is_prohibition": _tbl_tags["is_prohibition"],
+        "prohibitions": _tbl_tags["prohibitions"],
+        "governing_callouts": _tbl_callouts,
+        "callouts": _tbl_callout_keywords,
+        "safety_callout": bool(_tbl_callout_keywords),
         "procedure_id": "",
         "procedure_step_id": "",
         "procedure_step_order": None,

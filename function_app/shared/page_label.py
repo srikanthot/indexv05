@@ -493,6 +493,7 @@ def _derived_for(source_path: str) -> dict[str, Any]:
             "pagenumber_by_page": {},
             "pagefurniture_by_page": {},
             "text_bbox_paragraphs": [],
+            "text_bbox_lines": [],
         }
         if result:
             # Cover metadata — built once, reused across every chunk.
@@ -536,6 +537,11 @@ def _derived_for(source_path: str) -> dict[str, Any]:
             # Per-page min OCR confidence — once per PDF.
             di_pages = result.get("pages") or []
             min_by_page: dict[int, float | None] = {}
+            # DI line polygons — tight, render-aligned highlight units (finer
+            # than paragraph boxes). Built once per PDF while the raw analysis
+            # is still resident (it gets slimmed below). Used by
+            # _line_level_bboxes_for_chunk for exact-to-the-chunk highlights.
+            line_candidates: list[tuple[str, int, tuple[float, float, float, float]]] = []
             for page in di_pages:
                 pn = page.get("pageNumber")
                 if not isinstance(pn, int) or pn <= 0:
@@ -547,7 +553,18 @@ def _derived_for(source_path: str) -> dict[str, Any]:
                         if min_conf is None or conf < min_conf:
                             min_conf = float(conf)
                 min_by_page[pn] = min_conf
+                for line in (page.get("lines") or []):
+                    lc = (line.get("content") or "").strip()
+                    if not lc:
+                        continue
+                    ln = _normalize_text(lc)
+                    if not ln or len(ln) < 8:
+                        continue
+                    bb = _bbox_from_polygon(line.get("polygon") or [])
+                    if bb is not None:
+                        line_candidates.append((ln, pn, bb))
             derived["min_conf_by_page"] = min_by_page
+            derived["text_bbox_lines"] = line_candidates
             # Store page dimensions so _page_dimensions_for / _pdf_total_pages_for
             # can read from derived cache without the raw analysis.
             page_dims: dict[int, tuple[float, float, str]] = {}
@@ -1264,6 +1281,57 @@ def _text_line_bboxes_for_chunk(
     return out
  
  
+def _line_level_bboxes_for_chunk(
+    chunk_text: str,
+    source_path: str,
+    allowed_pages: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Exact-to-the-chunk highlight boxes from DI's per-LINE polygons.
+
+    For each DI text line whose normalized content is contained in this chunk,
+    return that line's tight polygon box. This is far more precise than the
+    paragraph-union approach: a chunk that is only a slice of a large paragraph
+    now highlights just its own lines, not the whole paragraph (the #1 highlight
+    complaint). Returns [] when no line data matches — callers then fall back to
+    the paragraph matcher, so highlights are never worse than before.
+
+    Output shape matches _text_line_bboxes_for_chunk:
+    {page, x_in, y_in, w_in, h_in, confidence, reading_order}.
+    """
+    if not chunk_text or not source_path:
+        return []
+    lines = _derived_for(source_path).get("text_bbox_lines") or []
+    if not lines:
+        return []
+    chunk_norm = _normalize_text(chunk_text)
+    if not chunk_norm:
+        return []
+    page_filter: set[int] | None = set(allowed_pages) if allowed_pages else None
+
+    per_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    for line_norm, page, bb in lines:
+        if page_filter is not None and page not in page_filter:
+            continue
+        # Substring match of the (>=8 char) normalized line inside the chunk.
+        if line_norm in chunk_norm:
+            per_page.setdefault(page, []).append(bb)
+
+    out: list[dict[str, Any]] = []
+    for page in sorted(per_page):
+        ordered = sorted(per_page[page], key=lambda b: (b[1], b[0]))
+        for idx, b in enumerate(ordered, start=1):
+            out.append({
+                "page": page,
+                "x_in": round(float(b[0]), 3),
+                "y_in": round(float(b[1]), 3),
+                "w_in": round(float(b[2]), 3),
+                "h_in": round(float(b[3]), 3),
+                "confidence": 0.9,
+                "reading_order": idx,
+            })
+    return out
+
+
 def _chunk_bboxes_from_line_bboxes(line_bboxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge line/fragment boxes into one per-page chunk bbox."""
     if not line_bboxes:
@@ -2052,26 +2120,44 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     if not text_bbox_list and start_page is not None:
         text_bbox_list = [_whole_page_bbox(source_path, start_page)]
  
+    # B4: prefer DI line-level precision. When DI line polygons match this
+    # chunk, use them for BOTH line_bboxes (per-line) and a tightened text_bbox
+    # (per-page union of the matched lines) — so the highlight hugs the actual
+    # chunk text instead of the enclosing paragraphs. Fall back to the
+    # paragraph matcher when no lines match, so we never regress.
+    _allowed = sorted(final_pages) if final_pages else None
+    _line_level = _line_level_bboxes_for_chunk(page_text, source_path, allowed_pages=_allowed)
+    if _line_level:
+        line_bboxes_list = _line_level
+        _tight = _chunk_bboxes_from_line_bboxes(_line_level)
+        if _tight:
+            text_bbox_list = [
+                {
+                    "page": b["page"], "x_in": b["x_in"], "y_in": b["y_in"],
+                    "w_in": b["w_in"], "h_in": b["h_in"],
+                }
+                for b in _tight
+            ]
+    else:
+        line_bboxes_list = _text_line_bboxes_for_chunk(
+            page_text, source_path, allowed_pages=_allowed,
+        )
+        if not line_bboxes_list and text_bbox_list:
+            line_bboxes_list = [
+                {
+                    "page": b.get("page"),
+                    "x_in": b.get("x_in"),
+                    "y_in": b.get("y_in"),
+                    "w_in": b.get("w_in"),
+                    "h_in": b.get("h_in"),
+                    "confidence": 0.75,
+                    "reading_order": i + 1,
+                }
+                for i, b in enumerate(text_bbox_list)
+                if isinstance(b, dict)
+            ]
+
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
-    line_bboxes_list = _text_line_bboxes_for_chunk(
-        page_text,
-        source_path,
-        allowed_pages=sorted(final_pages) if final_pages else None,
-    )
-    if not line_bboxes_list and text_bbox_list:
-        line_bboxes_list = [
-            {
-                "page": b.get("page"),
-                "x_in": b.get("x_in"),
-                "y_in": b.get("y_in"),
-                "w_in": b.get("w_in"),
-                "h_in": b.get("h_in"),
-                "confidence": 0.75,
-                "reading_order": i + 1,
-            }
-            for i, b in enumerate(text_bbox_list)
-            if isinstance(b, dict)
-        ]
     chunk_bboxes_list = _chunk_bboxes_from_line_bboxes(line_bboxes_list)
     line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
     chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
@@ -2155,7 +2241,58 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         else "ineligible_missing_header_or_page_or_status"
     )
     applies_to_system = [x for x in [h1_in.strip(), h2_in.strip()] if x]
- 
+
+    # --- Safety-critical enrichment (applicability / hazard / procedure) ---
+    # Imported lazily to keep the import graph flat and avoid any circulars.
+    from .content_classifiers import (
+        classify_domain,
+        classify_equipment,
+        classify_hazard,
+        compute_criticality,
+        detect_prohibitions,
+        extract_applies_to_voltage,
+    )
+    from .procedures import parse_procedure
+    from .semantic import _extract_callouts
+
+    _headers = [h for h in (h1_in, h2_in, h3_in) if h and h.strip()]
+
+    # Applicability tags — the anti-contamination scoping signals. Voltage and
+    # domain were 0% before; equipment was a raw-tag alias. `equipment_ids`
+    # (raw tag strings) stays in its own field; `applies_to_equipment` now
+    # holds real equipment CLASSES.
+    applies_to_voltage = extract_applies_to_voltage(page_text)
+    applies_to_equipment = classify_equipment(page_text, equipment_ids, _headers)
+    applies_to_domain = classify_domain(page_text, _headers, taxonomy=None)
+
+    # Governing callouts — section-scoped so a step inherits a WARNING/DANGER
+    # that sits in a sibling chunk of the same section (fixes the split-warning
+    # kill-path). Falls back to chunk-local when there's no section text.
+    governing_callouts = _extract_callouts(section_content) or _extract_callouts(page_text)
+
+    hazard_class = classify_hazard(page_text, callouts=governing_callouts, headers=_headers)
+    prohibitions = detect_prohibitions(page_text)
+    is_prohibition_flag = bool(prohibitions)
+    criticality = compute_criticality(
+        hazard_class,
+        has_callouts=bool(callout_keywords) or bool(governing_callouts),
+        has_prohibition=is_prohibition_flag,
+    )
+
+    procedure = parse_procedure(
+        page_text=page_text,
+        section_content=section_content,
+        headers=_headers,
+        source_path=source_path,
+        source_file=source_file,
+    )
+
+    # OCR-confidence gate — was computed and never consumed. A low worst-case
+    # word confidence means a digit could be mis-read (240 vs 440), so flag it
+    # for the chatbot to distrust / caveat.
+    _ocr_floor = float(optional_env("OCR_CONFIDENCE_FLOOR", "0.85"))
+    low_confidence_ocr = bool(ocr_min_conf is not None and ocr_min_conf < _ocr_floor)
+
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
         "parent_id": parent_id_for(source_path, source_file),
@@ -2181,13 +2318,19 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "page_width_in": round(float(page_width_in), 3),
         "page_height_in": round(float(page_height_in), 3),
         "bbox_padding_hint_in": 0.05,
-        "bbox_version": "2.0.0",
+        "bbox_version": "2.1.0",
         "pdf_total_pages": pdf_total_pages,
         "page_resolution_method": page_resolution_method,
         "callouts": callout_keywords,
         "safety_callout": bool(callout_keywords),
+        "governing_callouts": governing_callouts,
+        "hazard_class": hazard_class,
+        "criticality": criticality,
+        "is_prohibition": is_prohibition_flag,
+        "prohibitions": prohibitions,
         "footnotes": footnotes_list,
         "ocr_min_confidence": ocr_min_conf,
+        "low_confidence_ocr": low_confidence_ocr,
         "document_revision": cover_meta["document_revision"],
         "effective_date": cover_meta["effective_date"],
         "document_number": cover_meta["document_number"],
@@ -2203,13 +2346,19 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "chunk_quality_score": quality_score,
         "content_class": content_class,
         "retrieval_eligible_reason": retrieval_reason,
-        "applies_to_equipment": equipment_ids,
+        "applies_to_equipment": applies_to_equipment,
         "applies_to_system": applies_to_system,
-        "applies_to_voltage": [],
-        "procedure_id": "",
-        "procedure_step_id": "",
-        "procedure_step_order": None,
-        "procedure_branch_label": "",
+        "applies_to_voltage": applies_to_voltage,
+        "applies_to_domain": applies_to_domain,
+        "procedure_id": procedure["procedure_id"],
+        "procedure_title": procedure["procedure_title"],
+        "procedure_step_id": procedure["procedure_step_id"],
+        "procedure_step_order": procedure["procedure_step_order"],
+        "procedure_step_text": procedure["procedure_step_text"],
+        "procedure_step_count": procedure["procedure_step_count"],
+        "procedure_branch_label": procedure["procedure_branch_label"],
+        "chunk_prev_id": "",
+        "chunk_next_id": "",
         "figure_step_linked": False,
         "figure_linkage_confidence": 0.0,
         "locator_type": "none",

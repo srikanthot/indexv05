@@ -231,12 +231,21 @@ def lookup_existing_by_phash(image_phash: str) -> dict[str, Any] | None:
     if not safe_phash:
         return None
  
+    # Scope cross-parent reuse to CONTEXT-INDEPENDENT figure categories only.
+    # A nameplate/equipment-photo carries the same meaning in any manual, so
+    # reusing its description across parents is safe. A schematic/wiring/circuit
+    # diagram does NOT — the same-looking figure can mean different things in a
+    # different manual, and reusing another manual's caption would be actively
+    # misleading (wrong-manual contamination at the figure level). Restrict to
+    # the safe categories so an enabled cross-parent cache can't graft a
+    # foreign schematic's description onto this figure.
     body = {
         "search": "*",
         "filter": (
             f"record_type eq 'diagram' "
             f"and image_phash eq '{_odata_escape(safe_phash)}' "
-            f"and processing_status eq 'ok'"
+            f"and processing_status eq 'ok' "
+            f"and (diagram_category eq 'nameplate' or diagram_category eq 'equipment_photo')"
         ),
         "select": ",".join(SELECT_FIELDS),
         "top": 1,
