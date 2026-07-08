@@ -1,36 +1,53 @@
-Hey Copilot — the deploy got through RBAC fine, but the "Deploy Function App code" step
-failed with: `Error Uploading archive... (ServiceUnavailable)`. That's a transient 503,
-almost certainly because the function app was mid-restart (bootstrap had just changed app
-settings) when the code upload hit it. Please just fix THIS step — restart the app, wait for
-it to settle, and publish the code directly. Do NOT run deploy.py or preanalyze; I'll run
-the rest myself once the code is published.
+Hey Copilot — the indexer failed all 5 docs with "Web API skill response is invalid". That
+means the function app is crashing (HTTP 500) on every call — almost certainly the deployed
+app is missing one of the new shared files or is stale. Please do a CLEAN republish and re-run
+the indexer, then capture the result. Run the whole thing in PowerShell, in order. When it
+finishes, paste me the FULL output from STEP 4 and STEP 5 (that's what I need to see).
 
-Run these in PowerShell, in order. Stop and tell me the result of the publish.
-
-# 1) Read the app name + resource group from config (nothing to fill in)
+# ---- read config (no placeholders to fill) ----
 $cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
 $app = $cfg.functionApp.name
 $rg  = $cfg.functionApp.resourceGroup
-Write-Host "App: $app   RG: $rg"
+$ep  = $cfg.search.endpoint.TrimEnd('/')
+$idx = "$($cfg.search.artifactPrefix)-index"
+$ixr = "$($cfg.search.artifactPrefix)-indexer"
+Write-Host "App=$app RG=$rg Index=$idx Indexer=$ixr"
 
-# 2) Restart the function app and let it settle (this is what fixes the 503)
+# ---- STEP 1: confirm the LOCAL function_app has ALL the new files (must print OK) ----
+python -c "import sys; sys.path.insert(0,'function_app'); import shared.page_label, shared.process_table, shared.diagram, shared.summary, shared.content_classifiers, shared.procedures, shared.prompt_safety, shared.aoai; print('ALL skill modules import OK')"
+# If this does NOT print 'ALL skill modules import OK', STOP and tell me which import failed
+# (a file is missing or corrupt locally and must be re-copied before publishing).
+
+# ---- STEP 2: clean republish of the function code + set the working api-version ----
 az functionapp restart -g $rg -n $app
 Start-Sleep -Seconds 60
-
-# 3) Confirm the app is running before we upload
-az functionapp show -g $rg -n $app --query state -o tsv
-# ^ must print "Running". If not, wait another 60s and re-check before continuing.
-
-# 4) Publish the function code DIRECTLY (bypasses the fragile deploy_function.ps1 wrapper,
-#    and lets func do its own upload retries). Runs from the function_app folder where
-#    host.json lives.
+az functionapp config appsettings set -g $rg -n $app --settings FOUNDRY_API_VERSION=2024-10-21
+Write-Host ("AOAI_ENDPOINT = " + (az functionapp config appsettings list -g $rg -n $app --query "[?name=='AOAI_ENDPOINT'].value" -o tsv))
 Push-Location function_app
 func azure functionapp publish $app --python --build remote
 Pop-Location
+Start-Sleep -Seconds 60   # let the app warm up after publish
 
-# Expected: it ends by listing the deployed functions (should be 8). Tell me that it
-# succeeded and how many functions registered.
-#
-# If it fails AGAIN with the same "ServiceUnavailable" 503: wait ~2-3 minutes (Gov
-# transient) and re-run ONLY step 4 — `func ... publish` is safe to repeat. If it keeps
-# failing after 2-3 tries, paste me the full error and stop.
+# ---- STEP 3: redeploy search + reset + re-run the indexer (no preanalyze, no heal loop) ----
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze --skip-heal-loop
+
+# ---- STEP 4: wait, then capture the indexer result + errors ----
+Start-Sleep -Seconds 240
+$tok = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
+$st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
+Write-Host "=== INDEXER STATUS ==="
+Write-Host ("lastResult status : " + $st.lastResult.status)
+Write-Host ("items processed   : " + $st.lastResult.itemsProcessed)
+Write-Host ("items failed      : " + $st.lastResult.itemsFailed)
+Write-Host "=== FIRST 3 ERRORS (this is the key part) ==="
+$st.lastResult.errors   | Select-Object -First 3 | Format-List
+Write-Host "=== FIRST 3 WARNINGS ==="
+$st.lastResult.warnings | Select-Object -First 3 | Format-List
+# NOTE: if 'lastResult status' says 'inProgress', wait another 3-4 minutes and re-run STEP 4.
+
+# ---- STEP 5: how many docs actually landed in the index ----
+$body = '{"search":"*","count":true,"top":0}'
+$cnt  = Invoke-RestMethod -Method Post -Uri "$ep/indexes/$idx/docs/search?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok"; "Content-Type" = "application/json" } -Body $body
+Write-Host ("=== TOTAL DOCS IN INDEX: " + $cnt.'@odata.count' + " ===")
+
+# Paste me EVERYTHING printed by STEP 4 and STEP 5.
