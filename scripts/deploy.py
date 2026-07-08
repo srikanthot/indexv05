@@ -100,6 +100,13 @@ def main() -> int:
     ap.add_argument("--skip-preanalyze", action="store_true",
                     help="Skip step 2 (preanalyze). Use if all PDFs already "
                          "have a complete _dicache/ entry.")
+    ap.add_argument("--force-preanalyze", action="store_true",
+                    help="Re-run preanalyze for ALL PDFs even if a cache exists "
+                         "(passes --force instead of --incremental). REQUIRED when "
+                         "the cache was built with older code -- e.g. new table "
+                         "structured-cells or a changed vision endpoint -- so the "
+                         "cache is rebuilt with the current code. Slow (full DI + "
+                         "vision), but it's the correct one-command path for that.")
     ap.add_argument("--skip-heal-loop", action="store_true",
                     help="Skip step 5 (heal_until_done). Use to deploy + "
                          "trigger indexer once, then accept whatever lands "
@@ -149,9 +156,11 @@ def main() -> int:
     if args.skip_preanalyze:
         print("  --skip-preanalyze set; skipping")
     else:
+        _pre_mode = "--force" if args.force_preanalyze else "--incremental"
+        print(f"  preanalyze mode: {_pre_mode}")
         rc = run_script("scripts/preanalyze.py", [
             "--config", args.config,
-            "--incremental",
+            _pre_mode,
             "--concurrency", str(args.preanalyze_concurrency),
             "--vision-parallel", str(args.preanalyze_vision_parallel),
         ])
