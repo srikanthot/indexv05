@@ -202,11 +202,17 @@ def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int
     provider = _model_provider(cfg)
     if provider == "foundry":
         fcfg = cfg.get("foundry") or {}
-        ep = (fcfg.get("projectEndpoint") or "").rstrip("/")
+        # Foundry vision via the OpenAI-COMPATIBLE endpoint (.openai.azure.us)
+        # deployment route — the /models/chat/completions route rejected the
+        # api-version ("API version not supported"). Same endpoint family the
+        # Search embedder uses. Falls back to projectEndpoint if azureOpenAI
+        # isn't set.
+        ep = ((cfg.get("azureOpenAI") or {}).get("endpoint") or "").rstrip("/") \
+            or (fcfg.get("projectEndpoint") or "").rstrip("/")
         deployment = fcfg.get("chatModel") or fcfg.get("visionModel") or ""
-        api_ver = fcfg.get("apiVersion", "2024-05-01-preview")
+        api_ver = fcfg.get("apiVersion") or "2024-10-21"
         api_key = _get_foundry_key(cfg)
-        url = f"{ep}/models/chat/completions?api-version={api_ver}"
+        url = f"{ep}/openai/deployments/{deployment}/chat/completions?api-version={api_ver}"
     else:
         ep = cfg["azureOpenAI"]["endpoint"].rstrip("/")
         deployment = cfg["azureOpenAI"]["visionDeployment"]

@@ -110,8 +110,12 @@ class _FoundryChatAPI:
  
 class _FoundryCompletionsAPI:
     def create(self, **kwargs):
-        endpoint = required_env("FOUNDRY_PROJECT_ENDPOINT").rstrip("/")
-        api_version = optional_env("FOUNDRY_API_VERSION", "2024-05-01-preview")
+        # Foundry chat/vision uses the OpenAI-COMPATIBLE endpoint
+        # (.openai.azure.us) deployment route — NOT /models/chat/completions,
+        # which rejects the api-version ("API version not supported").
+        # AOAI_ENDPOINT is the Foundry .openai.azure.us endpoint in foundry mode.
+        endpoint = required_env("AOAI_ENDPOINT").rstrip("/")
+        api_version = optional_env("FOUNDRY_API_VERSION", "2024-10-21")
         timeout = float(kwargs.pop("timeout", 60.0))
         model = kwargs.pop("model", "") or required_env("FOUNDRY_CHAT_MODEL")
  
@@ -124,7 +128,7 @@ class _FoundryCompletionsAPI:
         else:
             headers["api-key"] = required_env("FOUNDRY_API_KEY")
  
-        url = f"{endpoint}/models/chat/completions?api-version={api_version}"
+        url = f"{endpoint}/openai/deployments/{model}/chat/completions?api-version={api_version}"
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, json=payload, headers=headers)
         if resp.status_code != 200:

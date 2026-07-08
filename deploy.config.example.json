@@ -20,7 +20,7 @@
     "resourceGroup": "<your-prod-resource-group>",
     "chatModel": "<your-foundry-chat-deployment-name>",
     "embedModel": "<your-foundry-embedding-deployment-name>",
-    "apiVersion": "2024-05-01-preview"
+    "apiVersion": "2024-10-21"
   },
 
   "azureOpenAI": {
