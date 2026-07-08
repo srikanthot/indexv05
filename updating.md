@@ -1,50 +1,59 @@
-Hey Copilot — the "route mismatch" theory is wrong: I checked the code. The skillset calls
-/api/process-document and function_app.py declares @app.route(route="process-document") (the
-function is just *named* process_document_route). They match. A 404 on a matching route means the
-FUNCTION HOST FAILED TO LOAD the functions -- i.e. a Python import error at startup, so no routes
-register and every call 404s. This script pulls the host status + the real startup error, then
-restarts and re-runs the indexer. Run in PowerShell. Paste me every "===" section.
+Hey Copilot — one comprehensive diagnostic. It gathers everything at once so we can finalize.
+It does NOT change anything and does NOT reindex — it just collects facts. Run it in PowerShell.
+Do NOT set $ErrorActionPreference='Stop'. Paste me the FULL output of every "=== X ===" section.
 
 $cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
 $app = $cfg.functionApp.name; $rg = $cfg.functionApp.resourceGroup
-$ep  = $cfg.search.endpoint.TrimEnd('/'); $idx = "$($cfg.search.artifactPrefix)-index"; $ixr = "$($cfg.search.artifactPrefix)-indexer"
 $hostUrl = "https://$app.azurewebsites.us"
-$mk = az functionapp keys list -g $rg -n $app --query masterKey -o tsv
+Write-Host "app=$app rg=$rg host=$hostUrl"
+$mk = az functionapp keys list -g $rg -n $app --query masterKey -o tsv 2>$null
 
-# === 1: HOST STATUS -- did the function host load, or error out? ===
+# === A: KEY APP SETTINGS (build + run-from-package + provider) ===
 try {
-  $s = Invoke-RestMethod -Uri "$hostUrl/admin/host/status" -Headers @{ 'x-functions-key' = $mk }
-  Write-Host "=== 1 HOST STATE: $($s.state) ==="
-  if ($s.errors) { Write-Host "=== 1 HOST ERRORS (this is the real cause) ==="; $s.errors | ForEach-Object { Write-Host $_ } }
-} catch { Write-Host "=== 1 host status ERROR: $($_.Exception.Message) ===" }
+  az functionapp config appsettings list -g $rg -n $app --query "[?name=='WEBSITE_RUN_FROM_PACKAGE'||name=='SCM_DO_BUILD_DURING_DEPLOYMENT'||name=='ENABLE_ORYX_BUILD'||name=='FUNCTIONS_WORKER_RUNTIME'||name=='FUNCTIONS_EXTENSION_VERSION'||name=='MODEL_PROVIDER'||name=='AOAI_ENDPOINT'||name=='AOAI_EMBED_DEPLOYMENT'||name=='FOUNDRY_PROJECT_ENDPOINT'||name=='FOUNDRY_API_VERSION'||name=='FOUNDRY_CHAT_MODEL'].{name:name,value:value}" -o table
+} catch { Write-Host "A error: $($_.Exception.Message)" }
 
-# === 2: FUNCTIONS THE RUNNING HOST ACTUALLY LOADED (is process-document present?) ===
+# === B: HOST STATUS + STARTUP ERRORS (the real cause of the 404) ===
 try {
-  $fns = Invoke-RestMethod -Uri "$hostUrl/admin/functions" -Headers @{ 'x-functions-key' = $mk }
-  Write-Host "=== 2 LOADED FUNCTIONS: $($fns.Count) ==="
-  $fns | ForEach-Object { Write-Host (" - " + $_.name) }
-} catch { Write-Host "=== 2 functions list ERROR: $($_.Exception.Message) ===" }
+  $s = Invoke-RestMethod -Uri "$hostUrl/admin/host/status" -Headers @{ 'x-functions-key' = $mk } -TimeoutSec 60
+  Write-Host "HOST STATE: $($s.state)"
+  Write-Host "HOST VERSION: $($s.version)"
+  if ($s.errors) { Write-Host "HOST ERRORS:"; $s.errors | ForEach-Object { Write-Host "  $_" } } else { Write-Host "HOST ERRORS: (none reported)" }
+} catch { Write-Host "B error: $($_.Exception.Message)" }
 
-# === 3: call process-document directly -- what status does the host really return? ===
-$body = '{"values":[{"recordId":"0","data":{"source_file":"t.pdf","source_path":"t.pdf"}}]}'
+# === C: FUNCTIONS THE RUNNING HOST LOADED (0 = load failed) ===
 try {
-  $r = Invoke-WebRequest -Uri "$hostUrl/api/process-document?code=$mk" -Method Post -Body $body -ContentType "application/json" -UseBasicParsing
-  Write-Host "=== 3 process-document HTTP $($r.StatusCode) ==="
-  Write-Host ($r.Content.Substring(0,[Math]::Min(400,$r.Content.Length)))
+  $fns = Invoke-RestMethod -Uri "$hostUrl/admin/functions" -Headers @{ 'x-functions-key' = $mk } -TimeoutSec 60
+  Write-Host "LOADED FUNCTION COUNT: $($fns.Count)"
+  $fns | ForEach-Object { Write-Host ("  - " + $_.name) }
+} catch { Write-Host "C error: $($_.Exception.Message)" }
+
+# === D: DIRECT CALL to process-document (actual HTTP status + body) ===
+try {
+  $body = '{"values":[{"recordId":"0","data":{"source_file":"t.pdf","source_path":"t.pdf"}}]}'
+  $r = Invoke-WebRequest -Uri "$hostUrl/api/process-document?code=$mk" -Method Post -Body $body -ContentType "application/json" -UseBasicParsing -TimeoutSec 120
+  Write-Host "process-document HTTP $($r.StatusCode)"
+  Write-Host ("BODY: " + $r.Content.Substring(0,[Math]::Min(600,$r.Content.Length)))
 } catch {
   $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 'n/a' }
-  Write-Host "=== 3 process-document CALL FAILED: HTTP $code -- $($_.Exception.Message) ==="
+  Write-Host "process-document CALL FAILED: HTTP $code -- $($_.Exception.Message)"
 }
 
-# === 4: restart + wait, then reset/reindex + capture (in case it was just not warmed up) ===
-az functionapp restart -g $rg -n $app | Out-Null
-Start-Sleep -Seconds 90
-python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze --skip-heal-loop
-Start-Sleep -Seconds 240
-$tok = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
-$st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
-Write-Host "=== 4 STATUS: $($st.lastResult.status)  processed=$($st.lastResult.itemsProcessed)  failed=$($st.lastResult.itemsFailed) ==="
-$st.lastResult.errors | Select-Object -First 2 | Format-List
-$body2 = '{"search":"*","count":true,"top":0}'
-$cnt  = Invoke-RestMethod -Method Post -Uri "$ep/indexes/$idx/docs/search?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok"; "Content-Type" = "application/json" } -Body $body2
-Write-Host "=== 4 TOTAL DOCS IN INDEX: $($cnt.'@odata.count') ==="
+# === E: LAST DEPLOYMENT / ORYX BUILD LOG (did pip install run?) ===
+try { az webapp log deployment show -g $rg -n $app 2>&1 | Select-Object -Last 60 | ForEach-Object { Write-Host $_ } }
+catch { Write-Host "E error: $($_.Exception.Message)" }
+
+# === F: are the installed python packages present on the app? (deps check) ===
+try {
+  $prof = [xml](az webapp deployment list-publishing-profiles -g $rg -n $app --xml 2>$null)
+  $pp = $prof.publishData.publishProfile | Where-Object { $_.publishMethod -eq 'MSDeploy' } | Select-Object -First 1
+  $pair = "$($pp.userName):$($pp.userPWD)"
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+  $scm = "https://$app.scm.azurewebsites.us"
+  Write-Host "wwwroot listing:"
+  (Invoke-RestMethod -Uri "$scm/api/vfs/site/wwwroot/" -Headers @{ Authorization = "Basic $b64" } -TimeoutSec 60) | Select-Object name | ForEach-Object { Write-Host ("  " + $_.name) }
+  Write-Host "shared/ listing:"
+  (Invoke-RestMethod -Uri "$scm/api/vfs/site/wwwroot/shared/" -Headers @{ Authorization = "Basic $b64" } -TimeoutSec 60) | Select-Object name | Where-Object { $_.name -match 'content_classifiers|procedures|prompt_safety|aoai|page_label' } | ForEach-Object { Write-Host ("  " + $_.name) }
+} catch { Write-Host "F error (SCM basic auth may be disabled -- that's OK, skip): $($_.Exception.Message)" }
+
+Write-Host "=== DONE -- paste sections A through F ==="
