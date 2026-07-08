@@ -70,7 +70,17 @@ def run_step(label: str, cmd: list[str], allow_fail: bool = False) -> tuple[int,
     return rc, ""
  
  
-def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int) -> dict:
+def _parse_iso(s: str):
+    """Parse an ISO-8601 timestamp (tolerant of trailing 'Z') -> datetime or None."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int,
+                          fresh_after_iso: str | None = None) -> dict:
     """Poll indexer status until it's not 'inProgress'. Returns the
     final lastResult dict (may indicate success, transientFailure, or
     persistentFailure)."""
@@ -79,6 +89,7 @@ def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int) ->
     deadline = time.time() + max_minutes * 60
     backoff = 15.0
     last_status = None
+    fresh_dt = _parse_iso(fresh_after_iso) if fresh_after_iso else None
  
     print()
     print("=" * 70)
@@ -99,8 +110,13 @@ def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int) ->
         last_result = body.get("lastResult") or {}
         last_run_status = last_result.get("status") or "unknown"
         items = last_result.get("itemsProcessed", "?")
+        run_start = last_result.get("startTime") or ""
+        is_fresh = True
+        if fresh_dt is not None:
+            rs = _parse_iso(run_start)
+            is_fresh = bool(rs and rs >= fresh_dt)
         print(f"  indexer={last_status}  lastResult={last_run_status}  items={items}")
-        if last_status != "inProgress" and last_run_status != "inProgress":
+        if last_status != "inProgress" and last_run_status != "inProgress" and is_fresh:
             return last_result
         time.sleep(backoff)
  
@@ -275,7 +291,10 @@ def main() -> int:
     if args.skip_wait:
         step_results["wait_indexer"] = {"skipped": True}
     else:
-        last = wait_for_indexer_idle(endpoint, indexer_name, args.max_wait_minutes)
+        # Require a run that STARTED after this pipeline began, so we don't
+        # accept a stale "success" from before our preanalyze wrote new caches.
+        last = wait_for_indexer_idle(endpoint, indexer_name, args.max_wait_minutes,
+                                     fresh_after_iso=pipeline_started_at)
         step_results["wait_indexer"] = {
             "last_status": last.get("status"),
             "items_processed": last.get("itemsProcessed", 0),

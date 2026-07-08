@@ -159,8 +159,31 @@ def grant_rbac(principal_id: str, principal_type: str, role: str, scope: str,
         ],
         check=False,
     )
-    print(f"  +    {role} -> {label}")
-    return True
+    # VERIFY the grant actually took effect. `create` with check=False can fail
+    # silently (transient Gov glitches, propagation, insufficient rights); if we
+    # don't confirm, we report success and the pipeline hits 403s much later
+    # with no clue why. Re-list and require the assignment to now exist.
+    verify = az(
+        [
+            "role", "assignment", "list",
+            "--assignee-object-id", principal_id,
+            "--role", role,
+            "--scope", scope,
+            "-o", "json",
+        ],
+        check=False,
+    )
+    try:
+        if verify and json.loads(verify):
+            print(f"  +    {role} -> {label}")
+            return True
+    except Exception:
+        pass
+    print(f"  FAIL {role} -> {label} (create did not take effect)")
+    raise RuntimeError(
+        f"RBAC grant failed to apply: {role} -> {label} on {scope}. "
+        f"Check that the caller has 'Owner'/'User Access Administrator' on the scope."
+    )
  
  
 def grant_cosmos_data_role(principal_id: str, cosmos_account: str, rg: str,
@@ -202,8 +225,27 @@ def grant_cosmos_data_role(principal_id: str, cosmos_account: str, rg: str,
         ],
         check=False,
     )
-    print(f"  +    Cosmos DB Data Contributor -> {cosmos_account}")
-    return True
+    # Verify — the data-plane create can silently fail just like the ARM one.
+    verify = az(
+        [
+            "cosmosdb", "sql", "role", "assignment", "list",
+            "--account-name", cosmos_account,
+            "--resource-group", rg,
+            "-o", "json",
+        ],
+        check=False,
+    )
+    try:
+        for a in json.loads(verify) if verify else []:
+            if a.get("principalId", "").lower() == principal_id.lower():
+                print(f"  +    Cosmos DB Data Contributor -> {cosmos_account}")
+                return True
+    except Exception:
+        pass
+    print(f"  FAIL Cosmos DB Data Contributor -> {cosmos_account} (create did not take effect)")
+    raise RuntimeError(
+        f"Cosmos data-role grant failed to apply for {principal_id} on {cosmos_account}."
+    )
  
  
 def main() -> int:

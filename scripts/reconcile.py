@@ -35,13 +35,10 @@ from azure.identity import DefaultAzureCredential
  
 # Make function_app/shared importable (parent_id derivation).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
-from shared.ids import parent_id_for  # noqa: E402
- 
 # Local script imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cosmos_writer  # noqa: E402
 from preanalyze import (  # noqa: E402
-    _account_name,
     _init_storage,
     blob_exists,
     delete_blob,
@@ -51,6 +48,17 @@ from preanalyze import (  # noqa: E402
  
 API_VERSION = "2024-05-01-preview"
 SEARCH_SCOPE = "https://search.azure.us/.default"
+
+# Document types the pipeline can ingest (PDF natively; office docs via the
+# LibreOffice conversion in preanalyze). The blob listing MUST cover all of
+# these — if it only listed .pdf, a .docx already in the index would look
+# "not in blob" and get wrongly purged as DELETED.
+SUPPORTED_DOC_EXTS = (".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls")
+
+
+def _odata_escape(value: str) -> str:
+    """Escape a string literal for an OData filter (single-quote doubling)."""
+    return (value or "").replace("'", "''")
  
  
 @dataclass
@@ -96,7 +104,9 @@ def _list_blob_metadata(cfg: dict) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for item in items:
         name = item.get("name") or ""
-        if not name.lower().endswith(".pdf"):
+        # Include every supported document type, not just .pdf — otherwise an
+        # office doc already in the index is mis-classified DELETED and purged.
+        if not name.lower().endswith(SUPPORTED_DOC_EXTS):
             continue
         out[name] = {
             "last_modified": item.get("last_modified"),
@@ -118,61 +128,65 @@ def _query_index_pdfs(endpoint: str, index_name: str, headers: dict) -> dict[str
     return {f["value"]: int(f.get("count", 0)) for f in facets if f.get("value")}
  
  
-def _delete_index_records_for_parent(
-    endpoint: str,
-    index_name: str,
-    headers: dict,
-    parent_id: str,
-    max_keys_per_batch: int = 1000,
-) -> int:
+def _collect_ids_for_source_file(
+    endpoint: str, index_name: str, headers: dict, source_file: str,
+) -> list[str]:
+    """Return every index key (`id`) whose source_file matches this document.
+
+    Deleting by the exact `source_file` (the blob name, stored on every record)
+    is bulletproof — it needs no parent_id reconstruction (which previously
+    hardcoded the Gov storage suffix and silently deleted nothing on a mismatch)
+    and it covers ALL record types (text/table/table_row/diagram/summary).
+
+    We collect all keys first (paginate by skip) THEN delete, so we never loop
+    on eventual-consistency lag from deleting mid-scan.
     """
-    Delete every record where parent_id eq '<parent_id>'. Returns the
-    number of records deleted.
- 
-    Implementation: search for chunk_id keys filtered by parent_id, page
-    through them, and POST a batch of @search.action: delete to the
-    /docs/index endpoint.
-    """
-    deleted_total = 0
     search_url = f"{endpoint}/indexes/{index_name}/docs/search?api-version={API_VERSION}"
-    index_url = f"{endpoint}/indexes/{index_name}/docs/index?api-version={API_VERSION}"
- 
+    sf = _odata_escape(source_file)
+    ids: list[str] = []
+    skip = 0
     while True:
         body = {
             "search": "*",
-            "filter": f"parent_id eq '{parent_id}'",
-            "select": "chunk_id,id",
-            "top": max_keys_per_batch,
+            "filter": f"source_file eq '{sf}'",
+            "select": "id",
+            "top": 1000,
+            "skip": skip,
         }
         with httpx.Client(timeout=60.0) as c:
             resp = c.post(search_url, json=body, headers=headers)
         resp.raise_for_status()
         hits = resp.json().get("value", [])
-        if not hits:
+        ids.extend(h["id"] for h in hits if h.get("id"))
+        if len(hits) < 1000:
             break
-        actions = []
-        for h in hits:
-            # The index key is `id` per index.json. Some records may also
-            # carry chunk_id; we delete by `id` to match the schema.
-            key = h.get("id") or h.get("chunk_id")
-            if not key:
-                continue
-            actions.append({"@search.action": "delete", "id": key})
-        if not actions:
+        skip += 1000
+        if skip >= 100000:
+            logging.warning("source_file %s has >100k records; truncating scan", source_file)
             break
+    return ids
+
+
+def _delete_index_records_for_source_file(
+    endpoint: str, index_name: str, headers: dict, source_file: str,
+    max_batch: int = 1000,
+) -> int:
+    """Delete every index record for a document, keyed by exact source_file.
+    Returns the number of records deleted."""
+    index_url = f"{endpoint}/indexes/{index_name}/docs/index?api-version={API_VERSION}"
+    ids = _collect_ids_for_source_file(endpoint, index_name, headers, source_file)
+    deleted_total = 0
+    for i in range(0, len(ids), max_batch):
+        batch = ids[i:i + max_batch]
+        actions = [{"@search.action": "delete", "id": _id} for _id in batch]
         with httpx.Client(timeout=60.0) as c:
             del_resp = c.post(index_url, json={"value": actions}, headers=headers)
         del_resp.raise_for_status()
-        # Count successful deletions; failures stay in the index but we
-        # continue (operator can retry).
         results = del_resp.json().get("value", [])
-        success_n = sum(1 for r in results if r.get("status"))
-        deleted_total += success_n
-        if len(hits) < max_keys_per_batch:
-            break
+        deleted_total += sum(1 for r in results if r.get("status"))
     return deleted_total
- 
- 
+
+
 def _delete_cache_blobs_for_pdf(cfg: dict, pdf_name: str) -> int:
     """Delete every _dicache/<pdf_name>.* blob. Returns deleted count."""
     cache_blobs = list_cache_blobs(cfg)
@@ -221,16 +235,16 @@ def build_plan(cfg: dict, endpoint: str, index_name: str, headers: dict) -> Reco
  
     # Classify each PDF.
     # Also load cached source hashes for content-change detection.
-    cached_hashes: dict[str, str] = {}
+    cached_sizes: dict[str, int] = {}
     for pdf in sorted(blob_pdfs):
-        hash_blob = f"_dicache/{pdf}.source_hash"
+        size_blob = f"_dicache/{pdf}.source_size"
         try:
-            if blob_exists(cfg, hash_blob):
-                cached_hashes[pdf] = fetch_blob(cfg, hash_blob).decode("utf-8").strip()
+            if blob_exists(cfg, size_blob):
+                cached_sizes[pdf] = int(fetch_blob(cfg, size_blob).decode("utf-8").strip() or "0")
         except Exception:
             pass
-    if cached_hashes:
-        print(f"  {len(cached_hashes)} PDFs have cached source_hash")
+    if cached_sizes:
+        print(f"  {len(cached_sizes)} PDFs have cached source_size")
  
     for pdf in sorted(blob_pdfs | indexed_pdfs):
         in_blob = pdf in blob_pdfs
@@ -244,23 +258,24 @@ def build_plan(cfg: dict, endpoint: str, index_name: str, headers: dict) -> Reco
         # In both. Edit detection: blob.last_modified > last_indexed_at
         # OR cached source_hash differs from live blob hash (content changed
         # even if timestamp comparison is ambiguous due to clock drift).
+        # EDIT detection. Two independent signals (OR):
+        #   1. blob.last_modified > last_indexed_at (the "different timestamp"
+        #      signal — needs Cosmos pdf_state).
+        #   2. blob content size != the size cached when we indexed it
+        #      (Cosmos-INDEPENDENT — works even if pdf_state is missing).
+        # Either firing means the same-named blob changed -> purge ALL its old
+        # chunks, then preanalyze + indexer rebuild it fresh. A same-size edit
+        # with no Cosmos state can't be caught cheaply; use --purge-files to
+        # force it.
         blob_lm = plan.blob_meta.get(pdf, {}).get("last_modified") or ""
         cosmos_ts = last_indexed_at.get(pdf, "")
+        live_len = int(plan.blob_meta.get(pdf, {}).get("content_length") or 0)
+        cached_len = cached_sizes.get(pdf)
         is_edited = False
         if blob_lm and cosmos_ts and blob_lm > cosmos_ts:
             is_edited = True
-        # Hash-based change detection: if we have a cached hash AND the
-        # blob's content_length changed, mark as edited. Full hash re-check
-        # would require re-downloading the blob, which is expensive for
-        # large PDFs; content_length is a cheap proxy that catches most real
-        # edits. A same-size edit is caught by the timestamp check above.
-        if not is_edited and pdf in cached_hashes:
-            cached_len = plan.blob_meta.get(pdf, {}).get("content_length") or 0
-            # If size changed meaningfully (>1KB difference), treat as edit.
-            # This catches re-uploads that only bumped timestamps slightly.
-            pass  # Size check is already implicitly covered by LMT bump;
-            # full hash re-check deferred to preanalyze phase which already
-            # has the blob bytes in memory.
+        elif cached_len is not None and live_len and live_len != cached_len:
+            is_edited = True
         if is_edited:
             plan.edited.append(pdf)
         elif blob_lm and not cosmos_ts:
@@ -285,27 +300,21 @@ def execute_plan(cfg: dict, plan: ReconcilePlan, endpoint: str,
         "chunks_purged": 0, "cache_blobs_purged": 0,
         "errors": [],
     }
-    container_account = _account_name(cfg)
-    container_name = cfg["storage"]["pdfContainerName"]
- 
     targets = [(pdf, "deleted") for pdf in plan.deleted] + [(pdf, "edited") for pdf in plan.edited]
     for pdf, kind in targets:
-        # Recompute parent_id the same way the function app does.
-        # source_path is what the indexer feeds into parent_id_for.
-        source_path = (
-            f"https://{container_account}.blob.core.usgovcloudapi.net/"
-            f"{container_name}/{pdf}"
-        )
-        parent_id = parent_id_for(source_path, pdf)
- 
         if dry_run:
-            print(f"  [dry-run] would purge {pdf} ({kind}, parent_id={parent_id}, "
+            print(f"  [dry-run] would purge {pdf} ({kind}, "
                   f"chunks={plan.index_chunks_per_pdf.get(pdf, 0)})")
             continue
- 
-        # 1. Delete index records for this parent_id.
+
+        # 1. Delete index records by EXACT source_file (covers every record
+        #    type; no fragile parent_id reconstruction). This is the primitive
+        #    both DELETED and EDITED need: for EDITED we purge ALL old chunks
+        #    first, then preanalyze rebuilds the cache and the indexer
+        #    re-projects fresh chunks — so pages removed in an edit don't leave
+        #    orphaned rows behind.
         try:
-            n = _delete_index_records_for_parent(endpoint, index_name, headers, parent_id)
+            n = _delete_index_records_for_source_file(endpoint, index_name, headers, pdf)
             stats["chunks_purged"] += n
             print(f"  purged {n} index records for {pdf} ({kind})")
         except Exception as exc:
@@ -354,6 +363,16 @@ def main() -> int:
                          "on next run via blob LMT bump. Use when a blob batch was "
                          "re-uploaded only to set metadata, and you want the "
                          "existing _dicache/ to be re-used instead of rebuilt.")
+    ap.add_argument("--purge-files", nargs="+", metavar="SOURCE_FILE", default=None,
+                    help="Explicit mode for CI/Jenkins: purge ALL index chunks (and "
+                         "cache blobs) for the named source file(s), skipping "
+                         "auto-detection. Use when your pipeline already KNOWS a PDF "
+                         "was deleted or edited (same name, new timestamp) and wants "
+                         "its old chunks removed before re-indexing. Respects "
+                         "--dry-run. Add --clear-cosmos to also drop pdf_state.")
+    ap.add_argument("--clear-cosmos", action="store_true",
+                    help="With --purge-files, also delete the Cosmos pdf_state row "
+                         "(use for true DELETES; omit for EDITS that will re-index).")
     args = ap.parse_args()
  
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
@@ -365,7 +384,34 @@ def main() -> int:
         "Content-Type": "application/json",
         "Authorization": f"Bearer {_aad_token()}",
     }
- 
+
+    # ---- Explicit purge mode (CI/Jenkins) -------------------------------
+    # Jenkins detects a deleted blob, or an edited blob (same name, new
+    # timestamp), and calls this to remove that PDF's stale chunks BEFORE
+    # re-indexing. Bypasses auto-detection entirely.
+    if args.purge_files:
+        print(f"Explicit purge of {len(args.purge_files)} file(s) "
+              f"(dry_run={args.dry_run}, clear_cosmos={args.clear_cosmos}):")
+        total_chunks = 0
+        for sf in args.purge_files:
+            if args.dry_run:
+                ids = _collect_ids_for_source_file(endpoint, index_name, headers, sf)
+                print(f"  [dry-run] would purge {len(ids)} index records + cache for {sf}")
+                continue
+            n = _delete_index_records_for_source_file(endpoint, index_name, headers, sf)
+            total_chunks += n
+            cache_n = _delete_cache_blobs_for_pdf(cfg, sf)
+            print(f"  purged {n} index records + {cache_n} cache blobs for {sf}")
+            if args.clear_cosmos:
+                try:
+                    cosmos_writer.delete_pdf_state(cfg, sf)
+                    print(f"    cleared Cosmos pdf_state for {sf}")
+                except Exception as exc:
+                    print(f"    warn: Cosmos clear failed for {sf}: {exc}")
+        print(f"Explicit purge done ({total_chunks} records removed). "
+              f"Re-run preanalyze --incremental + the indexer to rebuild edited files.")
+        return 0
+
     # Acquire the same pipeline lock preanalyze uses, so the two can't
     # collide (e.g. reconcile purges a cache blob preanalyze just wrote).
     # Dry-run mode doesn't take the lock — it's read-only.

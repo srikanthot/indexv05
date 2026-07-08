@@ -936,6 +936,16 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
         source_hash = hashlib.sha256(original_bytes).hexdigest()
         hash_blob_name = f"_dicache/{pdf_name}.source_hash"
         upload_blob(cfg, hash_blob_name, source_hash.encode("utf-8"))
+        # Persist the byte size too — reconcile.py uses it as a
+        # Cosmos-independent edit signal (a size change on the same-named blob
+        # means it was edited, so its old chunks must be purged + re-indexed).
+        # Best-effort: a failure here just means reconcile falls back to the
+        # Cosmos/LMT edit signal.
+        try:
+            upload_blob(cfg, f"_dicache/{pdf_name}.source_size",
+                        str(len(original_bytes)).encode("utf-8"))
+        except Exception as _exc:
+            print(f"  warn: could not persist source_size for {pdf_name}: {_exc}")
  
         # If the file isn't a PDF, try to convert it via LibreOffice so
         # the rest of the pipeline (DI submission, PyMuPDF cropping,
