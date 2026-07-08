@@ -2292,7 +2292,10 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     # OCR-confidence gate — was computed and never consumed. A low worst-case
     # word confidence means a digit could be mis-read (240 vs 440), so flag it
     # for the chatbot to distrust / caveat.
-    _ocr_floor = float(optional_env("OCR_CONFIDENCE_FLOOR", "0.85"))
+    # Per-chunk MINIMUM word confidence < floor => flag. 0.85 flagged ~99% of
+    # scanned-manual chunks (one weak word trips a whole chunk), making the flag
+    # useless; 0.6 flags only genuinely poor OCR. Tune via OCR_CONFIDENCE_FLOOR.
+    _ocr_floor = float(optional_env("OCR_CONFIDENCE_FLOOR", "0.6"))
     low_confidence_ocr = bool(ocr_min_conf is not None and ocr_min_conf < _ocr_floor)
 
     return {
