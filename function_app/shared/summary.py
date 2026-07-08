@@ -232,6 +232,7 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "applies_to_system": [],
         "applies_to_voltage": _sum_tags["applies_to_voltage"],
         "applies_to_domain": _sum_tags["applies_to_domain"],
+        "applies_to_phase": _sum_tags["applies_to_phase"],
         "hazard_class": _sum_tags["hazard_class"],
         "criticality": _sum_tags["criticality"],
         "governing_callouts": _sum_callouts,

@@ -618,6 +618,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         ]
         record["applies_to_voltage"] = _dgm_tags["applies_to_voltage"]
         record["applies_to_domain"] = _dgm_tags["applies_to_domain"]
+        record["applies_to_phase"] = _dgm_tags["applies_to_phase"]
         record["hazard_class"] = _dgm_tags["hazard_class"]
         record["criticality"] = _dgm_tags["criticality"]
         record["is_prohibition"] = _dgm_tags["is_prohibition"]
@@ -627,6 +628,8 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         record["safety_callout"] = bool(record["callouts"])
         # B5: capture each OCR callout token as a discrete value (was one blob).
         record["figure_callouts"] = _parse_figure_callouts(safe_str(record.get("diagram_ocr_text")))
+        record["figure_number"] = safe_str(record.get("figure_ref"))
+        record["figure_title"] = safe_str(record.get("caption"))
         # B5: real figure_step_linked — True only when the figure sits inside a
         # numbered procedure (surrounding text has steps), not merely when a
         # figure_ref exists. Confidence scaled by the strength of the signal.

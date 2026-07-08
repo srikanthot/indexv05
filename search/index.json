@@ -78,6 +78,9 @@
     { "name": "table_row_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_col_count", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_caption", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_number", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "table_title", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "table_row_key", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "table_row_index", "type": "Edm.Int32", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
     { "name": "table_parent_chunk_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
@@ -109,6 +112,7 @@
     { "name": "applies_to_system", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "applies_to_voltage", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "applies_to_domain", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "applies_to_phase", "type": "Collection(Edm.String)", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
 
     { "name": "procedure_id", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "procedure_title", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
@@ -122,6 +126,8 @@
     { "name": "figure_step_linked", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "figure_linkage_confidence", "type": "Edm.Double", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": false },
     { "name": "figure_callouts", "type": "Collection(Edm.String)", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "figure_number", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "figure_title", "type": "Edm.String", "searchable": true, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
  
     { "name": "locator_type", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "locator_value", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },

@@ -233,6 +233,29 @@ _DOMAIN_SIGNALS: dict[str, re.Pattern] = {
 }
 
 
+_PHASE_SINGLE_RE = re.compile(
+    r"\b(single[\- ]phase|1[\- ]?phase|1\s?ph\b|1\s?ø|single\s?ph\b)", re.IGNORECASE)
+_PHASE_THREE_RE = re.compile(
+    r"\b(three[\- ]phase|3[\- ]phase|3\s?ph\b|3\s?ø|poly[\- ]?phase)", re.IGNORECASE)
+
+
+def classify_phase(text: str, headers: list[str] | None = None) -> list[str]:
+    """Return ['single_phase'] and/or ['three_phase'] when the text clearly says
+    so, else []. A doc can reference both (a table covering 1Ø and 3Ø)."""
+    hay_parts = [text or ""]
+    if headers:
+        hay_parts.extend(h for h in headers if h)
+    hay = " ".join(hay_parts)
+    if not hay.strip():
+        return []
+    out: list[str] = []
+    if _PHASE_SINGLE_RE.search(hay):
+        out.append("single_phase")
+    if _PHASE_THREE_RE.search(hay):
+        out.append("three_phase")
+    return out
+
+
 def classify_domain(
     text: str,
     headers: list[str] | None = None,
@@ -443,6 +466,7 @@ def enrich(
     voltage = extract_applies_to_voltage(text)
     equipment = classify_equipment(text, equipment_ids, headers)
     domain = classify_domain(text, headers, taxonomy)
+    phase = classify_phase(text, headers)
     prohibitions = detect_prohibitions(text)
     hazard = classify_hazard(text, callouts=callouts, headers=headers)
     criticality = compute_criticality(
@@ -454,6 +478,7 @@ def enrich(
         "applies_to_voltage": voltage,
         "applies_to_equipment": equipment,
         "applies_to_domain": domain,
+        "applies_to_phase": phase,
         "hazard_class": hazard,
         "criticality": criticality,
         "is_prohibition": bool(prohibitions),

@@ -455,6 +455,10 @@
         {
           "name": "chunk_next_id",
           "targetName": "text_chunk_next_id"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "text_applies_to_phase"
         }
       ]
     },
@@ -798,6 +802,18 @@
         {
           "name": "figure_callouts",
           "targetName": "dgm_figure_callouts"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "dgm_applies_to_phase"
+        },
+        {
+          "name": "figure_number",
+          "targetName": "dgm_figure_number"
+        },
+        {
+          "name": "figure_title",
+          "targetName": "dgm_figure_title"
         }
       ]
     },
@@ -1229,6 +1245,18 @@
         {
           "name": "table_rows_suppressed_count",
           "targetName": "tbl_table_rows_suppressed_count"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "tbl_applies_to_phase"
+        },
+        {
+          "name": "table_number",
+          "targetName": "tbl_table_number"
+        },
+        {
+          "name": "table_title",
+          "targetName": "tbl_table_title"
         }
       ]
     },
@@ -1526,6 +1554,10 @@
         {
           "name": "safety_callout",
           "targetName": "sum_safety_callout"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "sum_applies_to_phase"
         }
       ]
     },
@@ -2003,6 +2035,10 @@
           {
             "name": "chunk_next_id",
             "source": "/document/markdownDocument/*/pages/*/text_chunk_next_id"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/markdownDocument/*/pages/*/text_applies_to_phase"
           }
         ]
       },
@@ -2314,6 +2350,18 @@
           {
             "name": "figure_callouts",
             "source": "/document/enriched_figures/*/dgm_figure_callouts"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/enriched_figures/*/dgm_applies_to_phase"
+          },
+          {
+            "name": "figure_number",
+            "source": "/document/enriched_figures/*/dgm_figure_number"
+          },
+          {
+            "name": "figure_title",
+            "source": "/document/enriched_figures/*/dgm_figure_title"
           }
         ]
       },
@@ -2673,6 +2721,18 @@
           {
             "name": "table_rows_suppressed_count",
             "source": "/document/enriched_tables/*/tbl_table_rows_suppressed_count"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/enriched_tables/*/tbl_applies_to_phase"
+          },
+          {
+            "name": "table_number",
+            "source": "/document/enriched_tables/*/tbl_table_number"
+          },
+          {
+            "name": "table_title",
+            "source": "/document/enriched_tables/*/tbl_table_title"
           }
         ]
       },
@@ -3036,6 +3096,14 @@
           {
             "name": "safety_callout",
             "source": "/document/enriched_tables/*/tbl_table_rows/*/safety_callout"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/applies_to_phase"
+          },
+          {
+            "name": "table_row_key",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/table_row_key"
           }
         ]
       },
@@ -3227,6 +3295,10 @@
           {
             "name": "safety_callout",
             "source": "/document/sum_safety_callout"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/sum_applies_to_phase"
           }
         ]
       }

@@ -2248,6 +2248,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         classify_domain,
         classify_equipment,
         classify_hazard,
+        classify_phase,
         compute_criticality,
         detect_prohibitions,
         extract_applies_to_voltage,
@@ -2264,6 +2265,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     applies_to_voltage = extract_applies_to_voltage(page_text)
     applies_to_equipment = classify_equipment(page_text, equipment_ids, _headers)
     applies_to_domain = classify_domain(page_text, _headers, taxonomy=None)
+    applies_to_phase = classify_phase(page_text, _headers)
 
     # Governing callouts — section-scoped so a step inherits a WARNING/DANGER
     # that sits in a sibling chunk of the same section (fixes the split-warning
@@ -2350,6 +2352,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "applies_to_system": applies_to_system,
         "applies_to_voltage": applies_to_voltage,
         "applies_to_domain": applies_to_domain,
+        "applies_to_phase": applies_to_phase,
         "procedure_id": procedure["procedure_id"],
         "procedure_title": procedure["procedure_title"],
         "procedure_step_id": procedure["procedure_step_id"],

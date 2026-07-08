@@ -13,6 +13,7 @@ uniformly across all record types.
  
 import datetime
 import json
+import re
 from typing import Any
  
 from .config import index_run_id as _index_run_id, optional_env
@@ -89,6 +90,10 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     row_count = safe_int(data.get("row_count"), default=0)
     col_count = safe_int(data.get("col_count"), default=0)
     caption = safe_str(data.get("caption"))
+    # Canonical table number ("Table 12-5") + title (caption minus the number).
+    _tnum_m = re.search(r"Table\s+([A-Z]?\d+(?:[.\-]\d+){0,3})", caption, re.IGNORECASE)
+    table_number = f"Table {_tnum_m.group(1)}" if _tnum_m else ""
+    table_title = re.sub(r"^\s*Table\s+[A-Z]?\d+(?:[.\-]\d+){0,3}\s*[:.\-]*\s*", "", caption, flags=re.IGNORECASE).strip() if caption else ""
     h1 = safe_str(data.get("header_1"))
     h2 = safe_str(data.get("header_2"))
     h3 = safe_str(data.get("header_3"))
@@ -303,6 +308,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             "table_scope_tags": table_scope_tags,
             "table_columns": table_columns,
             "table_row_cells": row_cells,
+            "table_row_key": (cell_values[0] if cell_values else ""),
             "table_header_rows_count": 1,
             "table_integrity_score": table_integrity_score,
             "content_role": "actual_content",
@@ -316,6 +322,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             "applies_to_system": [x for x in [h1.strip(), h2.strip()] if x],
             "applies_to_voltage": _row_tags["applies_to_voltage"],
             "applies_to_domain": _row_tags["applies_to_domain"],
+            "applies_to_phase": _row_tags["applies_to_phase"],
             "hazard_class": _row_tags["hazard_class"],
             "criticality": _row_tags["criticality"],
             "is_prohibition": _row_tags["is_prohibition"],
@@ -400,6 +407,8 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "table_row_count": row_count,
         "table_col_count": col_count,
         "table_caption": caption,
+        "table_number": table_number,
+        "table_title": table_title,
         "table_cluster_id": f"{parent_id}_{table_cluster_id_raw}",
         "table_variant_id": f"{parent_id}_{table_cluster_id_raw}",
         "table_scope_tags": table_scope_tags,
@@ -424,6 +433,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "applies_to_system": [x for x in [h1.strip(), h2.strip()] if x],
         "applies_to_voltage": _tbl_tags["applies_to_voltage"],
         "applies_to_domain": _tbl_tags["applies_to_domain"],
+        "applies_to_phase": _tbl_tags["applies_to_phase"],
         "hazard_class": _tbl_tags["hazard_class"],
         "criticality": _tbl_tags["criticality"],
         "is_prohibition": _tbl_tags["is_prohibition"],
