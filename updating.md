@@ -1,11 +1,12 @@
-Hey Copilot — good progress: page_label.py is now correct (CHECK A = DEFINITION PRESENT line
-2232, tests 291/294). The ONLY thing failing is the publish: `func ... --build remote` died with
-"Remote build failed / No process is associated with this object" — that's a func core-tools
-flake (nested shells), NOT a code or dependency problem (the new files use only stdlib).
+Hey Copilot — you were right: `az config-zip` forces SCM_DO_BUILD_DURING_DEPLOYMENT=false and
+sets WEBSITE_RUN_FROM_PACKAGE, so Oryx never installs the Python deps AND it left the app's deploy
+settings broken. So do NOT use config-zip. This script: (1) restores the remote-build settings,
+(2) publishes with func (remote build) but CAPTURES all output and tolerates the func "No process"
+flake, (3) prints the real deployment/build log, then (4) reindexes and reports.
 
-Please deploy with `az` zip-deploy instead. It bypasses func core tools completely but still lets
-Oryx build the app server-side. Run this in PowerShell, in order. Paste me every "===" line. If
-STEP 2 fails, paste the FULL output of the `az ... config-zip` command (that's the build error).
+IMPORTANT: do NOT set `$ErrorActionPreference = 'Stop'` this time — we must tolerate the func flake
+and stderr noise. Run in PowerShell, in order. Paste me every "===" section, especially "3 FUNC
+OUTPUT", "4 DEPLOYMENT LOG", and "5".
 
 $cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
 $app = $cfg.functionApp.name; $rg = $cfg.functionApp.resourceGroup
@@ -13,35 +14,35 @@ $ep  = $cfg.search.endpoint.TrimEnd('/')
 $idx = "$($cfg.search.artifactPrefix)-index"
 $ixr = "$($cfg.search.artifactPrefix)-indexer"
 
-# === STEP 1: clear stale bytecode + turn on server-side (Oryx) build ===
-Get-ChildItem -Path function_app -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+# === 1: UNDO what config-zip changed -- restore remote build, remove run-from-package ===
 az functionapp config appsettings set -g $rg -n $app --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true | Out-Null
-Write-Host "=== 1: cleared __pycache__ + enabled remote build ==="
+az functionapp config appsettings delete -g $rg -n $app --setting-names WEBSITE_RUN_FROM_PACKAGE 2>$null | Out-Null
+Write-Host "=== 1: restored SCM_DO_BUILD_DURING_DEPLOYMENT=true, removed WEBSITE_RUN_FROM_PACKAGE ==="
+az functionapp config appsettings list -g $rg -n $app --query "[?name=='SCM_DO_BUILD_DURING_DEPLOYMENT'||name=='WEBSITE_RUN_FROM_PACKAGE'||name=='ENABLE_ORYX_BUILD'||name=='FUNCTIONS_WORKER_RUNTIME'].{name:name,value:value}" -o table
 
-# === STEP 2: zip the function app (host.json + requirements.txt at the root) and deploy ===
-if (Test-Path funcapp.zip) { Remove-Item funcapp.zip -Force }
-Compress-Archive -Path function_app\* -DestinationPath funcapp.zip -Force
-$zipMB = [math]::Round((Get-Item funcapp.zip).Length/1MB,1)
-Write-Host "=== 2: zip built ($zipMB MB); deploying (Oryx builds server-side, be patient) ==="
-az functionapp deployment source config-zip -g $rg -n $app --src funcapp.zip --timeout 1200
-$deployExit = $LASTEXITCODE
-if ($deployExit -ne 0) {
-  Write-Host "=== 2: DEPLOY FAILED (exit $deployExit) -- paste the full az output above. Trying to fetch the build log... ==="
-  Write-Host "=== BUILD LOG (best-effort) ==="
-  try { az webapp log deployment show -g $rg -n $app } catch { Write-Host "(could not fetch deployment log: $_)" }
-  exit 1
-}
-Write-Host "=== 2: DEPLOY OK ==="
+# === 2: restart so the settings take effect ===
+az functionapp restart -g $rg -n $app
+Start-Sleep -Seconds 45
+Write-Host "=== 2: restarted ==="
 
-# === STEP 3: restart + warm up so the new code is loaded ===
+# === 3: publish with func (remote build). Capture ALL output; ignore the func 'No process' flake ===
+Write-Host "=== 3 FUNC OUTPUT (also saved to funcpub.log) ==="
+if (Test-Path funcpub.log) { Remove-Item funcpub.log -Force }
+Push-Location function_app
+cmd /c "func azure functionapp publish $app --python --build remote > ..\funcpub.log 2>&1"
+Pop-Location
+Get-Content funcpub.log
+Write-Host "=== 3 END FUNC OUTPUT ==="
+
+# === 4: wait for the server-side build to finish, then show the REAL deployment/build log ===
+Start-Sleep -Seconds 120
+Write-Host "=== 4 DEPLOYMENT LOG ==="
+az webapp log deployment show -n $app -g $rg 2>&1
+
+# === 5: restart + reset/reindex + capture result ===
 az functionapp restart -g $rg -n $app
 Start-Sleep -Seconds 60
-Write-Host "=== 3: restarted ==="
-
-# === STEP 4: reset + re-run the indexer ===
 python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze --skip-heal-loop
-
-# === STEP 5: wait, then capture the result ===
 Start-Sleep -Seconds 240
 $tok = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
 $st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
@@ -51,5 +52,3 @@ $st.lastResult.errors | Select-Object -First 2 | Format-List
 $body = '{"search":"*","count":true,"top":0}'
 $cnt  = Invoke-RestMethod -Method Post -Uri "$ep/indexes/$idx/docs/search?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok"; "Content-Type" = "application/json" } -Body $body
 Write-Host "=== 5 TOTAL DOCS IN INDEX: $($cnt.'@odata.count') ==="
-
-# Paste me every "===" line. If TOTAL DOCS > 0, we're done. If STEP 2 failed, paste the az output.
