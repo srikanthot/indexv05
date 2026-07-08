@@ -1,9 +1,8 @@
-Hey Copilot — the 5-doc verification showed text/diagram/summary fields are correct, but ALL
-table + table_row fields are empty because the deployed process_table.py/tables.py were a stale
-copy. The user has re-copied process_table.py, tables.py, page_label.py, semantic.py (full,
-correct versions). Now: redeploy (the build-deploy that worked), reindex, and re-run the two
-verification scripts so we can confirm tables populate. Run in PowerShell. Do NOT set
-$ErrorActionPreference='Stop'. Paste me every "===" line + the verify_new_fields table output.
+Hey Copilot — the user re-copied 2 updated files: function_app/shared/page_label.py (number-aware
+low_confidence_ocr) and function_app/shared/diagram.py (figure_title fix). Redeploy the function
+app (the build-deploy that works), reindex, and re-run the two verification scripts so we can
+confirm the changes. Run in PowerShell. Do NOT set $ErrorActionPreference='Stop'. Paste me every
+"===" line and the full verify_new_fields output.
 
 $cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
 $app = $cfg.functionApp.name; $rg = $cfg.functionApp.resourceGroup
@@ -11,8 +10,8 @@ $ep  = $cfg.search.endpoint.TrimEnd('/'); $idx = "$($cfg.search.artifactPrefix)-
 $hostUrl = "https://$app.azurewebsites.us"
 $mk = az functionapp keys list -g $rg -n $app --query masterKey -o tsv
 
-# keep build on; also lower the OCR flag threshold via app setting (belt + suspenders)
-az functionapp config appsettings set -g $rg -n $app --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true OCR_CONFIDENCE_FLOOR=0.6 | Out-Null
+# keep server build on (the NUMERIC_OCR_FLOOR default of 0.90 is in code; no setting needed)
+az functionapp config appsettings set -g $rg -n $app --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true | Out-Null
 Get-ChildItem -Path function_app -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 # === DEPLOY: func publish with remote build (via cmd, no PS stderr trap) ===
@@ -33,11 +32,12 @@ $tok = az account get-access-token --resource https://search.azure.us --query ac
 $st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
 Write-Host "=== INDEXER: $($st.lastResult.status)  processed=$($st.lastResult.itemsProcessed)  failed=$($st.lastResult.itemsFailed) ==="
 
-# === RE-VERIFY (the key part -- tables should now be populated) ===
+# === RE-VERIFY ===
 Write-Host "=== GATES ==="
 python scripts/validate_index_quality.py --config deploy.config.json
 Write-Host "=== FIELDS ==="
 python scripts/verify_new_fields.py --config deploy.config.json
 
-# Paste me the INDEXER line, the GATES RESULT+coverage, and the full FIELDS table
-# (especially the record_type = table and table_row sections).
+# Paste me the INDEXER line, the GATES RESULT+coverage, and the full FIELDS table.
+# Expect: low_confidence_ocr now a smaller, meaningful % (numbers only); figure_title populated
+# where DI found a caption; tables still OK from last run.
