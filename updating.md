@@ -1,21 +1,50 @@
-Hey Copilot — I fixed the ROOT CAUSE of the function-deploy failure in
-scripts/deploy_function.ps1 (the script the super command calls). The old version ran
-`& func ... 2>&1` under `$ErrorActionPreference='Stop'`, which in PowerShell 5.1 turned a
-benign func stderr line into the terminating "No process is associated with this object"
-error and aborted a publish that was fine. The fixed version runs func through cmd.exe,
-retries transient upload failures, prints the Oryx build log if it truly fails, and writes
-Foundry-correct app settings.
+Hey Copilot — the "route mismatch" theory is wrong: I checked the code. The skillset calls
+/api/process-document and function_app.py declares @app.route(route="process-document") (the
+function is just *named* process_document_route). They match. A 404 on a matching route means the
+FUNCTION HOST FAILED TO LOAD the functions -- i.e. a Python import error at startup, so no routes
+register and every call 404s. This script pulls the host status + the real startup error, then
+restarts and re-runs the indexer. Run in PowerShell. Paste me every "===" section.
 
-The user has re-copied the fixed scripts/deploy_function.ps1. Now just run the ONE super
-command and let it go line by line. Run in PowerShell. Do NOT set
-`$ErrorActionPreference='Stop'` around it. Paste me the tail of the output (especially the
-"Publishing function code" section and the final coverage), and the STEP-VALIDATE result.
+$cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
+$app = $cfg.functionApp.name; $rg = $cfg.functionApp.resourceGroup
+$ep  = $cfg.search.endpoint.TrimEnd('/'); $idx = "$($cfg.search.artifactPrefix)-index"; $ixr = "$($cfg.search.artifactPrefix)-indexer"
+$hostUrl = "https://$app.azurewebsites.us"
+$mk = az functionapp keys list -g $rg -n $app --query masterKey -o tsv
 
-# The super command -- RBAC + function code deploy + preanalyze + search artifacts + reindex + heal
-python scripts/deploy.py --config deploy.config.json --auto-fix
+# === 1: HOST STATUS -- did the function host load, or error out? ===
+try {
+  $s = Invoke-RestMethod -Uri "$hostUrl/admin/host/status" -Headers @{ 'x-functions-key' = $mk }
+  Write-Host "=== 1 HOST STATE: $($s.state) ==="
+  if ($s.errors) { Write-Host "=== 1 HOST ERRORS (this is the real cause) ==="; $s.errors | ForEach-Object { Write-Host $_ } }
+} catch { Write-Host "=== 1 host status ERROR: $($_.Exception.Message) ===" }
 
-# After it finishes, the quality gates:
-python scripts/validate_index_quality.py --config deploy.config.json
+# === 2: FUNCTIONS THE RUNNING HOST ACTUALLY LOADED (is process-document present?) ===
+try {
+  $fns = Invoke-RestMethod -Uri "$hostUrl/admin/functions" -Headers @{ 'x-functions-key' = $mk }
+  Write-Host "=== 2 LOADED FUNCTIONS: $($fns.Count) ==="
+  $fns | ForEach-Object { Write-Host (" - " + $_.name) }
+} catch { Write-Host "=== 2 functions list ERROR: $($_.Exception.Message) ===" }
 
-# If the function publish still fails, the script now prints the Oryx BUILD LOG automatically --
-# paste me that build log and I'll fix the exact error it shows.
+# === 3: call process-document directly -- what status does the host really return? ===
+$body = '{"values":[{"recordId":"0","data":{"source_file":"t.pdf","source_path":"t.pdf"}}]}'
+try {
+  $r = Invoke-WebRequest -Uri "$hostUrl/api/process-document?code=$mk" -Method Post -Body $body -ContentType "application/json" -UseBasicParsing
+  Write-Host "=== 3 process-document HTTP $($r.StatusCode) ==="
+  Write-Host ($r.Content.Substring(0,[Math]::Min(400,$r.Content.Length)))
+} catch {
+  $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 'n/a' }
+  Write-Host "=== 3 process-document CALL FAILED: HTTP $code -- $($_.Exception.Message) ==="
+}
+
+# === 4: restart + wait, then reset/reindex + capture (in case it was just not warmed up) ===
+az functionapp restart -g $rg -n $app | Out-Null
+Start-Sleep -Seconds 90
+python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze --skip-heal-loop
+Start-Sleep -Seconds 240
+$tok = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
+$st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
+Write-Host "=== 4 STATUS: $($st.lastResult.status)  processed=$($st.lastResult.itemsProcessed)  failed=$($st.lastResult.itemsFailed) ==="
+$st.lastResult.errors | Select-Object -First 2 | Format-List
+$body2 = '{"search":"*","count":true,"top":0}'
+$cnt  = Invoke-RestMethod -Method Post -Uri "$ep/indexes/$idx/docs/search?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok"; "Content-Type" = "application/json" } -Body $body2
+Write-Host "=== 4 TOTAL DOCS IN INDEX: $($cnt.'@odata.count') ==="
