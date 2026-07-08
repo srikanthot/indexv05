@@ -1817,6 +1817,10 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 "document_revision": document_revision,
                 "effective_date": effective_date,
                 "document_number": document_number,
+                # Row-cap markers so the shape-table skill's inputs resolve
+                # (otherwise it logs "skill input was invalid" for these).
+                "rows_truncated": tbl.get("rows_truncated", False),
+                "rows_suppressed_count": tbl.get("rows_suppressed_count", 0),
             })
  
         # Read DI-missed-image warnings (written during _do_crops). When
