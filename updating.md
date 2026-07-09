@@ -1,43 +1,35 @@
-Hey Copilot — the user re-copied 2 updated files: function_app/shared/page_label.py (number-aware
-low_confidence_ocr) and function_app/shared/diagram.py (figure_title fix). Redeploy the function
-app (the build-deploy that works), reindex, and re-run the two verification scripts so we can
-confirm the changes. Run in PowerShell. Do NOT set $ErrorActionPreference='Stop'. Paste me every
-"===" line and the full verify_new_fields output.
+Hey Copilot — the backend/frontend team sent an "indexing work request" (the "17 bugs" note)
+asking us to ADD ~28 fields (procedure_id, procedure_step_*, applies_to_*, hazard_class,
+criticality, prohibitions, governing_callouts, table_cluster_id, table_row_index, table_row_key,
+table_columns, processing_status, retrieval_eligible, is_current_revision, etc.) plus
+"parsed numeric value+unit", a "manual catalog", and "synonym maps".
 
-$cfg = Get-Content deploy.config.json -Raw | ConvertFrom-Json
-$app = $cfg.functionApp.name; $rg = $cfg.functionApp.resourceGroup
-$ep  = $cfg.search.endpoint.TrimEnd('/'); $idx = "$($cfg.search.artifactPrefix)-index"; $ixr = "$($cfg.search.artifactPrefix)-indexer"
-$hostUrl = "https://$app.azurewebsites.us"
-$mk = az functionapp keys list -g $rg -n $app --query masterKey -o tsv
+IMPORTANT: every one of those ~28 fields ALREADY EXISTS in the index schema. So this is NOT a
+"build fields" job. The real question is whether those fields are POPULATED with real data on the
+chunks that matter — a schema is not proof. So we answer with EVIDENCE, not another document.
 
-# keep server build on (the NUMERIC_OCR_FLOOR default of 0.90 is in code; no setting needed)
-az functionapp config appsettings set -g $rg -n $app --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true | Out-Null
-Get-ChildItem -Path function_app -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+I added scripts/bug_evidence_report.py. Please RUN it against the live index and paste me the FULL
+output. It produces exactly what the backend team asked us to share:
+  PART 1  field completeness  — fill-rate % + a real example value, per record_type
+  PART 2  manual catalog      — lists every manual (proves "list all manuals" already works)
+  PART 3  per-bug evidence     — runs the 6 bug queries (60014, 61020a, 61020b, 61021, 66009,
+                                 67009) and prints a VERDICT for each: FOUND & POPULATED /
+                                 FOUND-but-fields-empty / NO-CHUNK (source gap)
+  PART 4  run header           — index name, doc count, index_run_id (reproducible + stamped)
 
-# === DEPLOY: func publish with remote build (via cmd, no PS stderr trap) ===
-Write-Host "=== deploying... ==="
-Push-Location function_app
-cmd /c "func azure functionapp publish $app --python --build remote > ..\pub.log 2>&1"
-Pop-Location
-Get-Content pub.log | Select-Object -Last 25 | ForEach-Object { Write-Host $_ }
-Start-Sleep -Seconds 90
-try { $fns = (Invoke-RestMethod -Uri "$hostUrl/admin/functions" -Headers @{ 'x-functions-key' = $mk } -TimeoutSec 60).Count } catch { $fns = -1 }
-Write-Host "=== LOADED FUNCTIONS = $fns (must be > 0) ==="
-if ($fns -le 0) { Write-Host "=== deploy did not load functions; STOP and tell me ==="; exit 1 }
+Run in PowerShell (do NOT set $ErrorActionPreference='Stop'):
 
-# === REINDEX ===
-python scripts/deploy.py --config deploy.config.json --skip-bootstrap --skip-preanalyze --skip-heal-loop
-Start-Sleep -Seconds 240
-$tok = az account get-access-token --resource https://search.azure.us --query accessToken -o tsv
-$st  = Invoke-RestMethod -Uri "$ep/indexers/$ixr/status?api-version=2024-05-01-preview" -Headers @{ Authorization = "Bearer $tok" }
-Write-Host "=== INDEXER: $($st.lastResult.status)  processed=$($st.lastResult.itemsProcessed)  failed=$($st.lastResult.itemsFailed) ==="
+python scripts/bug_evidence_report.py --config deploy.config.json > bug_evidence.txt
+Get-Content bug_evidence.txt | Select-Object -First 120 | ForEach-Object { Write-Host $_ }
 
-# === RE-VERIFY ===
-Write-Host "=== GATES ==="
-python scripts/validate_index_quality.py --config deploy.config.json
-Write-Host "=== FIELDS ==="
-python scripts/verify_new_fields.py --config deploy.config.json
+Then paste me bug_evidence.txt in full. That output is our reply to the backend team. Based on it:
+  • Bugs that come back FOUND & POPULATED  -> tell backend to USE the fields (expand by
+    procedure_id, read table_row_cells, show governing_callouts) — not an index change.
+  • Bugs that come back FOUND-but-fields-empty -> those are the REAL coverage gaps; I'll fix the
+    enrichment/parse and reindex just those.
+  • Bugs that come back NO-CHUNK -> confirm the manual even contains it; adding fields can't create
+    content that isn't in the source.
 
-# Paste me the INDEXER line, the GATES RESULT+coverage, and the full FIELDS table.
-# Expect: low_confidence_ocr now a smaller, meaningful % (numbers only); figure_title populated
-# where DI found a caption; tables still OK from last run.
+If the script errors on auth, do `az login` first (US Gov). If PART 1 shows is_current_revision
+mostly null, the currency post-pass (mark_current_revisions.py) hasn't run — tell me and I'll give
+the one command.
