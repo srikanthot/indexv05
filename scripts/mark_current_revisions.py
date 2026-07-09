@@ -40,28 +40,26 @@ def _token() -> str:
 
 
 def _family_key(document_number: str, source_file: str = "") -> str:
-    """Normalize a document_number into a stable family key shared by every
-    revision of the same manual. Revision/date live in separate fields, so we
-    only collapse case + punctuation + whitespace.
+    """Stable family key shared by every revision of the same manual.
 
-    FALLBACK: when document_number is empty (many manuals don't print one, and
-    our extractor may miss it), fall back to the source_file basename so the
-    record STILL gets a family + is_current_revision. Without this, every record
-    with no doc number is skipped -> is_current_revision never set -> the
-    chatbot's `is_current_revision eq true` filter excludes the ENTIRE corpus.
-    The filename fallback keeps digits (no rev-stripping) so distinct manuals
-    never collapse together: each file becomes its own family and stays current
-    -- the SAFE direction (never hide a valid manual)."""
-    if document_number:
-        key = re.sub(r"[^a-z0-9]+", "", document_number.lower())
-        # Defensive: strip a trailing rev token if it leaked into the number.
-        key = re.sub(r"rev[a-z0-9]*$", "", key)
-        if key:
-            return key
-    # Fallback: normalized source_file basename (dir + extension stripped).
+    We key on the SOURCE_FILE basename, NOT document_number. document_number is
+    currently unreliable in this corpus (0% on summaries, and where it exists on
+    other record types it collides across unrelated manuals) -- keying on it
+    grouped DISTINCT manuals together and marked ~half of them 'superseded',
+    which would hide 24 valid manuals behind the `is_current_revision eq true`
+    filter. The filename is 1:1 with a manual here, so each distinct file is its
+    own family and stays current -- the SAFE direction (never hide a valid
+    manual). Real filename-based revisions (same basename) still group.
+
+    When document_number extraction is fixed and audited, reintroduce it as the
+    primary key with the filename as fallback (the previous behavior)."""
     base = (source_file or "").replace("\\", "/").rsplit("/", 1)[-1]
     base = re.sub(r"\.(pdf|docx?|txt|html?)$", "", base, flags=re.IGNORECASE)
-    return re.sub(r"[^a-z0-9]+", "", base.lower())
+    key = re.sub(r"[^a-z0-9]+", "", base.lower())
+    if key:
+        return key
+    # Last resort only if source_file is somehow blank.
+    return re.sub(r"[^a-z0-9]+", "", (document_number or "").lower())
 
 
 def _revision_sort_key(rec: dict[str, Any]) -> tuple:

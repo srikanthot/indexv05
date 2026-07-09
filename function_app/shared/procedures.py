@@ -30,8 +30,14 @@ from .ids import _short_hash, parent_id_for
 
 # A numbered step marker at line start: "1. ", "2) ", "3:", "Step 4 -".
 # Requires a space + non-space body so we don't match bare "1." in prose.
+# The optional backslash (\\?) is CRITICAL: Azure Document Intelligence emits
+# markdown and ESCAPES numbered-list periods as "1\." / "2\." so they don't
+# render as an ordered list. Without tolerating that backslash we detected ZERO
+# steps in escaped procedures -> procedure_id landed on only ~9% of text and
+# real procedures (mark-outs, regulator-pit steps, station actions) were never
+# grouped as ordered steps. Tolerate an optional backslash before the delimiter.
 _STEP_RE = re.compile(
-    r"(?m)^[ \t]*(?:step[ \t]+)?(\d{1,3})[.):\-]\s+(\S[^\n]*)",
+    r"(?m)^[ \t]*(?:step[ \t]+)?(\d{1,3})\\?[.):\-]\s+(\S[^\n]*)",
     re.IGNORECASE,
 )
 
