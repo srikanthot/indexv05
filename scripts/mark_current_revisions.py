@@ -39,16 +39,29 @@ def _token() -> str:
     return DefaultAzureCredential().get_token(SEARCH_SCOPE).token
 
 
-def _family_key(document_number: str) -> str:
+def _family_key(document_number: str, source_file: str = "") -> str:
     """Normalize a document_number into a stable family key shared by every
     revision of the same manual. Revision/date live in separate fields, so we
-    only collapse case + punctuation + whitespace. Empty when no doc number."""
-    if not document_number:
-        return ""
-    key = re.sub(r"[^a-z0-9]+", "", document_number.lower())
-    # Defensive: strip a trailing rev token if it leaked into the number.
-    key = re.sub(r"rev[a-z0-9]*$", "", key)
-    return key
+    only collapse case + punctuation + whitespace.
+
+    FALLBACK: when document_number is empty (many manuals don't print one, and
+    our extractor may miss it), fall back to the source_file basename so the
+    record STILL gets a family + is_current_revision. Without this, every record
+    with no doc number is skipped -> is_current_revision never set -> the
+    chatbot's `is_current_revision eq true` filter excludes the ENTIRE corpus.
+    The filename fallback keeps digits (no rev-stripping) so distinct manuals
+    never collapse together: each file becomes its own family and stays current
+    -- the SAFE direction (never hide a valid manual)."""
+    if document_number:
+        key = re.sub(r"[^a-z0-9]+", "", document_number.lower())
+        # Defensive: strip a trailing rev token if it leaked into the number.
+        key = re.sub(r"rev[a-z0-9]*$", "", key)
+        if key:
+            return key
+    # Fallback: normalized source_file basename (dir + extension stripped).
+    base = (source_file or "").replace("\\", "/").rsplit("/", 1)[-1]
+    base = re.sub(r"\.(pdf|docx?|txt|html?)$", "", base, flags=re.IGNORECASE)
+    return re.sub(r"[^a-z0-9]+", "", base.lower())
 
 
 def _revision_sort_key(rec: dict[str, Any]) -> tuple:
@@ -104,7 +117,7 @@ def main() -> int:
     # == one PDF). Pick the newest source_file as current.
     families: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for r in records:
-        fam = _family_key(r.get("document_number") or "")
+        fam = _family_key(r.get("document_number") or "", r.get("source_file") or "")
         if not fam:
             continue
         sf = r.get("source_file") or ""
@@ -129,7 +142,7 @@ def main() -> int:
     # Build merge actions for every record.
     actions: list[dict[str, Any]] = []
     for r in records:
-        fam = _family_key(r.get("document_number") or "")
+        fam = _family_key(r.get("document_number") or "", r.get("source_file") or "")
         if not fam:
             continue
         is_current = (r.get("source_file") or "") == current_by_family.get(fam)

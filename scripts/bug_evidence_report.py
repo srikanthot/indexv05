@@ -98,6 +98,10 @@ PROCEDURE_FIELDS = {
 # Booleans where BOTH true and false are meaningful (null = truly unset).
 HYGIENE_BOOLS = {"retrieval_eligible", "is_current_revision"}
 
+# Integer fields that default to 0 on non-applicable chunks — count only > 0 as
+# "populated" (a 0 step_count means "not a procedure", not "populated").
+INT_POSITIVE = {"procedure_step_order", "procedure_step_count"}
+
 
 # ── the 6 remaining bugs, as real retrieval probes ───────────────────────────
 BUGS = [
@@ -267,6 +271,10 @@ def part1_field_completeness(base: str, headers: dict, source_file: str | None,
                         if v is True:
                             true_counts[f] += 1
                         examples.setdefault(f, str(v))
+                elif f in INT_POSITIVE:
+                    if isinstance(v, (int, float)) and v > 0:
+                        counts[f] += 1
+                        examples.setdefault(f, _sample(v))
                 elif not _empty(v):
                     counts[f] += 1
                     examples.setdefault(f, _sample(v))
