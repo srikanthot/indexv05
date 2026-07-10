@@ -36,14 +36,29 @@ WHAT IS POPULATED RIGHT NOW (measured on the live index — use these with confi
 HOW TO USE EACH THING (implement exactly this)
 ============================================================================
 
-1) CITATIONS / HIGHLIGHT  (the experience: show the manual's own words + open the real page + box it)
+1) CITATIONS / HIGHLIGHT  (the experience: one continuous bright box over the whole cited passage)
+   READ THIS — current highlight is patchy because the UI is rendering the per-LINE boxes.
+   - RENDER `text_bbox` AS THE PRIMARY HIGHLIGHT, NOT `line_bboxes`.
+       * `text_bbox` = ONE continuous rectangle PER PAGE that hugs the chunk start-to-end. This is the
+         "solid box" experience. Parse it (JSON string): [{page,x_in,y_in,w_in,h_in}, ...].
+       * `line_bboxes` = per-line boxes; PRECISE but has GAPS (any line with a hyphenated word, a table
+         row, or that crosses the chunk edge fails to match and gets no box -> the flicker you saw).
+         Use it ONLY as an optional fine overlay, never as the sole highlight.
+   - Coordinates are INCHES, origin TOP-LEFT; scale by page_width_in / page_height_in.
+   - WHOLE-PROCEDURE / WHOLE-SECTION HIGHLIGHT (fixes "the box stops at Note, not page 1-3"):
+       one citation = ONE chunk = a slice of the section. To highlight the entire procedure, fetch all
+       sibling chunks (filter: procedure_id eq '<id>' — or same header_1/2/3 path when no procedure_id),
+       collect each chunk's text_bbox, and render the UNION grouped by page. That yields a continuous
+       highlight across all the pages the procedure spans.
    - Answer text = the verbatim `chunk` (quote it; do NOT paraphrase). The LLM writes only framing
-     like "Per <source_file>, p.<printed_page_label>:".
-   - Open the PDF at `physical_pdf_page`; draw the highlight from `text_bbox` (tight box) or
-     `line_bboxes` (precise). Coordinates are INCHES, origin TOP-LEFT; scale by page_width_in/height_in.
-   - Show `printed_page_label` to the user ("p. A-12").
-   $select: chunk, source_file, physical_pdf_page, printed_page_label, text_bbox, line_bboxes,
-            page_width_in, page_height_in
+     like "Per <source_file>, p.<printed_page_label>:". Show `printed_page_label` ("p. 1-3").
+   - KNOWN (index-side, pending the next reindex, do not block on it): TABLES and some hyphenated lines
+     are not yet included in the boxes, so a table region may be unhighlighted. The reindex will add
+     table + hyphenation-tolerant geometry. For now, text_bbox already gives a continuous box over the
+     prose; that is the correct "start-to-end" experience to ship today.
+   $select: chunk, source_file, physical_pdf_page, physical_pdf_page_end, printed_page_label,
+            text_bbox, chunk_bboxes, line_bboxes, page_width_in, page_height_in, procedure_id,
+            header_1, header_2, header_3
 
 2) TABLES / NUMERIC VALUES  (deterministic lookup)
    - Filter record_type eq 'table_row'. Look up by `table_row_key`; read the value from
