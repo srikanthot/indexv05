@@ -45,11 +45,19 @@ HOW TO USE EACH THING (implement exactly this)
          row, or that crosses the chunk edge fails to match and gets no box -> the flicker you saw).
          Use it ONLY as an optional fine overlay, never as the sole highlight.
    - Coordinates are INCHES, origin TOP-LEFT; scale by page_width_in / page_height_in.
-   - WHOLE-PROCEDURE / WHOLE-SECTION HIGHLIGHT (fixes "the box stops at Note, not page 1-3"):
-       one citation = ONE chunk = a slice of the section. To highlight the entire procedure, fetch all
-       sibling chunks (filter: procedure_id eq '<id>' — or same header_1/2/3 path when no procedure_id),
-       collect each chunk's text_bbox, and render the UNION grouped by page. That yields a continuous
-       highlight across all the pages the procedure spans.
+   - WHOLE-REGION HIGHLIGHT covering TEXT + TABLE + DIAGRAM (fixes "box stops at Note, skips the table"):
+       one citation = ONE record, and text / tables / diagrams are SEPARATE records, each with its own
+       box. To highlight the entire region start-to-end irrespective of content type, UNION the boxes of
+       ALL records in that region:
+         1. From the cited record take: source_file, page range (physical_pdf_page .. physical_pdf_page_end),
+            and section key (procedure_id, else header_1/2/3 path).
+         2. Fetch every record in that region (do NOT restrict record_type):
+              filter: source_file eq '<f>' and physical_pdf_page ge <p0> and physical_pdf_page le <p1>
+                      [and procedure_id eq '<id>'  OR same header path, when available]
+            $select: record_type, physical_pdf_page, text_bbox, table_bbox, figure_bbox
+         3. Union text_bbox (text) + table_bbox (table/table_row) + figure_bbox (diagram), grouped by page.
+         Render that union -> one continuous highlight that now INCLUDES the middle table and any diagram,
+         from the first line to the last, across every page the section spans.
    - Answer text = the verbatim `chunk` (quote it; do NOT paraphrase). The LLM writes only framing
      like "Per <source_file>, p.<printed_page_label>:". Show `printed_page_label` ("p. 1-3").
    - KNOWN (index-side, pending the next reindex, do not block on it): TABLES and some hyphenated lines
