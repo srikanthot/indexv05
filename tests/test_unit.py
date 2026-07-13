@@ -140,11 +140,17 @@ start, end, pages = compute_page_span("Just one page of text.", SECTION_FLAT, se
 check("flat single-page section -> (12,12)", (start, end) == (12, 12), f"got ({start},{end})")
 check("flat single-page pages=[12]", pages == [12], str(pages))
 
-# Empty section_content fallback path
-chunk_with_marker = "lead text <!-- PageNumber=\"9\" --> trailing text"
-start, end, pages = compute_page_span(chunk_with_marker, "", section_start_page=8)
-check("no section_content but marker in chunk", (start, end) == (8, 9), f"got ({start},{end})")
+# Empty section_content fallback path. PageBreak markers ARE trusted and extend
+# the span; PageNumber markers are intentionally NOT trusted in fallback mode
+# (they can encode printed labels and cause extreme page jumps -- see
+# compute_page_span).
+chunk_with_break = "lead text <!-- PageBreak --> trailing text"
+start, end, pages = compute_page_span(chunk_with_break, "", section_start_page=8)
+check("no section_content, PageBreak extends span", (start, end) == (8, 9), f"got ({start},{end})")
 check("no section_content pages=[8,9]", pages == [8, 9], str(pages))
+# A PageNumber marker alone must NOT move the span off the section start page.
+s2, e2, p2 = compute_page_span("lead <!-- PageNumber=\"9\" --> tail", "", section_start_page=8)
+check("no section_content, PageNumber NOT trusted", (s2, e2, p2) == (8, 8, [8]), f"got ({s2},{e2},{p2})")
 
 
 # ---------- 2. process_page_label end-to-end ----------
@@ -1721,7 +1727,7 @@ check("multi-header: NO duplicated header in body (no '120/240 | 277/480' as dat
 # ---------- 32. table_row records ----------
 section("32. per-row table records")
 
-# Build a 6-row body table (above ROW_RECORD_MIN_ROWS=5 threshold) with
+# Build a 6-row body table (above ROW_RECORD_MIN_ROWS=2 threshold) with
 # the same multi-row header.
 many_row_table = {
     "rowCount": 8,  # 2 header + 6 body
@@ -1774,27 +1780,21 @@ check("table_rows: row carries page",
       first_row.get("page") == 5,
       f"got {first_row.get('page')}")
 
-# Below threshold: 4-row table emits no row records
+# Below threshold: a 1-body-row table emits no row records (< ROW_RECORD_MIN_ROWS=2).
 small_table = {
-    "rowCount": 5,  # 1 header + 4 body
+    "rowCount": 2,  # 1 header + 1 body
     "columnCount": 2,
     "cells": [
         {"rowIndex": 0, "columnIndex": 0, "kind": "columnHeader", "content": "A"},
         {"rowIndex": 0, "columnIndex": 1, "kind": "columnHeader", "content": "B"},
         {"rowIndex": 1, "columnIndex": 0, "content": "1"},
         {"rowIndex": 1, "columnIndex": 1, "content": "2"},
-        {"rowIndex": 2, "columnIndex": 0, "content": "3"},
-        {"rowIndex": 2, "columnIndex": 1, "content": "4"},
-        {"rowIndex": 3, "columnIndex": 0, "content": "5"},
-        {"rowIndex": 3, "columnIndex": 1, "content": "6"},
-        {"rowIndex": 4, "columnIndex": 0, "content": "7"},
-        {"rowIndex": 4, "columnIndex": 1, "content": "8"},
     ],
     "boundingRegions": [{"pageNumber": 1,
                          "polygon": [1.0, 1.0, 5.0, 1.0, 5.0, 3.0, 1.0, 3.0]}],
 }
 recs_small = extract_table_records({"tables": [small_table]})
-check("table_rows: 4-row table emits no row records (below threshold)",
+check("table_rows: 1-body-row table emits no row records (below threshold)",
       recs_small and len(recs_small[0].get("table_rows", [])) == 0,
       f"got {recs_small[0].get('table_rows') if recs_small else None}")
 
