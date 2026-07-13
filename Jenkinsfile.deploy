@@ -23,10 +23,10 @@
  *   - deploy-config-dev   -> deploy.config.json for dev environment
  *   - deploy-config-prod  -> deploy.config.json for prod environment
  */
-
+ 
 pipeline {
     agent any
-
+ 
     parameters {
         choice(
             name: 'TARGET_ENV',
@@ -39,29 +39,29 @@ pipeline {
             description: 'Skip post-deploy smoke test (only for emergency rollouts)'
         )
     }
-
+ 
     options {
         timestamps()
         ansiColor('xterm')
         timeout(time: 60, unit: 'MINUTES')
     }
-
+ 
     environment {
         // Azure Government cloud. Don't change without auditing every
         // script's hardcoded scopes.
         AZURE_CLOUD = 'AzureUSGovernment'
         PYTHONUNBUFFERED = '1'
     }
-
+ 
     stages {
-
+ 
         stage('Checkout') {
             steps {
                 checkout scm
                 sh 'git rev-parse --short HEAD > .git_sha'
             }
         }
-
+ 
         stage('Bootstrap') {
             steps {
                 sh '''
@@ -74,7 +74,7 @@ pipeline {
                 '''
             }
         }
-
+ 
         stage('Tests') {
             steps {
                 sh '''
@@ -85,7 +85,7 @@ pipeline {
                 '''
             }
         }
-
+ 
         stage('Lint') {
             steps {
                 sh '''
@@ -96,7 +96,7 @@ pipeline {
                 '''
             }
         }
-
+ 
         stage('Load config') {
             steps {
                 script {
@@ -107,7 +107,7 @@ pipeline {
                 }
             }
         }
-
+ 
         stage('Approve prod deploy') {
             when { expression { params.TARGET_ENV == 'prod' } }
             steps {
@@ -117,7 +117,7 @@ pipeline {
                 )
             }
         }
-
+ 
         stage('Bootstrap environment') {
             // Single-command end-to-end bootstrap. Auto-detects + handles:
             //  - RBAC role assignments (function app MI, search MI, principal)
@@ -135,15 +135,20 @@ pipeline {
                 sh '''
                     set -e
                     . .venv/bin/activate
+                    # LEAST-PRIVILEGE: --skip-roles means the pipeline SP does NOT
+                    # assign roles at runtime, so it needs NO User Access Administrator
+                    # and NO Contributor. The managed-identity role assignments are
+                    # provisioned ONCE (see docs/RBAC_LEAST_PRIVILEGE.md):
+                    #   python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
                     python scripts/bootstrap.py \
                         --config deploy.config.json \
-                        --auto-fix \
+                        --skip-roles \
                         --skip-deploy-principal
                 '''
             }
         }
     }
-
+ 
     post {
         success {
             echo "Deploy to ${params.TARGET_ENV} succeeded."
@@ -158,3 +163,4 @@ pipeline {
         }
     }
 }
+ 
