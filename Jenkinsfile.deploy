@@ -135,14 +135,19 @@ pipeline {
                 sh '''
                     set -e
                     . .venv/bin/activate
-                    # LEAST-PRIVILEGE: --skip-roles means the pipeline SP does NOT
-                    # assign roles at runtime, so it needs NO User Access Administrator
-                    # and NO Contributor. The managed-identity role assignments are
-                    # provisioned ONCE (see docs/RBAC_LEAST_PRIVILEGE.md):
-                    #   python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
+                    # Roles are assigned BY THIS PIPELINE (assign_roles.py, inside
+                    # bootstrap Step 4). That step creates role assignments, so the
+                    # Jenkins SP needs "User Access Administrator" on the target
+                    # subscription -- a ONE-TIME admin grant per subscription that
+                    # then covers every resource group in it. The SP's own data/
+                    # service roles are self-granted (see docs/RBAC_LEAST_PRIVILEGE.md).
+                    # --skip-deploy-principal: don't try to grant the SP itself
+                    #   (its roles are provisioned separately, above).
+                    # --auto-fix DROPPED: resource *settings* (search authOptions,
+                    #   blob soft-delete, cosmos db) are set by the Bicep infra
+                    #   pipeline at creation, so the SP does NOT need Contributor.
                     python scripts/bootstrap.py \
                         --config deploy.config.json \
-                        --skip-roles \
                         --skip-deploy-principal
                 '''
             }
