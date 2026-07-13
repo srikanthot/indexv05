@@ -164,6 +164,14 @@ def main() -> int:
     ap.add_argument("--skip-deploy-principal", action="store_true",
                     help="Skip granting RBAC to the signed-in principal "
                          "(use when Jenkins agent identity already has roles).")
+    ap.add_argument("--skip-roles", action="store_true",
+                    help="Skip STEP 4 (assign_roles.py) entirely. Use in the "
+                         "RECURRING pipeline when the managed-identity role "
+                         "assignments were already provisioned once (by an admin "
+                         "or IaC). This lets the pipeline SP run with LEAST "
+                         "PRIVILEGE -- it then needs NO User Access Administrator "
+                         "and NO Contributor, only the data/service roles it uses "
+                         "directly. See docs/RBAC_LEAST_PRIVILEGE.md.")
     ap.add_argument("--skip-function-app", action="store_true",
                     help="Skip deploying function app code.")
     ap.add_argument("--skip-app-settings", action="store_true",
@@ -332,12 +340,17 @@ def main() -> int:
     # ============================================================
     section("STEP 4 / 8 — Assign RBAC roles")
     # ============================================================
-    role_args = ["--config", args.config, "--wait-for-propagation", "300"]
-    if args.skip_deploy_principal:
-        role_args.append("--skip-deploy-principal")
-    rc = run_script("scripts/assign_roles.py", role_args)
-    if rc != 0:
-        return rc
+    if args.skip_roles:
+        step("--skip-roles set; assuming managed-identity roles were already "
+             "provisioned (one-time, by admin/IaC). Pipeline SP runs least-"
+             "privilege -- no User Access Administrator / Contributor needed.")
+    else:
+        role_args = ["--config", args.config, "--wait-for-propagation", "300"]
+        if args.skip_deploy_principal:
+            role_args.append("--skip-deploy-principal")
+        rc = run_script("scripts/assign_roles.py", role_args)
+        if rc != 0:
+            return rc
  
     # ============================================================
     section("STEP 5 / 8 — Wait for RBAC propagation")
