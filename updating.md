@@ -1,65 +1,119 @@
-Copilot — wire the indexing Jenkins pipeline to these commands. Roles are handled ONCE, manually
-(outside the pipeline), so every pipeline ACTION runs with `--skip-roles` and needs NO User Access
-Administrator / Contributor on the Jenkins SP.
+# RUN THE INDEXING PIPELINE ON YOUR LAPTOP — step by step
+
+Follow these in order, top to bottom. Commands are for Windows PowerShell. Do not skip a step.
 
 ============================================================================
-ONE-TIME, MANUAL (run from VS Code, NOT in the pipeline) -- do this once per environment
+STEP 0 — INSTALL THESE ONCE (skip any you already have)
 ============================================================================
-# a) self-grant the Jenkins SP its data/service roles (all self-grantable; no admin):
-$sp="6be27496-7668-454b-ac68-1a8bcffac97e"; $sub="b41d2ec9-3c69-41f3-8dc7-b1500baeedf1"; $scope="/subscriptions/$sub"
-az role assignment create --assignee $sp --role "Reader"                         --scope $scope
-az role assignment create --assignee $sp --role "Search Service Contributor"     --scope $scope
-az role assignment create --assignee $sp --role "Cognitive Services OpenAI User" --scope $scope
-az role assignment create --assignee $sp --role "Storage Blob Data Contributor"  --scope $scope   # (already done)
-az role assignment create --assignee $sp --role "Search Index Data Contributor"  --scope $scope   # (already done)
-az role assignment create --assignee $sp --role "Cognitive Services User"        --scope $scope   # (already done)
-az cosmosdb sql role assignment create --account-name "<cosmos>" --resource-group "<rg>" `
-  --role-definition-name "Cosmos DB Built-in Data Contributor" --principal-id $sp --scope "/"
-# b) wire the managed identities (function + search) -- data roles only, your account can do it:
+- Python 3.12 (or 3.11):  https://www.python.org/downloads/     check:  python --version
+- Azure CLI (az):          https://aka.ms/installazurecliwindows  check:  az --version
+- Git:                     https://git-scm.com/download/win        check:  git --version
+(Close and reopen your terminal after installing, so the commands are found.)
+
+============================================================================
+STEP 1 — GET THE CODE
+============================================================================
+# if you do NOT have the code yet:
+git clone <REPO-URL>
+cd <REPO-FOLDER>
+
+# if you ALREADY have the code, just update it:
+cd <REPO-FOLDER>
+git pull
+
+============================================================================
+STEP 2 — PYTHON ENVIRONMENT + DEPENDENCIES
+============================================================================
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+# (Mac/Linux instead:  source .venv/bin/activate)
+# You should now see (.venv) at the start of your prompt.
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# NOTE: every NEW terminal window, re-run:  .\.venv\Scripts\Activate.ps1
+
+============================================================================
+STEP 3 — LOG INTO AZURE (US Government cloud)
+============================================================================
+az cloud set --name AzureUSGovernment
+az login
+# ^ a browser opens; sign in with your PSEG work account.
+az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+az account show -o table
+# ^ confirm the Name/Id shown is the DEV subscription.
+
+============================================================================
+STEP 4 — PUT THE CONFIG FILE IN PLACE
+============================================================================
+# Copy deploy.config.json into the ROOT of the repo folder (get the file from Srikanth).
+# Confirm it is there:
+Test-Path deploy.config.json
+# ^ must print: True
+
+============================================================================
+STEP 5 — ONE TIME PER ENVIRONMENT: wire the identity roles  (skip if already done)
+============================================================================
+# This grants the function-app + search managed identities their data roles.
+# Only needs to be done ONCE per environment, by an account allowed to grant
+# data roles. If Srikanth already did it, SKIP this step.
 python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
 
 ============================================================================
-PIPELINE ACTIONS (all use --skip-roles; pick via the ACTION parameter)
+STEP 6 — THE SUPER COMMAND  (does EVERYTHING in one go)
 ============================================================================
+python scripts/deploy.py --config deploy.config.json --skip-roles
 
-ACTION = full        # first time, config change, or index-schema change
-  python scripts/deploy.py --config deploy.config.json --skip-roles
-  # bootstrap(function code + app settings, roles skipped) -> preanalyze ALL (incremental)
-  #   -> deploy_search (PUT: create index if missing, update if exists, NEVER drops data)
-  #   -> reset+run indexer -> heal until 100% -> mark_current_revisions -> coverage.
-  # Add --force-preanalyze ONLY when you changed preanalyze/DI logic (rebuilds the OCR cache).
-
-ACTION = deploy-function   # you changed function/enrichment code
-  python scripts/deploy.py --config deploy.config.json --skip-roles --skip-preanalyze
-  # deploy new function code + (re)deploy artifacts (safe PUT) -> reset+run indexer so docs
-  #   are RE-ENRICHED with the new code -> heal -> currency. NO preanalyze (OCR cache unaffected).
-  # If the code change is trivial (no enrichment impact) and you do NOT want a reindex, use:
-  #   python scripts/bootstrap.py --config deploy.config.json --skip-roles --skip-search-artifacts --skip-cosmos --skip-app-settings --skip-smoke-test
-
-ACTION = nightly     # the cron (02:00) + daily incremental
-  python scripts/run_pipeline.py --config deploy.config.json --triggered-by nightly
-  # reconcile (detect NEW / edited / DELETED PDFs) -> preanalyze ONLY new -> run indexer on
-  #   changes (deletes removed docs, guarded by MAX_PURGES) -> coverage -> mark_current_revisions
-  #   -> optional heal. Does NOT deploy code and does NOT redeploy the index schema.
+# What it does, in order:
+#   1. deploys the function app code
+#   2. preanalyzes every PDF in the blob container (slow on big PDFs -- be patient)
+#   3. creates the search index if it does not exist (never deletes an existing one)
+#   4. runs the indexer over all documents and waits until they are all done
+#   5. sets is_current_revision so the chatbot's currency filter works
+#   6. prints a coverage report
+# Leave it running to the end. It can take a while the first time.
 
 ============================================================================
-WHY THIS IS SAFE (no data loss, no overwrite)
+STEP 7 — CHECK IT WORKED
 ============================================================================
-- deploy_search uses PUT (create-or-update), NEVER DELETE. Index missing -> created; unchanged ->
-  no-op; field ADDED -> updated in place, data kept; INCOMPATIBLE change -> Azure ERRORS (does not
-  silently drop). So re-running never wipes the index.
-- The indexer MERGES documents (mergeOrUpload) -> never deletes existing records.
-- ACTION=nightly never touches the index schema -- only preanalyze + indexer. So the daily run
-  cannot overwrite/recreate the index. "We won't lose the one document" -> correct, it can't happen.
-- Treat index-SCHEMA changes (rename/retype a field) as a deliberate ACTION=full, never nightly --
-  an incompatible schema change is the ONLY thing that needs a drop+rebuild.
+python scripts/check_index.py --config deploy.config.json --coverage
+# ^ shows which PDFs are indexed and how many chunks each has.
 
 ============================================================================
-NOTES
+LATER — DAILY / INCREMENTAL RUN (only new or deleted PDFs)
 ============================================================================
-- Every step is idempotent -- a failed run is safe to re-run; it resumes.
-- mark_current_revisions runs after EVERY index (full + nightly) so the chatbot's
-  `is_current_revision eq true` filter is always correct (skipping it makes the corpus look empty).
-- Only revisit the manual role step if you ADD a brand-new resource (e.g., a 2nd AOAI) -- grant that
-  one resource its roles once. Never per run.
-- disableConcurrentBuilds on the nightly job so two runs don't collide.
+python scripts/run_pipeline.py --config deploy.config.json --triggered-by manual
+# reconcile new/deleted PDFs -> preanalyze only the new ones -> index the changes
+# -> set currency. Safe to run anytime; it never re-does what is already indexed.
+
+============================================================================
+IF SOMETHING FAILS — quick fixes
+============================================================================
+- "unrecognized arguments: --skip-roles"
+      -> your scripts are OLD. Re-run STEP 1 (git pull) to get the latest code.
+- "AuthorizationFailed" / 403
+      -> your Azure account is missing a role on that resource. Tell Srikanth the
+         resource name from the error; it is a one-time role grant.
+- "config not found: deploy.config.json"
+      -> the file is not in the repo root. Redo STEP 4.
+- "(.venv) not showing" or "module not found"
+      -> you did not activate the venv in this terminal. Run:  .\.venv\Scripts\Activate.ps1
+         then  pip install -r requirements.txt  again if needed.
+- az command not found
+      -> Azure CLI not installed / terminal not reopened. Redo STEP 0.
+
+============================================================================
+THE WHOLE THING AS A COPY-PASTE BLOCK (after Step 0 is done once)
+============================================================================
+cd <REPO-FOLDER>
+git pull
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+az cloud set --name AzureUSGovernment
+az login
+az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+# make sure deploy.config.json is in this folder, then:
+python scripts/deploy.py --config deploy.config.json --skip-roles
+python scripts/check_index.py --config deploy.config.json --coverage
