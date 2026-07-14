@@ -23,13 +23,38 @@ Write-Host "==> Publishing function code to $FuncApp"
 # "No process is associated with this object" and aborted a build that was
 # actually fine. cmd.exe redirects stderr to stdout as PLAIN TEXT, so
 # PowerShell just captures strings and we judge success by exit code + output.
+# Prefer `func` (it waits for the remote build). If `func` is NOT installed --
+# e.g. Azure Functions Core Tools is blocked by corporate policy -- fall back to
+# `az functionapp deployment source config-zip`, which needs only the Azure CLI.
+$funcAvailable = [bool](Get-Command func -ErrorAction SilentlyContinue)
+if (-not $funcAvailable) {
+  Write-Host "==> 'func' not found -- deploying with 'az' (config-zip + server-side build) instead." -ForegroundColor Yellow
+}
+
+# Server-side (Oryx) build MUST be on so 'pip install -r requirements.txt' runs
+# on the server. Without it, config-zip uploads files with NO dependencies and
+# 0 functions load. Set it BEFORE the zip deploy.
+az functionapp config appsettings set -g $Rg -n $FuncApp --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true --output none
+az functionapp config appsettings delete -g $Rg -n $FuncApp --setting-names WEBSITE_RUN_FROM_PACKAGE 2>$null | Out-Null
+
 $published = $false
 for ($attempt = 1; $attempt -le 3; $attempt++) {
   Write-Host "==> publish attempt $attempt/3"
-  Push-Location $funcDir
-  $out  = cmd /c "func azure functionapp publish $FuncApp --python --build remote 2>&1"
-  $code = $LASTEXITCODE
-  Pop-Location
+  if ($funcAvailable) {
+    Push-Location $funcDir
+    $out  = cmd /c "func azure functionapp publish $FuncApp --python --build remote 2>&1"
+    $code = $LASTEXITCODE
+    Pop-Location
+  } else {
+    # Zip the CONTENTS of function_app (host.json / requirements.txt at the zip root).
+    $zip = Join-Path $env:TEMP "func_deploy_$FuncApp.zip"
+    if (Test-Path $zip) { Remove-Item $zip -Force }
+    Get-ChildItem -Path $funcDir -Recurse -Directory -Filter '__pycache__' |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Compress-Archive -Path (Join-Path $funcDir '*') -DestinationPath $zip -Force
+    $out  = cmd /c "az functionapp deployment source config-zip -g $Rg -n $FuncApp --src `"$zip`" 2>&1"
+    $code = $LASTEXITCODE
+  }
   $out | ForEach-Object { Write-Host $_ }
   $text = ($out -join "`n")
 
@@ -51,7 +76,14 @@ if (-not $published) {
   catch { Write-Host "(could not fetch deployment log: $_)" }
   Write-Host ""
   Write-Host "NOT continuing with App Settings because the new code isn't live." -ForegroundColor Red
-  throw "func azure functionapp publish failed (see the build log above)."
+  throw "function publish failed (see the build log above)."
+}
+
+# config-zip returns after UPLOAD; the server build runs async. Give it time to
+# install dependencies + load the functions before later steps call them.
+if (-not $funcAvailable) {
+  Write-Host "==> uploaded via az; waiting ~2.5 min for the server to install dependencies + load functions..."
+  Start-Sleep -Seconds 150
 }
 
 Write-Host "==> Applying App Settings"
