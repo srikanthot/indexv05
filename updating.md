@@ -3,6 +3,39 @@
 Follow these in order, top to bottom. Commands are for Windows PowerShell. Do not skip a step.
 
 ============================================================================
+>>> ALREADY STARTED AND GOT "'func' is not recognized"? DO EXACTLY THIS <<<
+============================================================================
+You got far (preflight + preanalyze passed). It only stopped because Azure
+Functions Core Tools (the `func` command) is not installed. Fix it and continue:
+
+1. Install func (Azure Functions Core Tools v4):
+      winget install Microsoft.Azure.FunctionsCoreTools
+   # (or the v4 x64 MSI: https://github.com/Azure/azure-functions-core-tools/releases)
+   # (or, if you have Node.js:  npm install -g azure-functions-core-tools@4 --unsafe-perm true)
+
+2. CLOSE the terminal completely, open a NEW one, and confirm func is found:
+      func --version
+   # must print a 4.x number. If it says "not recognized", the install did not
+   # land on PATH -- reopen the terminal again, or use the MSI installer.
+
+3. Go back into the repo folder and re-activate the environment:
+      cd <REPO-FOLDER>
+      .\.venv\Scripts\Activate.ps1
+
+4. Make sure Azure is still logged in (re-login if it says not):
+      az account show -o table
+      # if that errors:  az login   then   az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+
+5. Re-run the SAME command -- it is idempotent, it resumes where it stopped
+   (preanalyze is already cached, it will jump to deploying the function + indexing):
+      python scripts/deploy.py --config deploy.config.json --skip-roles
+
+That's it. If it stops again, read the error and check the troubleshooting section
+at the bottom. Everything below is the full setup from scratch (for a fresh laptop).
+
+----------------------------------------------------------------------------
+
+============================================================================
 STEP 0 — INSTALL THESE ONCE (skip any you already have)
 ============================================================================
 - Python 3.12 (or 3.11):  https://www.python.org/downloads/     check:  python --version
