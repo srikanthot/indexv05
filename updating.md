@@ -8,7 +8,17 @@ STEP 0 — INSTALL THESE ONCE (skip any you already have)
 - Python 3.12 (or 3.11):  https://www.python.org/downloads/     check:  python --version
 - Azure CLI (az):          https://aka.ms/installazurecliwindows  check:  az --version
 - Git:                     https://git-scm.com/download/win        check:  git --version
+- Azure Functions Core Tools v4 (the `func` command -- REQUIRED to deploy the
+  function app code):
+      winget install Microsoft.Azure.FunctionsCoreTools
+      # (or the v4 x64 MSI from https://github.com/Azure/azure-functions-core-tools/releases)
+      # (or, if you have Node.js:  npm install -g azure-functions-core-tools@4 --unsafe-perm true)
+      check:  func --version     (must print a 4.x version)
 (Close and reopen your terminal after installing, so the commands are found.)
+
+NOTE: LibreOffice is NOT required. If preflight prints "[WARN] LibreOffice (optional)"
+that is safe to ignore for PDF manuals -- it only affects figure extraction from
+.docx/.pptx/.xlsx files, not PDFs.
 
 ============================================================================
 STEP 1 — GET THE CODE
