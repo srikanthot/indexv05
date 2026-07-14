@@ -1,3 +1,28 @@
+# Manager Q&A — "it's one-time, why not just grant it manually once in the portal?"
+
+**Short answer: yes, that's exactly the plan — the manager is right.**
+
+- Granting the Jenkins robot **User Access Administrator** IS a one-time, manual action: open the Azure
+  portal -> Add role assignment -> give the robot that role once. It's **permanent** — never redone.
+  New resource groups / new resources are all covered.
+- After that one grant, the indexing pipeline runs end-to-end forever. No repeated effort.
+
+**The one nuance (be clear with the team):** there are two senses of "one-time":
+- One-time to GRANT ✅ — you do it once.
+- Permanent to HOLD — the robot then *holds* that privileged role going forward (standing permission on
+  an automation identity). For a **dev** subscription this is normal and generally fine — it's how most
+  self-provisioning CI pipelines work.
+
+**If security ever objects to the robot holding that permission:** alternative with NO standing
+privilege — a person does the role assignments manually once, and the pipeline is set to SKIP role
+assignment (`--skip-roles`, already built). Those are all "data" roles I can grant myself, so that path
+may not even need Adam. Slightly more setup; only use it if the team objects to the standing grant.
+
+**Decision for dev:** if the team is OK with the robot holding the role (standard for dev), just do the
+one-time manual grant below and we're done.
+
+---
+
 # >>> MESSAGE TO FORWARD TO ADAM (copy from here) <<<
 
 Hey Adam, good afternoon! 🙂
