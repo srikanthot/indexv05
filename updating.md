@@ -1,105 +1,65 @@
-# Manager Q&A — "it's one-time, why not just grant it manually once in the portal?"
+Copilot — wire the indexing Jenkins pipeline to these commands. Roles are handled ONCE, manually
+(outside the pipeline), so every pipeline ACTION runs with `--skip-roles` and needs NO User Access
+Administrator / Contributor on the Jenkins SP.
 
-**Short answer: yes, that's exactly the plan — the manager is right.**
+============================================================================
+ONE-TIME, MANUAL (run from VS Code, NOT in the pipeline) -- do this once per environment
+============================================================================
+# a) self-grant the Jenkins SP its data/service roles (all self-grantable; no admin):
+$sp="6be27496-7668-454b-ac68-1a8bcffac97e"; $sub="b41d2ec9-3c69-41f3-8dc7-b1500baeedf1"; $scope="/subscriptions/$sub"
+az role assignment create --assignee $sp --role "Reader"                         --scope $scope
+az role assignment create --assignee $sp --role "Search Service Contributor"     --scope $scope
+az role assignment create --assignee $sp --role "Cognitive Services OpenAI User" --scope $scope
+az role assignment create --assignee $sp --role "Storage Blob Data Contributor"  --scope $scope   # (already done)
+az role assignment create --assignee $sp --role "Search Index Data Contributor"  --scope $scope   # (already done)
+az role assignment create --assignee $sp --role "Cognitive Services User"        --scope $scope   # (already done)
+az cosmosdb sql role assignment create --account-name "<cosmos>" --resource-group "<rg>" `
+  --role-definition-name "Cosmos DB Built-in Data Contributor" --principal-id $sp --scope "/"
+# b) wire the managed identities (function + search) -- data roles only, your account can do it:
+python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
 
-- Granting the Jenkins robot **User Access Administrator** IS a one-time, manual action: open the Azure
-  portal -> Add role assignment -> give the robot that role once. It's **permanent** — never redone.
-  New resource groups / new resources are all covered.
-- After that one grant, the indexing pipeline runs end-to-end forever. No repeated effort.
+============================================================================
+PIPELINE ACTIONS (all use --skip-roles; pick via the ACTION parameter)
+============================================================================
 
-**The one nuance (be clear with the team):** there are two senses of "one-time":
-- One-time to GRANT ✅ — you do it once.
-- Permanent to HOLD — the robot then *holds* that privileged role going forward (standing permission on
-  an automation identity). For a **dev** subscription this is normal and generally fine — it's how most
-  self-provisioning CI pipelines work.
+ACTION = full        # first time, config change, or index-schema change
+  python scripts/deploy.py --config deploy.config.json --skip-roles
+  # bootstrap(function code + app settings, roles skipped) -> preanalyze ALL (incremental)
+  #   -> deploy_search (PUT: create index if missing, update if exists, NEVER drops data)
+  #   -> reset+run indexer -> heal until 100% -> mark_current_revisions -> coverage.
+  # Add --force-preanalyze ONLY when you changed preanalyze/DI logic (rebuilds the OCR cache).
 
-**If security ever objects to the robot holding that permission:** alternative with NO standing
-privilege — a person does the role assignments manually once, and the pipeline is set to SKIP role
-assignment (`--skip-roles`, already built). Those are all "data" roles I can grant myself, so that path
-may not even need Adam. Slightly more setup; only use it if the team objects to the standing grant.
+ACTION = deploy-function   # you changed function/enrichment code
+  python scripts/deploy.py --config deploy.config.json --skip-roles --skip-preanalyze
+  # deploy new function code + (re)deploy artifacts (safe PUT) -> reset+run indexer so docs
+  #   are RE-ENRICHED with the new code -> heal -> currency. NO preanalyze (OCR cache unaffected).
+  # If the code change is trivial (no enrichment impact) and you do NOT want a reindex, use:
+  #   python scripts/bootstrap.py --config deploy.config.json --skip-roles --skip-search-artifacts --skip-cosmos --skip-app-settings --skip-smoke-test
 
-**Decision for dev:** if the team is OK with the robot holding the role (standard for dev), just do the
-one-time manual grant below and we're done.
+ACTION = nightly     # the cron (02:00) + daily incremental
+  python scripts/run_pipeline.py --config deploy.config.json --triggered-by nightly
+  # reconcile (detect NEW / edited / DELETED PDFs) -> preanalyze ONLY new -> run indexer on
+  #   changes (deletes removed docs, guarded by MAX_PURGES) -> coverage -> mark_current_revisions
+  #   -> optional heal. Does NOT deploy code and does NOT redeploy the index schema.
 
----
+============================================================================
+WHY THIS IS SAFE (no data loss, no overwrite)
+============================================================================
+- deploy_search uses PUT (create-or-update), NEVER DELETE. Index missing -> created; unchanged ->
+  no-op; field ADDED -> updated in place, data kept; INCOMPATIBLE change -> Azure ERRORS (does not
+  silently drop). So re-running never wipes the index.
+- The indexer MERGES documents (mergeOrUpload) -> never deletes existing records.
+- ACTION=nightly never touches the index schema -- only preanalyze + indexer. So the daily run
+  cannot overwrite/recreate the index. "We won't lose the one document" -> correct, it can't happen.
+- Treat index-SCHEMA changes (rename/retype a field) as a deliberate ACTION=full, never nightly --
+  an incompatible schema change is the ONLY thing that needs a drop+rebuild.
 
-# >>> MESSAGE TO FORWARD TO ADAM (copy from here) <<<
-
-Hey Adam, good afternoon! 🙂
-
-I'm setting up the **Tech Manual Indexing** pipeline in Jenkins (the one that builds the Azure Search
-index behind the tech‑manual chatbot). I've got it almost fully working, but I'm blocked on **one Azure
-permission** that only someone with your access can grant.
-
-Could you please grant **User Access Administrator** to our Jenkins service principal, at the
-**subscription** level?
-
-- **Service principal:** PSEG Tech Manual - Jenkins  (appId `6be27496-7668-454b-ac68-1a8bcffac97e`)
-- **Role:** User Access Administrator  (just this one — not Owner / not Contributor)
-- **Scope:** subscription level — **dev** (`b41d2ec9-3c69-41f3-8dc7-b1500baeedf1`) now, and **qa + prod**
-  when we promote
-
-**Why I need it:** the indexing pipeline wires several Azure services (Search, OpenAI, Storage, Document
-Intelligence, Function App, Cosmos) to securely talk to each other via managed identities. To do that it
-**creates role assignments**, and Azure only lets an identity assign roles if it has **User Access
-Administrator**. It's a **one‑time** grant — at subscription scope it covers every resource group, so I
-won't have to come back each time we add a resource.
-
-I've already set up all the other (data) roles myself — this is the only piece I can't do, because my own
-account is restricted from granting privileged roles.
-
-Happy to jump on a quick call if you'd like more context. Thanks so much for the help! 🙏
-
-CLI if that's easier (dev — repeat with qa/prod subscription IDs):
-```
-az role assignment create --assignee "6be27496-7668-454b-ac68-1a8bcffac97e" --role "User Access Administrator" --scope "/subscriptions/b41d2ec9-3c69-41f3-8dc7-b1500baeedf1"
-```
-
-# >>> END OF MESSAGE TO ADAM <<<
-
----
----
-
-# Background / justification (for my own reference or if Adam asks for detail)
-
-## The blocker (one line)
-The Tech Manual Indexing pipeline's service principal needs **User Access Administrator** at the
-**subscription scope**. Without it, the pipeline fails at the role‑assignment step
-(`AuthorizationFailed on Microsoft.Authorization/roleAssignments/write`).
-
-## Why this permission is needed
-The indexing pipeline doesn't just deploy code — it **sets up a whole AI system** where several Azure
-services must securely talk to each other (Search ↔ AOAI ↔ Storage ↔ Document Intelligence ↔ Function
-App ↔ Cosmos) using **managed identities** instead of keys. To wire those identities together, the
-pipeline **creates role assignments** for them. Azure's rule: to grant a permission you must have
-permission to grant permissions — that role is **User Access Administrator**. So the pipeline that
-assigns roles must itself hold UAA. One‑time; subscription scope covers all resource groups.
-
-## Why the chatbot (front‑end / back‑end) pipeline does NOT need this
-| | What it does | Assigns roles? | Needs UAA? |
-|---|---|---|---|
-| **Chatbot pipeline** | copies code onto an **existing web app** | No | **No** |
-| **Indexing pipeline** | wires the AI services' identities together, then deploys + indexes | **Yes** | **Yes** |
-
-The chatbot only pushes code to an app that already exists — it never touches security wiring. The
-indexing pipeline has to provision the identity permissions for the AI services, which is the privileged
-action.
-
-## Bicep vs Indexing — same permission either way
-Assigning roles needs **User Access Administrator no matter which pipeline does it** — only the holder
-changes. If Bicep assigns the roles, the Bicep identity needs UAA; if the indexing pipeline assigns them
-(our choice), the indexing SP needs UAA. There is no way to avoid this one grant; we only chose where it
-lives (the indexing pipeline). Bicep stays as the resource‑creation pipeline only.
-
-## What's already done (so this is the only gap)
-- Data/service roles (Storage Blob Data, Search Index Data, Cognitive Services, etc.) — already granted
-  by me; succeeded.
-- **User Access Administrator** — failed when I tried (my account is ABAC‑restricted from privileged
-  roles). This is the single remaining piece and needs Adam.
-
-## After the grant (no more admin needed)
-1. I self‑grant the SP's remaining data/service roles (Reader, Search Service Contributor, Cognitive
-   Services OpenAI User, Cosmos data).
-2. Re‑run the indexing pipeline → it assigns the identity roles + deploys + creates the search index +
-   runs the indexer, automatically, and nightly thereafter.
-3. Holds for every future resource group in the subscription — no repeat requests.
+============================================================================
+NOTES
+============================================================================
+- Every step is idempotent -- a failed run is safe to re-run; it resumes.
+- mark_current_revisions runs after EVERY index (full + nightly) so the chatbot's
+  `is_current_revision eq true` filter is always correct (skipping it makes the corpus look empty).
+- Only revisit the manual role step if you ADD a brand-new resource (e.g., a 2nd AOAI) -- grant that
+  one resource its roles once. Never per run.
+- disableConcurrentBuilds on the nightly job so two runs don't collide.

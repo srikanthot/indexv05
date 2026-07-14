@@ -317,6 +317,18 @@ def main() -> int:
     if rc != 0:
         overall_rc = max(overall_rc, rc)
 
+    # 4.2. Currency pass: set is_current_revision on the newest revision of each
+    # manual. Nightly ingests can add/replace docs, so re-run every night —
+    # otherwise the chatbot's `is_current_revision eq true` filter goes stale or
+    # empty. Best-effort: a failure here does not fail the run.
+    rc_cur, _ = run_step(
+        "mark_current_revisions --apply",
+        [py, str(REPO_ROOT / "scripts" / "mark_current_revisions.py"),
+         "--config", args.config, "--apply"],
+        allow_fail=True,
+    )
+    step_results["mark_current_revisions"] = {"exit_code": rc_cur}
+
     # 4.5. Optional auto-heal: detect any PDF the indexer didn't fully
     # process (partial chunks, no summary, missing DI cache) and force a
     # clean re-process for just those files. Bounded by --heal-passes
