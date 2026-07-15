@@ -21,59 +21,70 @@ ROOT CAUSE (both errors are the SAME problem):
   You must self-grant the roles below.
 
 ------------------------------------------------------------
-PART A — GRANT THE ROLES (run in VS Code terminal, ONE COMMAND AT A TIME)
+PART A — GRANT THE ROLES (run in VS Code terminal, ONE LINE AT A TIME)
 ------------------------------------------------------------
 Run these as YOURSELF (your admin account that is allowed to create role assignments) --
-NOT as the Jenkins SP. The SP cannot grant itself roles. Run them one by one, top to
-bottom. If any command errors, copy the error to Copilot and ask it to fix that one line.
+NOT as the Jenkins SP. The SP cannot grant itself roles.
+
+>>> IMPORTANT: run EXACTLY ONE line at a time. Paste one line, press Enter, wait for it to
+>>> finish, THEN do the next. Do NOT paste several lines together -- that is what caused the
+>>> "unrecognized arguments" error. If any single line errors, copy that error to Copilot
+>>> and ask it to fix that one line.
 
 A1. Set the Azure Government cloud:
       az cloud set --name AzureUSGovernment
 
-A2. Log in as yourself (a browser opens -- sign in with your PSEG admin account):
-      az login
+A2. Log in as yourself (device-code login -- open the URL it prints and enter the code):
+      az login --use-device-code
 
-A3. Point at the DEV subscription (replace <DEV_SUBSCRIPTION_ID> with the real id):
-      az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+A3. Point at the DEV subscription:
+      az account set --subscription "b41d2ec9-3c69-41f3-8dc7-b1500baeedf1"
 
-A4. Save the subscription id, the Jenkins SP id, and the scope into variables:
-      $sub   = az account show --query id -o tsv
-      $sp    = "d21336b2-a818-4e2c-a8b7-278aa5113fd7"
+A4. Save the subscription id into a variable:
+      $sub = az account show --query id -o tsv
+
+A5. Save the Jenkins SP id into a variable:
+      $sp = "d21336b2-a818-4e2c-a8b7-278aa5113fd7"
+
+A6. Save the scope into a variable:
       $scope = "/subscriptions/$sub"
-    # (optional) confirm they are set -- both lines should print a value:
-      echo $sub
-      echo $sp
 
-A5. Grant Reader  <-- THIS is the one that fixes your preflight error:
+A7. Confirm $sub printed a value (should show b41d2ec9-...):
+      echo $sub
+
+A8. Confirm $scope printed a value (should show /subscriptions/b41d2ec9-...):
+      echo $scope
+
+A9. Grant Reader  <-- THIS is the one that fixes your preflight error:
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Reader" --scope $scope
 
-A6. Grant Website Contributor (deploy the function app code):
+A10. Grant Website Contributor (deploy the function app code):
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Website Contributor" --scope $scope
 
-A7. Grant Search Service Contributor (create/update index, skillset, indexer):
+A11. Grant Search Service Contributor (create/update index, skillset, indexer):
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Search Service Contributor" --scope $scope
 
-A8. Grant Search Index Data Contributor (write/query index documents):
+A12. Grant Search Index Data Contributor (write/query index documents):
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $scope
 
-A9. Grant Storage Blob Data Contributor (read/write cache blobs):
+A13. Grant Storage Blob Data Contributor (read/write cache blobs):
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope $scope
 
-A10. Grant Cognitive Services OpenAI User (embeddings/vision):
+A14. Grant Cognitive Services OpenAI User (embeddings/vision):
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Cognitive Services OpenAI User" --scope $scope
 
-A11. Grant Cognitive Services User (Document Intelligence):
+A15. Grant Cognitive Services User (Document Intelligence):
       az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Cognitive Services User" --scope $scope
 
-A12. Grant the Cosmos data role (SEPARATE command -- different API, do not skip):
+A16. Grant the Cosmos data role (SEPARATE command -- different API, do not skip):
       az cosmosdb sql role assignment create --account-name psegtmcosmdevv01 --resource-group psegtmrgdevv01 --role-definition-name "Cosmos DB Built-in Data Contributor" --principal-id $sp --scope "/"
 
-A13. Wire up the managed identities (function app + search service). ONE TIME per
+A17. Wire up the managed identities (function app + search service). ONE TIME per
      environment. Needs deploy.config.json in the repo root (see STEP 4) and the venv
      activated (see STEP 2). If Srikanth already did this, skip it:
       python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
 
-A14. Wait ~2 minutes for the roles to take effect, then go to Jenkins and run ACTION=check
+A18. Wait ~2 minutes for the roles to take effect, then go to Jenkins and run ACTION=check
      (see PART B below). If storage STILL says "not found" after this, the account name or
      subscription in the config is wrong -- ask Copilot/Srikanth.
 
