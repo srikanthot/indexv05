@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Publish the Function App code and apply App Settings from deploy.config.json.
-# Requires: az CLI (logged in) + jq. Azure Functions Core Tools (func) is
-# OPTIONAL -- if it is not on PATH (common on locked-down CI agents; func
-# exits 127 "command not found"), this falls back to
-# `az functionapp deployment source config-zip` with a server-side Oryx
-# build, which needs only the Azure CLI. Mirrors deploy_function.ps1.
+# Requires: az CLI (logged in) + jq + curl. Azure Functions Core Tools (func)
+# is OPTIONAL -- if it is not on PATH (common on locked-down CI agents; func
+# exits 127 "command not found"), this falls back to a Kudu /api/zipdeploy with
+# a SERVER-SIDE (Oryx) build -- the same thing `func ... --build remote` does
+# under the hood, so requirements.txt is pip-installed on the server. We do NOT
+# use `az functionapp deployment source config-zip`: it force-sets
+# SCM_DO_BUILD_DURING_DEPLOYMENT=false and skips the build, which ships the code
+# WITHOUT its dependencies (functions then fail to import at runtime).
 #
 # Usage:
 #   scripts/deploy_function.sh [deploy.config.json]
@@ -22,48 +25,37 @@ RG=$(jq -r '.functionApp.resourceGroup' "$CONFIG")
 [[ -z "$FUNC_APP" || -z "$RG" ]] && { echo "functionApp.name and functionApp.resourceGroup must be set in $CONFIG" >&2; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-echo "==> Publishing function code to ${FUNC_APP}"
 FUNC_DIR="${REPO_ROOT}/function_app"
 
-# Prefer `func` (it waits for the remote build). If it is NOT installed --
-# e.g. Azure Functions Core Tools is missing/blocked on the CI agent, which
-# surfaces as exit 127 "command not found" -- fall back to
-# `az functionapp deployment source config-zip`, which needs only the Azure CLI.
+echo "==> Publishing function code to ${FUNC_APP}"
+
 if command -v func >/dev/null 2>&1; then
   FUNC_AVAILABLE=1
 else
   FUNC_AVAILABLE=0
-  echo "==> 'func' not found -- deploying with 'az' (config-zip + server-side build) instead."
+  echo "==> 'func' not found -- deploying via Kudu zip deploy with a server-side (Oryx) build."
 fi
 
 # Server-side (Oryx) build MUST be on so 'pip install -r requirements.txt' runs
-# on the server. Without it, config-zip uploads files with NO dependencies and
-# 0 functions load. Set BEFORE the zip deploy. Harmless for the func path.
+# on the server. Set BEFORE the deploy. WEBSITE_RUN_FROM_PACKAGE would bypass
+# the build, so remove it. Kudu /api/zipdeploy honors these settings (unlike
+# `az ... config-zip`, which force-disables the build).
 az functionapp config appsettings set -g "${RG}" -n "${FUNC_APP}" \
   --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true ENABLE_ORYX_BUILD=true --output none
 az functionapp config appsettings delete -g "${RG}" -n "${FUNC_APP}" \
   --setting-names WEBSITE_RUN_FROM_PACKAGE --output none 2>/dev/null || true
 
-# Capture output so we can scan for transient-failure markers that neither
-# tool always reflects in its exit code (ServiceUnavailable, 504, etc.).
-# Retry up to 3x -- publish/Kudu failures are frequently transient.
-PUBLISHED=0
-for attempt in 1 2 3; do
-  echo "==> publish attempt ${attempt}/3"
-  PUBLISH_LOG="$(mktemp)"
-  set +e
-  if [[ $FUNC_AVAILABLE -eq 1 ]]; then
-    pushd "${FUNC_DIR}" >/dev/null
-    func azure functionapp publish "${FUNC_APP}" --python 2>&1 | tee "${PUBLISH_LOG}"
-    PUBLISH_RC=${PIPESTATUS[0]}
-    popd >/dev/null
-  else
-    # Zip the CONTENTS of function_app (host.json / requirements.txt at the zip
-    # ROOT -- Azure requires that). Use python3 (guaranteed by the pipeline) so
-    # we don't depend on a `zip` binary being present; skip __pycache__.
-    ZIP="$(mktemp -u).zip"
-    python3 - "${FUNC_DIR}" "${ZIP}" <<'PY'
+# kudu_zipdeploy: POST the zip to Kudu with a server-side build, then poll the
+# deployment to completion. Sets OK=1 on success. Needs SCM host + an AAD token
+# (the SP's Website Contributor role authenticates to Kudu).
+kudu_zipdeploy() {
+  OK=0
+  local zip scm_host token up_code status_json complete dstatus i
+  zip="$(mktemp -u).zip"
+  # Zip the CONTENTS of function_app (host.json / requirements.txt at the zip
+  # ROOT -- Oryx needs requirements.txt at the root). python3 is guaranteed by
+  # the pipeline, so we don't depend on a `zip` binary; skip __pycache__.
+  python3 - "${FUNC_DIR}" "${zip}" <<'PY'
 import os, sys, zipfile
 src, dst = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
@@ -73,20 +65,75 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
             full = os.path.join(root, f)
             z.write(full, os.path.relpath(full, src))
 PY
-    az functionapp deployment source config-zip \
-      -g "${RG}" -n "${FUNC_APP}" --src "${ZIP}" 2>&1 | tee "${PUBLISH_LOG}"
+  scm_host="$(az functionapp show -g "${RG}" -n "${FUNC_APP}" \
+    --query "hostNameSslStates[?hostType=='Repository'].name | [0]" -o tsv)"
+  token="$(az account get-access-token --query accessToken -o tsv)"
+  if [[ -z "$scm_host" || -z "$token" ]]; then
+    echo "  could not resolve SCM host or access token" >&2
+    rm -f "${zip}"
+    return
+  fi
+
+  echo "  uploading zip to https://${scm_host}/api/zipdeploy (async, server build)..."
+  up_code="$(curl -sS -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/zip" \
+    --data-binary @"${zip}" \
+    -o /dev/null -w '%{http_code}' \
+    "https://${scm_host}/api/zipdeploy?isAsync=true")"
+  rm -f "${zip}"
+  echo "  zipdeploy responded HTTP ${up_code}"
+  if [[ "$up_code" != "200" && "$up_code" != "202" ]]; then
+    return
+  fi
+
+  # Oryx build (pymupdf/httpx/azure-*) can take several minutes. Poll up to ~12m.
+  echo "  building on the server + loading functions (polling up to ~12 min)..."
+  for i in $(seq 1 48); do
+    sleep 15
+    status_json="$(curl -sS -H "Authorization: Bearer ${token}" \
+      "https://${scm_host}/api/deployments/latest" 2>/dev/null || true)"
+    complete="$(printf '%s' "$status_json" | jq -r '.complete // empty' 2>/dev/null || true)"
+    dstatus="$(printf '%s' "$status_json" | jq -r '.status // empty' 2>/dev/null || true)"
+    if [[ "$complete" == "true" ]]; then
+      # Kudu DeployStatus: 4 = Success, 3 = Failed.
+      if [[ "$dstatus" == "4" ]]; then
+        OK=1
+        echo "  server build complete (status=Success)."
+      else
+        echo "  server build finished but status=${dstatus} (not Success)." >&2
+      fi
+      return
+    fi
+  done
+  echo "  timed out waiting for the server build to complete." >&2
+}
+
+PUBLISHED=0
+for attempt in 1 2 3; do
+  echo "==> publish attempt ${attempt}/3"
+  set +e
+  if [[ $FUNC_AVAILABLE -eq 1 ]]; then
+    PUBLISH_LOG="$(mktemp)"
+    pushd "${FUNC_DIR}" >/dev/null
+    func azure functionapp publish "${FUNC_APP}" --python 2>&1 | tee "${PUBLISH_LOG}"
     PUBLISH_RC=${PIPESTATUS[0]}
-    rm -f "${ZIP}"
+    popd >/dev/null
+    OK=0
+    if [[ $PUBLISH_RC -eq 0 ]] && \
+       ! grep -qE 'Remote build failed|Deployment failed|Error Uploading archive|ServiceUnavailable|GatewayTimeout' "${PUBLISH_LOG}"; then
+      OK=1
+    fi
+    rm -f "${PUBLISH_LOG}"
+  else
+    kudu_zipdeploy
   fi
   set -e
 
-  if [[ $PUBLISH_RC -eq 0 ]] && \
-     ! grep -qE 'Remote build failed|Deployment failed|Error Uploading archive|ServiceUnavailable|GatewayTimeout|Connection Timed Out|Application Error' "${PUBLISH_LOG}"; then
+  if [[ $OK -eq 1 ]]; then
     PUBLISHED=1
-    rm -f "${PUBLISH_LOG}"
     break
   fi
-  rm -f "${PUBLISH_LOG}"
 
   if [[ $attempt -lt 3 ]]; then
     echo "==> attempt ${attempt} failed (transient?); restarting app + waiting 45s, then retry..."
@@ -105,12 +152,10 @@ if [[ $PUBLISHED -ne 1 ]]; then
   exit 1
 fi
 
-# config-zip returns after UPLOAD; the server build runs async. Give it time to
-# install dependencies + load the functions before later steps call them.
-if [[ $FUNC_AVAILABLE -eq 0 ]]; then
-  echo "==> uploaded via az; waiting ~2.5 min for the server to install dependencies + load functions..."
-  sleep 150
-fi
+# Give the workers a moment to load the freshly built package before later
+# steps (indexer skills) call them.
+echo "==> published; waiting 60s for workers to load the new package..."
+sleep 60
 
 echo "==> Applying App Settings"
 
@@ -156,6 +201,9 @@ SETTINGS=(
   # comfortably handles dop=6 across 5 per-record skills (30 max concurrent).
   "FUNCTIONS_WORKER_PROCESS_COUNT=4"
   "PYTHON_THREADPOOL_THREAD_COUNT=16"
+  # Keep the server-side build enabled for future deploys.
+  "SCM_DO_BUILD_DURING_DEPLOYMENT=true"
+  "ENABLE_ORYX_BUILD=true"
 )
 
 # Only set App Insights if a connection string is provided.
