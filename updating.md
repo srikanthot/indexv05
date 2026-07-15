@@ -112,6 +112,29 @@ PART B — WHAT TO PICK IN THE JENKINS "ACTION" DROPDOWN
     DRY_RUN     -> leave UNCHECKED. Heads-up: it is declared in the Jenkinsfile but NOT wired
                    into any stage, so toggling it currently does nothing. Do not rely on it.
 
+------------------------------------------------------------
+THE PERMISSIONS (ROLES) THIS INDEXING PIPELINE NEEDS
+------------------------------------------------------------
+These are the built-in Azure roles the pipeline uses. All are least-privilege
+(data-plane / service-specific) -- NO Owner, Contributor, or User Access
+Administrator. They are shared across three identities (the Jenkins pipeline SP,
+the Search service identity, the Function App identity).
+
+  Permission (role)                    | What it lets the identity do
+  -------------------------------------|-------------------------------------------------
+  Reader                               | See/list the resources in the resource group
+  Website Contributor                  | Deploy the code to the Function App
+  Search Service Contributor           | Create/update the search index, indexer, skillset
+  Search Index Data Contributor        | Write and query documents in the search index
+  Search Index Data Reader             | Read documents from the search index
+  Storage Blob Data Contributor        | Read and write files/cache in the storage account
+  Storage Blob Data Reader             | Read files from the storage account
+  Cognitive Services OpenAI User       | Call the AI models (embeddings + vision)
+  Cognitive Services User              | Call Document Intelligence / AI Services
+  Cosmos DB Built-in Data Contributor  | Read/write data in Cosmos DB (run history + state)
+
+(For which identity gets which role on which resource, see docs/BICEP_RBAC_CHECKLIST.md.)
+
 ----------------------------------------------------------------------------
 
 ============================================================================
