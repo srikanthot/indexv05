@@ -47,10 +47,11 @@ az functionapp config appsettings delete -g "${RG}" -n "${FUNC_APP}" \
 
 # kudu_zipdeploy: POST the zip to Kudu with a server-side build, then poll the
 # deployment to completion. Sets OK=1 on success. Needs SCM host + an AAD token
-# (the SP's Website Contributor role authenticates to Kudu).
+# (the SP's Website Contributor role authenticates to Kudu). Uses only python3
+# (stdlib urllib) + az -- no dependency on curl or jq being on the agent.
 kudu_zipdeploy() {
   OK=0
-  local zip scm_host token up_code status_json complete dstatus i
+  local zip scm_host token rc
   zip="$(mktemp -u).zip"
   # Zip the CONTENTS of function_app (host.json / requirements.txt at the zip
   # ROOT -- Oryx needs requirements.txt at the root). python3 is guaranteed by
@@ -74,39 +75,61 @@ PY
     return
   fi
 
-  echo "  uploading zip to https://${scm_host}/api/zipdeploy (async, server build)..."
-  up_code="$(curl -sS -X POST \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/zip" \
-    --data-binary @"${zip}" \
-    -o /dev/null -w '%{http_code}' \
-    "https://${scm_host}/api/zipdeploy?isAsync=true")"
-  rm -f "${zip}"
-  echo "  zipdeploy responded HTTP ${up_code}"
-  if [[ "$up_code" != "200" && "$up_code" != "202" ]]; then
-    return
-  fi
+  # POST the zip and poll the build to completion. Token is passed via env
+  # (not argv) so it doesn't show up in the process list.
+  KUDU_TOKEN="$token" python3 - "$scm_host" "$zip" <<'PY'
+import json, os, sys, time, urllib.request, urllib.error
+scm, zip_path = sys.argv[1], sys.argv[2]
+token = os.environ["KUDU_TOKEN"]
 
-  # Oryx build (pymupdf/httpx/azure-*) can take several minutes. Poll up to ~12m.
-  echo "  building on the server + loading functions (polling up to ~12 min)..."
-  for i in $(seq 1 48); do
-    sleep 15
-    status_json="$(curl -sS -H "Authorization: Bearer ${token}" \
-      "https://${scm_host}/api/deployments/latest" 2>/dev/null || true)"
-    complete="$(printf '%s' "$status_json" | jq -r '.complete // empty' 2>/dev/null || true)"
-    dstatus="$(printf '%s' "$status_json" | jq -r '.status // empty' 2>/dev/null || true)"
-    if [[ "$complete" == "true" ]]; then
-      # Kudu DeployStatus: 4 = Success, 3 = Failed.
-      if [[ "$dstatus" == "4" ]]; then
-        OK=1
-        echo "  server build complete (status=Success)."
-      else
-        echo "  server build finished but status=${dstatus} (not Success)." >&2
-      fi
-      return
-    fi
-  done
-  echo "  timed out waiting for the server build to complete." >&2
+def call(url, method="GET", body=None, ctype=None):
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Authorization", "Bearer " + token)
+    if ctype:
+        req.add_header("Content-Type", ctype)
+    return urllib.request.urlopen(req, timeout=600)
+
+with open(zip_path, "rb") as fh:
+    data = fh.read()
+
+deploy_url = "https://%s/api/zipdeploy?isAsync=true" % scm
+try:
+    resp = call(deploy_url, "POST", data, "application/zip")
+    print("  zipdeploy accepted (HTTP %s); building on server + polling ~12 min..." % resp.getcode())
+except urllib.error.HTTPError as e:
+    detail = e.read()[:600].decode("utf-8", "replace")
+    print("  zipdeploy REJECTED: HTTP %s %s" % (e.code, detail))
+    if e.code in (401, 403):
+        print("  -> Kudu did not accept the SP's AAD token. Tell the maintainer:")
+        print("     SCM AAD auth may be disabled, or the SP needs 'Website Contributor'.")
+    sys.exit(2)
+except Exception as e:
+    print("  zipdeploy failed to send: %s" % e)
+    sys.exit(2)
+
+status_url = "https://%s/api/deployments/latest" % scm
+for _ in range(48):  # 48 * 15s = ~12 min
+    time.sleep(15)
+    try:
+        info = json.load(call(status_url))
+    except Exception:
+        continue
+    if info.get("complete"):
+        st = info.get("status")           # Kudu DeployStatus: 4=Success, 3=Failed
+        if st == 4:
+            print("  server build complete (status=Success).")
+            sys.exit(0)
+        print("  server build FINISHED but status=%s (not Success)." % st)
+        print("  log_url=%s" % info.get("log_url"))
+        sys.exit(3)
+print("  timed out waiting ~12 min for the server build to complete.")
+sys.exit(4)
+PY
+  rc=$?
+  rm -f "${zip}"
+  if [[ $rc -eq 0 ]]; then
+    OK=1
+  fi
 }
 
 PUBLISHED=0
