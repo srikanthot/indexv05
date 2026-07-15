@@ -86,14 +86,15 @@ def _list_blob_metadata(cfg: dict) -> dict[str, dict[str, Any]]:
  
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    from preanalyze import _get_connection_string  # local import — same module
-    conn_str = _get_connection_string(cfg)
+    from preanalyze import _account_name  # local import — same module
+    account = _account_name(cfg)
     az_bin = "az.cmd" if os.name == "nt" else "az"
     raw = subprocess.run(
         [
             az_bin, "storage", "blob", "list",
             "--container-name", container,
-            "--connection-string", conn_str,
+            "--account-name", account,
+            "--auth-mode", "login",
             "--num-results", "*",
             "--query", "[].{name:name, last_modified:properties.lastModified, length:properties.contentLength}",
             "-o", "json",

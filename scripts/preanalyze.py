@@ -60,7 +60,6 @@ import httpx
 _aoai_key_cache: str | None = None
 _aoai_key_lock = threading.Lock()
 _di_key_lock = threading.Lock()
-_conn_str_lock = threading.Lock()
 _storage_init_lock = threading.Lock()
  
 FIGURE_REF_RE = re.compile(
@@ -335,7 +334,6 @@ def _account_name(cfg: dict) -> str:
     return parts[-1]
  
  
-_conn_str_cache: str | None = None
  
  
 def _run_az(cmd: list[str]) -> str:
@@ -350,30 +348,14 @@ def _run_az(cmd: list[str]) -> str:
     return r.stdout.strip()
  
  
-def _get_connection_string(cfg: dict) -> str:
-    global _conn_str_cache
-    if _conn_str_cache is not None:
-        return _conn_str_cache
-    with _conn_str_lock:
-        if _conn_str_cache is not None:
-            return _conn_str_cache
-        account = _account_name(cfg)
-        rg = cfg["functionApp"]["resourceGroup"]
-        raw = _run_az([
-            "az", "storage", "account", "show-connection-string",
-            "--name", account, "--resource-group", rg, "-o", "json",
-        ])
-        _conn_str_cache = json.loads(raw)["connectionString"]
-        return _conn_str_cache
+# NOTE: storage access is AAD-only (see _init_storage / _get_storage_token and
+# the --auth-mode login CLI calls). We deliberately do NOT use
+# `az storage account show-connection-string` / account keys, because that
+# requires the Microsoft.Storage/.../listKeys permission the least-privilege
+# pipeline SP does not have (see docs/RBAC_LEAST_PRIVILEGE.md). Do not
+# reintroduce connection-string / shared-key access here.
  
  
-def _parse_conn_str(conn_str: str) -> dict[str, str]:
-    parts = {}
-    for pair in conn_str.split(";"):
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            parts[k] = v
-    return parts
  
  
 _storage_client: httpx.Client | None = None
@@ -489,11 +471,12 @@ def list_pdfs(cfg: dict) -> list[str]:
     """
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    conn_str = _get_connection_string(cfg)
+    account = _account_name(cfg)
     raw = _run_az([
         "az", "storage", "blob", "list",
         "--container-name", container,
-        "--connection-string", conn_str,
+        "--account-name", account,
+        "--auth-mode", "login",
         "--num-results", "*",
         "--query", "[].name",
         "-o", "json",
@@ -512,11 +495,12 @@ def list_cache_blobs(cfg: dict) -> list[str]:
     5000-result default cap."""
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    conn_str = _get_connection_string(cfg)
+    account = _account_name(cfg)
     raw = _run_az([
         "az", "storage", "blob", "list",
         "--container-name", container,
-        "--connection-string", conn_str,
+        "--account-name", account,
+        "--auth-mode", "login",
         "--prefix", "_dicache/",
         "--num-results", "*",
         "--query", "[].name",
@@ -669,15 +653,21 @@ def _generate_blob_sas(cfg: dict, blob_name: str, expiry_minutes: int = 60) -> s
     """Generate a read-only SAS URL for a blob so DI can fetch it directly."""
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    conn_str = _get_connection_string(cfg)
+    account = _account_name(cfg)
     expiry = (datetime.now(UTC) + timedelta(minutes=expiry_minutes)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
+    # --as-user + --auth-mode login => user-delegation SAS signed with an AAD
+    # key, so this works without listKeys / shared-key access. The signed-in
+    # principal needs the generateUserDelegationKey data action, which is
+    # included in Storage Blob Data Reader/Contributor.
     raw = _run_az([
         "az", "storage", "blob", "generate-sas",
         "--container-name", container,
         "--name", blob_name,
-        "--connection-string", conn_str,
+        "--account-name", account,
+        "--auth-mode", "login",
+        "--as-user",
         "--permissions", "r",
         "--expiry", expiry,
         "-o", "tsv",
@@ -819,11 +809,12 @@ def _pdf_has_any_crops(cfg: dict, pdf_name: str) -> bool:
     try:
         _init_storage(cfg)
         container = cfg["storage"]["pdfContainerName"]
-        conn_str = _get_connection_string(cfg)
+        account = _account_name(cfg)
         raw = _run_az([
             "az", "storage", "blob", "list",
             "--container-name", container,
-            "--connection-string", conn_str,
+            "--account-name", account,
+            "--auth-mode", "login",
             "--prefix", f"_dicache/{pdf_name}.crop.",
             "--num-results", "1",
             "--query", "[].name",
