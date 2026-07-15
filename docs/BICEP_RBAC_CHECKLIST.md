@@ -1,71 +1,77 @@
-# Bicep provisioning checklist — Tech Manual indexing (per environment)
+# Bicep provisioning checklist — Tech Manual indexing
 
-Bake everything below into the Bicep template so each new environment (dev / UAT / prod,
-any RG/subscription) comes up fully wired. After this, Jenkins needs only credentials +
-config values — no manual `az role assignment` commands.
+Environment-agnostic. Works for any subscription / resource group (dev, UAT, prod, and any
+number of RGs per env). After Bicep applies this, Jenkins needs only credentials + config
+values — no manual `az role assignment` commands.
 
-Three identities need roles: **(A) the Jenkins pipeline SP**, **(B) the Search service MI**,
-**(C) the Function App MI**. Enable system-assigned managed identity on the Search service
-and Function App FIRST, then assign roles to their principalIds.
+## The one rule (this is the part that's the same everywhere)
+- **roleDefinitionId GUIDs below are GLOBAL CONSTANTS** — identical in every subscription and
+  in Azure Gov. Safe to hardcode in Bicep.
+- **Resource IDs and principal IDs are NEVER hardcoded** — use Bicep references
+  (`storage.id`, `search.identity.principalId`, `func.identity.principalId`) and one param for
+  the pipeline SP objectId. So the *same* template produces the correct wiring in any sub/RG.
 
----
-
-## A. Jenkins pipeline SP  (scope: the resource group is fine)
-The CI/CD service principal. Pass its objectId into Bicep as a param.
-
-| Role | roleDefinitionId (built-in) | On resource |
-|---|---|---|
-| Reader | acdd72a7-3385-48ef-bd42-f606fba81ae7 | resource group |
-| Website Contributor | de139f84-1756-47ae-9be6-808fbbe84772 | Function App (or RG) |
-| Search Service Contributor | 7ca78c08-252a-4471-8644-bb5ff32d4ba0 | Search service |
-| Search Index Data Contributor | 8ebe5a00-799e-43f5-93ac-243d3dce84a7 | Search service |
-| Storage Blob Data Contributor | ba92f5b4-2d11-453d-a403-e96b0029c9fe | Storage account |
-| Cognitive Services OpenAI User | 5e0bd9bd-7b93-4f28-af87-19fc36ad61bd | AOAI / Foundry |
-| Cognitive Services User | a97b65f3-24c7-4388-baec-2e87135dc908 | Document Intelligence / AI Services |
-| Cosmos DB Built-in Data Contributor | 00000000-0000-0000-0000-000000000002 (Cosmos **SQL** role) | Cosmos account |
-
-## B. Search service system-assigned MI
-| Role | roleDefinitionId | On resource |
-|---|---|---|
-| Storage Blob Data Reader | 2a2b9908-6ea1-4ae2-8e65-a410df84e7d1 | Storage account |
-| Cognitive Services OpenAI User | 5e0bd9bd-7b93-4f28-af87-19fc36ad61bd | AOAI / Foundry |
-| Cognitive Services User | a97b65f3-24c7-4388-baec-2e87135dc908 | AI Services account |
-
-## C. Function App system-assigned MI
-| Role | roleDefinitionId | On resource |
-|---|---|---|
-| Storage Blob Data Reader | 2a2b9908-6ea1-4ae2-8e65-a410df84e7d1 | Storage account |
-| Cognitive Services OpenAI User | 5e0bd9bd-7b93-4f28-af87-19fc36ad61bd | AOAI / Foundry |
-| Cognitive Services User | a97b65f3-24c7-4388-baec-2e87135dc908 | Document Intelligence |
-| Search Index Data Reader | 1407120a-92aa-4202-b7e9-c0e197c71c8f | Search service |
-| Cosmos DB Built-in Data Contributor | 00000000-0000-0000-0000-000000000002 (Cosmos **SQL** role) | Cosmos account |
-
-> Cosmos roles are **data-plane SQL role assignments**
-> (`Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments`), NOT normal `roleAssignments`.
-> Use roleDefinitionId `.../sqlRoleDefinitions/00000000-0000-0000-0000-000000000002`, scope =
-> the Cosmos account. This is what was missing (the `Sub Status 5300` error).
+## Three identities (turn these ON, then reference their principalIds)
+- `pipelineSpObjectId`  — Bicep **param** (the Jenkins SP; may be same or different per env).
+- Search service — set `identity: { type: 'SystemAssigned' }`, then use `.identity.principalId`.
+- Function App  — set `identity: { type: 'SystemAssigned' }`, then use `.identity.principalId`.
 
 ---
 
-## Resource configuration flags Bicep must set (these bit us)
-- **Storage account**: blob **soft-delete ON**, 7-day retention (preflight hard-fails without it).
-  Keyless is fine — access is all AAD/RBAC; `allowSharedKeyAccess` can stay off.
-- **Search service**: `identity: SystemAssigned`; auth allows AAD (`aadOrApiKey`); public network
-  access enabled (or add the pipeline/agent IPs).
-- **Function App**: `identity: SystemAssigned`; **Linux, Python 3.12**; app settings
+# For EACH resource you create, add these (roles granted ON that resource)
+
+### Storage account
+- **Config**: blob **soft-delete ON, 7-day retention** (preflight hard-fails without it). Access is
+  all AAD/RBAC — `allowSharedKeyAccess` can stay off.
+- **Grant on it**:
+  - pipelineSpObjectId → **Storage Blob Data Contributor** `ba92f5b4-2d11-453d-a403-e96b0029c9fe`
+  - Search MI          → **Storage Blob Data Reader**      `2a2b9908-6ea1-4ae2-8e65-a410df84e7d1`
+  - Function MI        → **Storage Blob Data Reader**      `2a2b9908-6ea1-4ae2-8e65-a410df84e7d1`
+
+### Search service
+- **Config**: system-assigned identity ON; AAD auth allowed (`aadOrApiKey`); public network access
+  enabled (or allow the agent IPs).
+- **Grant on it**:
+  - pipelineSpObjectId → **Search Service Contributor**    `7ca78c08-252a-4471-8644-bb5ff32d4ba0`
+  - pipelineSpObjectId → **Search Index Data Contributor** `8ebe5a00-799e-43f5-93ac-243d3dce84a7`
+  - Function MI        → **Search Index Data Reader**      `1407120a-92aa-4202-b7e9-c0e197c71c8f`
+
+### Function App
+- **Config**: system-assigned identity ON; **Linux, Python 3.12**; app settings
   `SCM_DO_BUILD_DURING_DEPLOYMENT=true`, `ENABLE_ORYX_BUILD=true`; do **NOT** set
-  `WEBSITE_RUN_FROM_PACKAGE` (it bypasses the server build). Leave SCM/Kudu **Entra (AAD) auth
-  enabled** so the pipeline can zip-deploy with its token.
-- **Cosmos DB**: SQL (core) API; create database `indexing`; native AAD RBAC (see role note above).
-- **AI resources**: AOAI/Foundry, Document Intelligence, and the multi-service AI Services
-  (Cognitive) account the skillset attaches to — each reachable at its endpoint.
+  `WEBSITE_RUN_FROM_PACKAGE`; leave SCM/Kudu **Entra (AAD) auth enabled**.
+- **Grant on it**:
+  - pipelineSpObjectId → **Website Contributor** `de139f84-1756-47ae-9be6-808fbbe84772`
+
+### AOAI / Foundry (the OpenAI-embeddings + chat/vision resource)
+- **Grant on it**:
+  - pipelineSpObjectId → **Cognitive Services OpenAI User** `5e0bd9bd-7b93-4f28-af87-19fc36ad61bd`
+  - Search MI          → **Cognitive Services OpenAI User** `5e0bd9bd-7b93-4f28-af87-19fc36ad61bd`
+  - Function MI        → **Cognitive Services OpenAI User** `5e0bd9bd-7b93-4f28-af87-19fc36ad61bd`
+
+### Document Intelligence (+ the multi-service AI Services account the skillset attaches to)
+> In some envs these are one account; if separate, apply to each as noted.
+- **Grant on it**:
+  - pipelineSpObjectId → **Cognitive Services User** `a97b65f3-24c7-4388-baec-2e87135dc908`
+  - Function MI        → **Cognitive Services User** `a97b65f3-24c7-4388-baec-2e87135dc908` (Document Intelligence)
+  - Search MI          → **Cognitive Services User** `a97b65f3-24c7-4388-baec-2e87135dc908` (AI Services account)
+
+### Cosmos DB account
+- **Config**: SQL (core) API; create database `indexing`; native AAD RBAC.
+- **Grant on it** — ⚠️ these are **data-plane SQL role assignments**, a DIFFERENT resource type:
+  `Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments` (NOT `Microsoft.Authorization/roleAssignments`),
+  roleDefinitionId = `<account>/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002`, scope = the account:
+  - pipelineSpObjectId → **Cosmos DB Built-in Data Contributor** `00000000-0000-0000-0000-000000000002`
+  - Function MI        → **Cosmos DB Built-in Data Contributor** `00000000-0000-0000-0000-000000000002`
+  > Missing this is the `Sub Status 5300 / cannot be authorized by AAD token` error.
+
+### Resource group (or subscription) — one broad read
+- pipelineSpObjectId → **Reader** `acdd72a7-3385-48ef-bd42-f606fba81ae7` (scope = the RG)
 
 ---
 
-## After Bicep, per environment Jenkins just needs
-1. Credentials (already the pattern): `azure-client-id/secret/tenant`, `<ENV>_AZURE_SUBSCRIPTION_ID`,
-   and the `deploy-config-<env>` secret file (`deploy.config.json` with that env's endpoints/names).
-2. Run the pipeline: **ACTION = `deploy`** once (creates index + indexes docs), then `run` nightly.
-
-No `assign_roles.py` and no manual `az role assignment` — Bicep already did A/B/C.
-(`assign_roles.py --skip-deploy-principal` remains a handy one-shot fallback if a grant is ever missed.)
+## Per-environment: only these change
+- `pipelineSpObjectId` (param) and the resource names/endpoints — all via Bicep params.
+- Jenkins per env: `azure-client-id/secret/tenant`, `<ENV>_AZURE_SUBSCRIPTION_ID`, and the
+  `deploy-config-<env>` file. Then run **ACTION = deploy** once, `run` nightly.
+- Nothing else. No `assign_roles.py`, no manual grants — Bicep already wired every resource above.
