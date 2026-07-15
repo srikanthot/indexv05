@@ -3,6 +3,107 @@
 Follow these in order, top to bottom. Commands are for Windows PowerShell. Do not skip a step.
 
 ============================================================================
+>>> JENKINS PIPELINE FAILED IN "PREFLIGHT" WITH "not found" / "AuthorizationFailed"? DO THIS <<<
+============================================================================
+SYMPTOM (what you saw in the Jenkins log):
+  - Blob soft-delete check:  Storage account 'psegtmstacdevv01' not found
+  - Cosmos check:            AuthorizationFailed for SP object
+                             d21336b2-a818-4e2c-a8b7-278aa5113fd7 on Microsoft.DocumentDB
+  - Preflight is a GATING stage, so every later stage was skipped and the build failed.
+
+ROOT CAUSE (both errors are the SAME problem):
+  The Jenkins service principal (SP) d21336b2-a818-4e2c-a8b7-278aa5113fd7 has NO "Reader"
+  role, so it cannot even READ resource metadata. "not found" and "AuthorizationFailed" are
+  both just the permission being denied. The fix is to grant the SP its least-privilege roles.
+
+  NOTE: `scripts/assign_roles.py` alone does NOT fix this -- its --jenkins-principal-id path
+  does not grant "Reader", and "Reader" is exactly what the two failing preflight checks need.
+  You must self-grant the roles below.
+
+------------------------------------------------------------
+PART A — GRANT THE ROLES (run in VS Code terminal, ONE COMMAND AT A TIME)
+------------------------------------------------------------
+Run these as YOURSELF (your admin account that is allowed to create role assignments) --
+NOT as the Jenkins SP. The SP cannot grant itself roles. Run them one by one, top to
+bottom. If any command errors, copy the error to Copilot and ask it to fix that one line.
+
+A1. Set the Azure Government cloud:
+      az cloud set --name AzureUSGovernment
+
+A2. Log in as yourself (a browser opens -- sign in with your PSEG admin account):
+      az login
+
+A3. Point at the DEV subscription (replace <DEV_SUBSCRIPTION_ID> with the real id):
+      az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+
+A4. Save the subscription id, the Jenkins SP id, and the scope into variables:
+      $sub   = az account show --query id -o tsv
+      $sp    = "d21336b2-a818-4e2c-a8b7-278aa5113fd7"
+      $scope = "/subscriptions/$sub"
+    # (optional) confirm they are set -- both lines should print a value:
+      echo $sub
+      echo $sp
+
+A5. Grant Reader  <-- THIS is the one that fixes your preflight error:
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Reader" --scope $scope
+
+A6. Grant Website Contributor (deploy the function app code):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Website Contributor" --scope $scope
+
+A7. Grant Search Service Contributor (create/update index, skillset, indexer):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Search Service Contributor" --scope $scope
+
+A8. Grant Search Index Data Contributor (write/query index documents):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $scope
+
+A9. Grant Storage Blob Data Contributor (read/write cache blobs):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope $scope
+
+A10. Grant Cognitive Services OpenAI User (embeddings/vision):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Cognitive Services OpenAI User" --scope $scope
+
+A11. Grant Cognitive Services User (Document Intelligence):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Cognitive Services User" --scope $scope
+
+A12. Grant the Cosmos data role (SEPARATE command -- different API, do not skip):
+      az cosmosdb sql role assignment create --account-name psegtmcosmdevv01 --resource-group psegtmrgdevv01 --role-definition-name "Cosmos DB Built-in Data Contributor" --principal-id $sp --scope "/"
+
+A13. Wire up the managed identities (function app + search service). ONE TIME per
+     environment. Needs deploy.config.json in the repo root (see STEP 4) and the venv
+     activated (see STEP 2). If Srikanth already did this, skip it:
+      python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
+
+A14. Wait ~2 minutes for the roles to take effect, then go to Jenkins and run ACTION=check
+     (see PART B below). If storage STILL says "not found" after this, the account name or
+     subscription in the config is wrong -- ask Copilot/Srikanth.
+
+Each successful "az role assignment create" prints a JSON block describing the assignment.
+If a role already exists you may see "already exists" -- that is fine, it means it is done.
+If you see "AuthorizationFailed" on these commands, YOUR account is not allowed to grant
+roles -- an Azure admin must run Part A for you.
+
+------------------------------------------------------------
+PART B — WHAT TO PICK IN THE JENKINS "ACTION" DROPDOWN
+------------------------------------------------------------
+  check      READ-ONLY, ~5 min, changes nothing. RUN THIS FIRST after granting the roles --
+             it re-runs preflight + coverage and confirms the permission fix worked. Safe default.
+  bootstrap  One-time setup (function app + search index/skillset/indexer). Skips preflight.
+             Use only if this environment was never set up.
+  deploy     FULL + DESTRUCTIVE + long (hours: preanalyze/vision over every PDF + heal). It
+             already includes bootstrap. Use for the first full build of the environment.
+  run        Routine nightly ops (reconcile -> preanalyze changed docs -> indexer -> heal).
+
+  RECOMMENDED ORDER:  grant roles (Part A)  ->  ACTION=check (verify)  ->  ACTION=deploy
+                      (first full setup)     ->  ACTION=run (day-to-day thereafter).
+
+  CHECKBOXES:
+    SKIP_TESTS  -> leave UNCHECKED (emergencies only).
+    DRY_RUN     -> leave UNCHECKED. Heads-up: it is declared in the Jenkinsfile but NOT wired
+                   into any stage, so toggling it currently does nothing. Do not rely on it.
+
+----------------------------------------------------------------------------
+
+============================================================================
 >>> ALREADY STARTED AND GOT "'func' is not recognized"? DO EXACTLY THIS <<<
 ============================================================================
 You got far (preflight + preanalyze passed). It only stopped because Azure
