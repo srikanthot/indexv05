@@ -1693,6 +1693,10 @@
             "source": "/document/markdownDocument/*/pages/*/text_record_type"
           },
           {
+            "name": "document_title",
+            "source": "/document/metadata_title"
+          },
+          {
             "name": "source_file",
             "source": "/document/metadata_storage_name"
           },
@@ -2056,6 +2060,10 @@
             "source": "/document/enriched_figures/*/dgm_record_type"
           },
           {
+            "name": "document_title",
+            "source": "/document/metadata_title"
+          },
+          {
             "name": "source_file",
             "source": "/document/enriched_figures/*/source_file"
           },
@@ -2377,6 +2385,10 @@
           {
             "name": "record_type",
             "source": "/document/enriched_tables/*/tbl_record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",
@@ -2750,6 +2762,10 @@
             "source": "/document/enriched_tables/*/tbl_table_rows/*/record_type"
           },
           {
+            "name": "document_title",
+            "source": "/document/metadata_title"
+          },
+          {
             "name": "source_file",
             "source": "/document/enriched_tables/*/tbl_table_rows/*/source_file"
           },
@@ -3119,6 +3135,10 @@
           {
             "name": "record_type",
             "source": "/document/sum_record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",

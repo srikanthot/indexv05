@@ -42,6 +42,7 @@
     { "name": "document_revision", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "effective_date", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": true, "facetable": true },
     { "name": "document_number", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
+    { "name": "document_title", "type": "Edm.String", "searchable": true, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "document_family_id", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "is_current_revision", "type": "Edm.Boolean", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "supersedes_revision", "type": "Edm.String", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": false },
