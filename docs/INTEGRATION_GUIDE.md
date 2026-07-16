@@ -114,6 +114,7 @@ safety, and UI. Capabilities: **S**=searchable, **F**=filterable, **R**=retrieva
 | Field | Type | Caps | Notes |
 |---|---|---|---|
 | `document_number` | String | S F R | The manual's document number. |
+| `document_title` | String | S F R | The document's embedded title (from the PDF's metadata). May be sparse/generic on some PDFs — prefer `source_file` / `document_number` as the primary identity. |
 | `document_revision` | String | S F R | Revision label. |
 | `effective_date` | String | F R | Effective date. |
 | `is_current_revision` | Boolean | F R | **True for the current revision.** Filter on this to exclude superseded manuals. |
@@ -251,7 +252,55 @@ Content-Type: application/json
 
 ---
 
-## 8. Front-end usage
+## 8. Verbatim answers and complete, multi-part responses
+
+Two product requirements the index is designed to support directly.
+
+### 8.1 Verbatim (non-summarised) answers
+
+When users want the exact wording from the manual, not a paraphrase, and want to see where it
+comes from:
+
+- Return the record's `chunk` (or `highlight_text`, its plain-text form) **verbatim**, together
+  with the citation, rather than asking the model to rewrite it.
+- If a language model is in the loop, instruct it to **quote/extract the relevant sentences
+  unchanged and not summarise**, and to always attach `source_file` + page + headers.
+- `highlight_text` is the clean verbatim text intended both for display and for driving the PDF
+  viewer's in-page search and highlight.
+
+### 8.2 One response that includes text + table + diagram
+
+When a user asks about something whose content is spread across a text passage, a table, and a
+figure (a procedure is the common case), assemble all of it into a **single** response. The user
+should never see that these are stored as separate records — grouping is the back-end's job. The
+index already provides the links to do it:
+
+| Link field | Use |
+|---|---|
+| `parent_id` | All records from the same manual. |
+| `procedure_id`, `procedure_step_order`, `procedure_step_text` | All steps of a procedure, in order. |
+| `figures_referenced`, `tables_referenced`, `sections_referenced` | The figures/tables/sections a text chunk points to ("see Figure 18-117", "Table 4"). |
+| `figure_step_linked`, `figure_linkage_confidence` | Which figure belongs to which procedure step. |
+| `table_parent_chunk_id` | The text chunk a table came from. |
+| `chunk_prev_id`, `chunk_next_id` | Adjacent text chunks, to extend context without gaps. |
+
+**Assembly (hydration) pattern:**
+
+1. Run the hybrid query (Section 6.1) and take the top hit(s).
+2. If the hit is a procedure or text chunk, collect the related records: everything with the
+   same `procedure_id` (the full ordered procedure), the `diagram` records whose
+   `figure_ref` / `figure_number` appear in the hit's `figures_referenced`, and the
+   `table` / `table_row` records whose `table_number` appears in `tables_referenced`. Optionally
+   extend with `chunk_prev_id` / `chunk_next_id`.
+3. Fetch those records with a filter query, for example:
+   `parent_id eq '<hit parent_id>' and (procedure_id eq '<pid>' or figure_ref eq 'Figure 18-117' or table_number eq 'Table 4')`.
+4. Return them as one bundle — the ordered text steps, the table, and the figure (with
+   `figure_bbox` for display) — each carrying its own citation.
+
+This needs **no index change** — the linking fields are already populated. It is a back-end
+retrieval (hydration) step layered on top of the search query.
+
+## 9. Front-end usage
 
 - Open the source PDF with `source_url` and jump to `physical_pdf_page`.
 - Highlight a figure using `figure_bbox` (page + coordinates).
@@ -263,7 +312,7 @@ Content-Type: application/json
 
 ---
 
-## 9. Configuration the consumer needs
+## 10. Configuration the consumer needs
 
 All non-secret, from the environment configuration and Entra:
 
@@ -278,7 +327,7 @@ No embedding-model endpoint or key is required — the index vectorizes queries 
 
 ---
 
-## 10. Do and don't
+## 11. Do and don't
 
 **Do**
 - Use hybrid + semantic queries by default.
