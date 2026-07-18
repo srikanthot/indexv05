@@ -1,39 +1,297 @@
-# Overnight run — POWERSHELL. Config already updated (new container + new prefix).
-# Paste the setup lines, then run the ONE deploy.py line. Then sleep.
+# RUN THE INDEXING PIPELINE ON YOUR LAPTOP — step by step
 
-# 1) env (AOAI_REASONING_EFFORT=low keeps GPT-5.1 fast)
-$env:SSL_CERT_FILE = 'C:/Users/C90255306/Downloads/combined-ca.crt'
-$env:REQUESTS_CA_BUNDLE = 'C:/Users/C90255306/Downloads/combined-ca.crt'
-$env:AOAI_REASONING_EFFORT = 'low'
-az cloud set --name AzureUSGovernment | Out-Null
-az account set --subscription 5c58d830-b35f-458a-ab5d-65ad9d0b9815
-New-Item -ItemType Directory -Force reports | Out-Null
+Follow these in order, top to bottom. Commands are for Windows PowerShell. Do not skip a step.
 
-# 2) sanity check the config (container = new one, prefix = new, account = UNCHANGED)
-python -c "import json;c=json.load(open('deploy.config.json'));print('container:',c['storage']['pdfContainerName']);print('prefix:',c['search']['artifactPrefix']);print('account:',c['storage']['accountResourceId'].split('/')[-1])"
+============================================================================
+>>> JENKINS PIPELINE FAILED IN "PREFLIGHT" WITH "not found" / "AuthorizationFailed"? DO THIS <<<
+============================================================================
+SYMPTOM (what you saw in the Jenkins log):
+  - Blob soft-delete check:  Storage account 'psegtmstacdevv01' not found
+  - Cosmos check:            AuthorizationFailed for SP object
+                             d21336b2-a818-4e2c-a8b7-278aa5113fd7 on Microsoft.DocumentDB
+  - Preflight is a GATING stage, so every later stage was skipped and the build failed.
 
-# 3) THE FULL RUN — this ONE line does preanalyze -> deploy_search -> reset+run -> heal loop x8 -> coverage.
-#    It wraps on screen but it is a single command. Runs for hours; let it finish.
-python scripts/deploy.py --config deploy.config.json --skip-bootstrap --preanalyze-vision-parallel 40 --heal-max-iterations 8 --heal-wait-minutes 60 2>&1 | Tee-Object -FilePath reports\overnight_run.log
+ROOT CAUSE (both errors are the SAME problem):
+  The Jenkins service principal (SP) d21336b2-a818-4e2c-a8b7-278aa5113fd7 has NO "Reader"
+  role, so it cannot even READ resource metadata. "not found" and "AuthorizationFailed" are
+  both just the permission being denied. The fix is to grant the SP its least-privilege roles.
 
-# In the morning (PowerShell):
-#   Get-Content reports\overnight_run.log -Tail 40
-#   python scripts/check_index.py --config deploy.config.json --coverage
-Hi Jason,
+  NOTE: `scripts/assign_roles.py` alone does NOT fix this -- its --jenkins-principal-id path
+  does not grant "Reader", and "Reader" is exactly what the two failing preflight checks need.
+  You must self-grant the roles below.
 
-Thank you, and hope your daughter recovers soon.
+------------------------------------------------------------
+PART A — GRANT THE ROLES (run in VS Code terminal, ONE LINE AT A TIME)
+------------------------------------------------------------
+Run these as YOURSELF (your admin account that is allowed to create role assignments) --
+NOT as the Jenkins SP. The SP cannot grant itself roles.
 
-We can keep the discussion to 30 minutes. I will resend the invite as well.
+>>> IMPORTANT: run EXACTLY ONE line at a time. Paste one line, press Enter, wait for it to
+>>> finish, THEN do the next. Do NOT paste several lines together -- that is what caused the
+>>> "unrecognized arguments" error. If any single line errors, copy that error to Copilot
+>>> and ask it to fix that one line.
 
-The main HA items we wanted to confirm are:
+A1. Set the Azure Government cloud:
+      az cloud set --name AzureUSGovernment
 
-1. For production regional redundancy, which secondary region should we use along with Arizona? Should we go with Texas, or is there another recommended GCC High region?
+A2. Log in as yourself (device-code login -- open the URL it prints and enter the code):
+      az login --use-device-code
 
-2. For Cosmos DB, do you recommend single-write multi-region with failover, or multi-write for our chatbot use case?
+A3. Point at the DEV subscription:
+      az account set --subscription "b41d2ec9-3c69-41f3-8dc7-b1500baeedf1"
 
-3. For Azure AI Search, should we increase the replica count from 1 to 2 or 3 for production? Also, does increasing replicas help only retrieval/query availability, or does it help indexing as well?
+A4. Save the subscription id into a variable:
+      $sub = az account show --query id -o tsv
 
-4. Can you also help us understand the cost impact for these recommended HA/DR changes, mainly Cosmos DB multi-region, Azure AI Search replicas, App Service scaling, and storage redundancy?
+A5. Save the Jenkins SP id into a variable:
+      $sp = "d21336b2-a818-4e2c-a8b7-278aa5113fd7"
 
-Thanks,
-Srikanth
+A6. Save the scope into a variable:
+      $scope = "/subscriptions/$sub"
+
+A7. Confirm $sub printed a value (should show b41d2ec9-...):
+      echo $sub
+
+A8. Confirm $scope printed a value (should show /subscriptions/b41d2ec9-...):
+      echo $scope
+
+A9. Grant Reader  <-- THIS is the one that fixes your preflight error:
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Reader" --scope $scope
+
+A10. Grant Website Contributor (deploy the function app code):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Website Contributor" --scope $scope
+
+A11. Grant Search Service Contributor (create/update index, skillset, indexer):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Search Service Contributor" --scope $scope
+
+A12. Grant Search Index Data Contributor (write/query index documents):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Search Index Data Contributor" --scope $scope
+
+A13. Grant Storage Blob Data Contributor (read/write cache blobs):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope $scope
+
+A14. Grant Cognitive Services OpenAI User (embeddings/vision):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Cognitive Services OpenAI User" --scope $scope
+
+A15. Grant Cognitive Services User (Document Intelligence):
+      az role assignment create --assignee-object-id $sp --assignee-principal-type ServicePrincipal --role "Cognitive Services User" --scope $scope
+
+A16. Grant the Cosmos data role (SEPARATE command -- different API, do not skip):
+      az cosmosdb sql role assignment create --account-name psegtmcosmdevv01 --resource-group psegtmrgdevv01 --role-definition-name "Cosmos DB Built-in Data Contributor" --principal-id $sp --scope "/"
+
+A17. Wire up the managed identities (function app + search service). ONE TIME per
+     environment. Needs deploy.config.json in the repo root (see STEP 4) and the venv
+     activated (see STEP 2). If Srikanth already did this, skip it:
+      python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
+
+A18. Wait ~2 minutes for the roles to take effect, then go to Jenkins and run ACTION=check
+     (see PART B below). If storage STILL says "not found" after this, the account name or
+     subscription in the config is wrong -- ask Copilot/Srikanth.
+
+Each successful "az role assignment create" prints a JSON block describing the assignment.
+If a role already exists you may see "already exists" -- that is fine, it means it is done.
+If you see "AuthorizationFailed" on these commands, YOUR account is not allowed to grant
+roles -- an Azure admin must run Part A for you.
+
+------------------------------------------------------------
+PART B — WHAT TO PICK IN THE JENKINS "ACTION" DROPDOWN
+------------------------------------------------------------
+  check      READ-ONLY, ~5 min, changes nothing. RUN THIS FIRST after granting the roles --
+             it re-runs preflight + coverage and confirms the permission fix worked. Safe default.
+  bootstrap  One-time setup (function app + search index/skillset/indexer). Skips preflight.
+             Use only if this environment was never set up.
+  deploy     FULL + DESTRUCTIVE + long (hours: preanalyze/vision over every PDF + heal). It
+             already includes bootstrap. Use for the first full build of the environment.
+  run        Routine nightly ops (reconcile -> preanalyze changed docs -> indexer -> heal).
+
+  RECOMMENDED ORDER:  grant roles (Part A)  ->  ACTION=check (verify)  ->  ACTION=deploy
+                      (first full setup)     ->  ACTION=run (day-to-day thereafter).
+
+  CHECKBOXES:
+    SKIP_TESTS  -> leave UNCHECKED (emergencies only).
+    DRY_RUN     -> leave UNCHECKED. Heads-up: it is declared in the Jenkinsfile but NOT wired
+                   into any stage, so toggling it currently does nothing. Do not rely on it.
+
+------------------------------------------------------------
+THE PERMISSIONS (ROLES) THIS INDEXING PIPELINE NEEDS
+------------------------------------------------------------
+These are the built-in Azure roles the pipeline uses. All are least-privilege
+(data-plane / service-specific) -- NO Owner, Contributor, or User Access
+Administrator. They are shared across three identities (the Jenkins pipeline SP,
+the Search service identity, the Function App identity).
+
+  Permission (role)                    | What it lets the identity do
+  -------------------------------------|-------------------------------------------------
+  Reader                               | See/list the resources in the resource group
+  Website Contributor                  | Deploy the code to the Function App
+  Search Service Contributor           | Create/update the search index, indexer, skillset
+  Search Index Data Contributor        | Write and query documents in the search index
+  Search Index Data Reader             | Read documents from the search index
+  Storage Blob Data Contributor        | Read and write files/cache in the storage account
+  Storage Blob Data Reader             | Read files from the storage account
+  Cognitive Services OpenAI User       | Call the AI models (embeddings + vision)
+  Cognitive Services User              | Call Document Intelligence / AI Services
+  Cosmos DB Built-in Data Contributor  | Read/write data in Cosmos DB (run history + state)
+
+(For which identity gets which role on which resource, see docs/BICEP_RBAC_CHECKLIST.md.)
+
+----------------------------------------------------------------------------
+
+============================================================================
+>>> ALREADY STARTED AND GOT "'func' is not recognized"? DO EXACTLY THIS <<<
+============================================================================
+You got far (preflight + preanalyze passed). It only stopped because Azure
+Functions Core Tools (the `func` command) is not installed. Fix it and continue:
+
+1. Install func (Azure Functions Core Tools v4):
+      winget install Microsoft.Azure.FunctionsCoreTools
+   # (or the v4 x64 MSI: https://github.com/Azure/azure-functions-core-tools/releases)
+   # (or, if you have Node.js:  npm install -g azure-functions-core-tools@4 --unsafe-perm true)
+
+2. CLOSE the terminal completely, open a NEW one, and confirm func is found:
+      func --version
+   # must print a 4.x number. If it says "not recognized", the install did not
+   # land on PATH -- reopen the terminal again, or use the MSI installer.
+
+3. Go back into the repo folder and re-activate the environment:
+      cd <REPO-FOLDER>
+      .\.venv\Scripts\Activate.ps1
+
+4. Make sure Azure is still logged in (re-login if it says not):
+      az account show -o table
+      # if that errors:  az login   then   az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+
+5. Re-run the SAME command -- it is idempotent, it resumes where it stopped
+   (preanalyze is already cached, it will jump to deploying the function + indexing):
+      python scripts/deploy.py --config deploy.config.json --skip-roles
+
+That's it. If it stops again, read the error and check the troubleshooting section
+at the bottom. Everything below is the full setup from scratch (for a fresh laptop).
+
+----------------------------------------------------------------------------
+
+============================================================================
+STEP 0 — INSTALL THESE ONCE (skip any you already have)
+============================================================================
+- Python 3.12 (or 3.11):  https://www.python.org/downloads/     check:  python --version
+- Azure CLI (az):          https://aka.ms/installazurecliwindows  check:  az --version
+- Git:                     https://git-scm.com/download/win        check:  git --version
+- Azure Functions Core Tools v4 (the `func` command -- REQUIRED to deploy the
+  function app code):
+      winget install Microsoft.Azure.FunctionsCoreTools
+      # (or the v4 x64 MSI from https://github.com/Azure/azure-functions-core-tools/releases)
+      # (or, if you have Node.js:  npm install -g azure-functions-core-tools@4 --unsafe-perm true)
+      check:  func --version     (must print a 4.x version)
+(Close and reopen your terminal after installing, so the commands are found.)
+
+NOTE: LibreOffice is NOT required. If preflight prints "[WARN] LibreOffice (optional)"
+that is safe to ignore for PDF manuals -- it only affects figure extraction from
+.docx/.pptx/.xlsx files, not PDFs.
+
+============================================================================
+STEP 1 — GET THE CODE
+============================================================================
+# if you do NOT have the code yet:
+git clone <REPO-URL>
+cd <REPO-FOLDER>
+
+# if you ALREADY have the code, just update it:
+cd <REPO-FOLDER>
+git pull
+
+============================================================================
+STEP 2 — PYTHON ENVIRONMENT + DEPENDENCIES
+============================================================================
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+# (Mac/Linux instead:  source .venv/bin/activate)
+# You should now see (.venv) at the start of your prompt.
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# NOTE: every NEW terminal window, re-run:  .\.venv\Scripts\Activate.ps1
+
+============================================================================
+STEP 3 — LOG INTO AZURE (US Government cloud)
+============================================================================
+az cloud set --name AzureUSGovernment
+az login
+# ^ a browser opens; sign in with your PSEG work account.
+az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+az account show -o table
+# ^ confirm the Name/Id shown is the DEV subscription.
+
+============================================================================
+STEP 4 — PUT THE CONFIG FILE IN PLACE
+============================================================================
+# Copy deploy.config.json into the ROOT of the repo folder (get the file from Srikanth).
+# Confirm it is there:
+Test-Path deploy.config.json
+# ^ must print: True
+
+============================================================================
+STEP 5 — ONE TIME PER ENVIRONMENT: wire the identity roles  (skip if already done)
+============================================================================
+# This grants the function-app + search managed identities their data roles.
+# Only needs to be done ONCE per environment, by an account allowed to grant
+# data roles. If Srikanth already did it, SKIP this step.
+python scripts/assign_roles.py --config deploy.config.json --skip-deploy-principal
+
+============================================================================
+STEP 6 — THE SUPER COMMAND  (does EVERYTHING in one go)
+============================================================================
+python scripts/deploy.py --config deploy.config.json --skip-roles
+
+# What it does, in order:
+#   1. deploys the function app code
+#   2. preanalyzes every PDF in the blob container (slow on big PDFs -- be patient)
+#   3. creates the search index if it does not exist (never deletes an existing one)
+#   4. runs the indexer over all documents and waits until they are all done
+#   5. sets is_current_revision so the chatbot's currency filter works
+#   6. prints a coverage report
+# Leave it running to the end. It can take a while the first time.
+
+============================================================================
+STEP 7 — CHECK IT WORKED
+============================================================================
+python scripts/check_index.py --config deploy.config.json --coverage
+# ^ shows which PDFs are indexed and how many chunks each has.
+
+============================================================================
+LATER — DAILY / INCREMENTAL RUN (only new or deleted PDFs)
+============================================================================
+python scripts/run_pipeline.py --config deploy.config.json --triggered-by manual
+# reconcile new/deleted PDFs -> preanalyze only the new ones -> index the changes
+# -> set currency. Safe to run anytime; it never re-does what is already indexed.
+
+============================================================================
+IF SOMETHING FAILS — quick fixes
+============================================================================
+- "unrecognized arguments: --skip-roles"
+      -> your scripts are OLD. Re-run STEP 1 (git pull) to get the latest code.
+- "AuthorizationFailed" / 403
+      -> your Azure account is missing a role on that resource. Tell Srikanth the
+         resource name from the error; it is a one-time role grant.
+- "config not found: deploy.config.json"
+      -> the file is not in the repo root. Redo STEP 4.
+- "(.venv) not showing" or "module not found"
+      -> you did not activate the venv in this terminal. Run:  .\.venv\Scripts\Activate.ps1
+         then  pip install -r requirements.txt  again if needed.
+- az command not found
+      -> Azure CLI not installed / terminal not reopened. Redo STEP 0.
+
+============================================================================
+THE WHOLE THING AS A COPY-PASTE BLOCK (after Step 0 is done once)
+============================================================================
+cd <REPO-FOLDER>
+git pull
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+az cloud set --name AzureUSGovernment
+az login
+az account set --subscription "<DEV_SUBSCRIPTION_ID>"
+# make sure deploy.config.json is in this folder, then:
+python scripts/deploy.py --config deploy.config.json --skip-roles
+python scripts/check_index.py --config deploy.config.json --coverage

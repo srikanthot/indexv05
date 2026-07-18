@@ -99,7 +99,11 @@ def _extract_callouts(text: str) -> list[str]:
     for m in SAFETY_CALLOUT_RE.finditer(text):
         keyword = m.group(1).upper()
         tail = m.group(2).strip()
-        if not tail:
+        # Strip DI markdown/HTML artifacts that follow a NOTE/NOTICE marker
+        # (e.g. "NOTE: <figure>", "NOTE: </table>") -- these are layout tags,
+        # not real safety text, and were polluting governing_callouts.
+        tail = re.sub(r"</?(?:figure|table|td|tr|th|thead|tbody|caption)[^>]*>", "", tail).strip()
+        if not tail or len(tail) < 4:
             continue
         formatted = f"{keyword}: {tail[:200]}"
         # Dedup exact-match callouts: the same WARNING text repeated on

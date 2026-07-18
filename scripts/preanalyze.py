@@ -60,7 +60,6 @@ import httpx
 _aoai_key_cache: str | None = None
 _aoai_key_lock = threading.Lock()
 _di_key_lock = threading.Lock()
-_conn_str_lock = threading.Lock()
 _storage_init_lock = threading.Lock()
  
 FIGURE_REF_RE = re.compile(
@@ -192,14 +191,27 @@ def _get_foundry_key(cfg: dict) -> str:
  
  
 def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int = 3) -> dict:
+    # Injection defense: harden the system prompt + fence the untrusted,
+    # document-derived user_text so hidden page instructions can't hijack it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
+    from shared.prompt_safety import UNTRUSTED_CONTENT_INSTRUCTION, wrap_untrusted
+    system_prompt = VISION_SYSTEM_PROMPT + UNTRUSTED_CONTENT_INSTRUCTION
+    user_text = wrap_untrusted(user_text, "figure caption and context")
+
     provider = _model_provider(cfg)
     if provider == "foundry":
         fcfg = cfg.get("foundry") or {}
-        ep = (fcfg.get("projectEndpoint") or "").rstrip("/")
+        # Foundry vision via the OpenAI-COMPATIBLE endpoint (.openai.azure.us)
+        # deployment route — the /models/chat/completions route rejected the
+        # api-version ("API version not supported"). Same endpoint family the
+        # Search embedder uses. Falls back to projectEndpoint if azureOpenAI
+        # isn't set.
+        ep = ((cfg.get("azureOpenAI") or {}).get("endpoint") or "").rstrip("/") \
+            or (fcfg.get("projectEndpoint") or "").rstrip("/")
         deployment = fcfg.get("chatModel") or fcfg.get("visionModel") or ""
-        api_ver = fcfg.get("apiVersion", "2024-05-01-preview")
+        api_ver = fcfg.get("apiVersion") or "2024-10-21"
         api_key = _get_foundry_key(cfg)
-        url = f"{ep}/models/chat/completions?api-version={api_ver}"
+        url = f"{ep}/openai/deployments/{deployment}/chat/completions?api-version={api_ver}"
     else:
         ep = cfg["azureOpenAI"]["endpoint"].rstrip("/")
         deployment = cfg["azureOpenAI"]["visionDeployment"]
@@ -209,7 +221,7 @@ def _call_vision_api(cfg: dict, image_b64: str, user_text: str, max_retries: int
  
     body = {
         "messages": [
-            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": [
                 {"type": "text", "text": user_text},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
@@ -322,7 +334,6 @@ def _account_name(cfg: dict) -> str:
     return parts[-1]
  
  
-_conn_str_cache: str | None = None
  
  
 def _run_az(cmd: list[str]) -> str:
@@ -337,30 +348,14 @@ def _run_az(cmd: list[str]) -> str:
     return r.stdout.strip()
  
  
-def _get_connection_string(cfg: dict) -> str:
-    global _conn_str_cache
-    if _conn_str_cache is not None:
-        return _conn_str_cache
-    with _conn_str_lock:
-        if _conn_str_cache is not None:
-            return _conn_str_cache
-        account = _account_name(cfg)
-        rg = cfg["functionApp"]["resourceGroup"]
-        raw = _run_az([
-            "az", "storage", "account", "show-connection-string",
-            "--name", account, "--resource-group", rg, "-o", "json",
-        ])
-        _conn_str_cache = json.loads(raw)["connectionString"]
-        return _conn_str_cache
+# NOTE: storage access is AAD-only (see _init_storage / _get_storage_token and
+# the --auth-mode login CLI calls). We deliberately do NOT use
+# `az storage account show-connection-string` / account keys, because that
+# requires the Microsoft.Storage/.../listKeys permission the least-privilege
+# pipeline SP does not have (see docs/RBAC_LEAST_PRIVILEGE.md). Do not
+# reintroduce connection-string / shared-key access here.
  
  
-def _parse_conn_str(conn_str: str) -> dict[str, str]:
-    parts = {}
-    for pair in conn_str.split(";"):
-        if "=" in pair:
-            k, v = pair.split("=", 1)
-            parts[k] = v
-    return parts
  
  
 _storage_client: httpx.Client | None = None
@@ -476,11 +471,12 @@ def list_pdfs(cfg: dict) -> list[str]:
     """
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    conn_str = _get_connection_string(cfg)
+    account = _account_name(cfg)
     raw = _run_az([
         "az", "storage", "blob", "list",
         "--container-name", container,
-        "--connection-string", conn_str,
+        "--account-name", account,
+        "--auth-mode", "login",
         "--num-results", "*",
         "--query", "[].name",
         "-o", "json",
@@ -499,11 +495,12 @@ def list_cache_blobs(cfg: dict) -> list[str]:
     5000-result default cap."""
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    conn_str = _get_connection_string(cfg)
+    account = _account_name(cfg)
     raw = _run_az([
         "az", "storage", "blob", "list",
         "--container-name", container,
-        "--connection-string", conn_str,
+        "--account-name", account,
+        "--auth-mode", "login",
         "--prefix", "_dicache/",
         "--num-results", "*",
         "--query", "[].name",
@@ -656,15 +653,21 @@ def _generate_blob_sas(cfg: dict, blob_name: str, expiry_minutes: int = 60) -> s
     """Generate a read-only SAS URL for a blob so DI can fetch it directly."""
     _init_storage(cfg)
     container = cfg["storage"]["pdfContainerName"]
-    conn_str = _get_connection_string(cfg)
+    account = _account_name(cfg)
     expiry = (datetime.now(UTC) + timedelta(minutes=expiry_minutes)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
+    # --as-user + --auth-mode login => user-delegation SAS signed with an AAD
+    # key, so this works without listKeys / shared-key access. The signed-in
+    # principal needs the generateUserDelegationKey data action, which is
+    # included in Storage Blob Data Reader/Contributor.
     raw = _run_az([
         "az", "storage", "blob", "generate-sas",
         "--container-name", container,
         "--name", blob_name,
-        "--connection-string", conn_str,
+        "--account-name", account,
+        "--auth-mode", "login",
+        "--as-user",
         "--permissions", "r",
         "--expiry", expiry,
         "-o", "tsv",
@@ -806,11 +809,12 @@ def _pdf_has_any_crops(cfg: dict, pdf_name: str) -> bool:
     try:
         _init_storage(cfg)
         container = cfg["storage"]["pdfContainerName"]
-        conn_str = _get_connection_string(cfg)
+        account = _account_name(cfg)
         raw = _run_az([
             "az", "storage", "blob", "list",
             "--container-name", container,
-            "--connection-string", conn_str,
+            "--account-name", account,
+            "--auth-mode", "login",
             "--prefix", f"_dicache/{pdf_name}.crop.",
             "--num-results", "1",
             "--query", "[].name",
@@ -850,8 +854,17 @@ def _is_pdf_done(cfg: dict, pdf_name: str) -> bool:
     # them all" case (decorative borders, table edges, page-number
     # graphics, etc.) — common for PDFs that are tables+text only.
     status = out.get("processing_status") or ""
-    if status in ("ok", "di_missed_images", "partial_vision"):
+    if status in ("ok", "di_missed_images"):
         return True
+    # partial_vision = some figures failed vision enrichment (often transient
+    # API errors). Treat as NOT fully done so the heal loop retries to COMPLETE
+    # them — bounded by --heal-max-iterations, so it can't loop forever. This
+    # stops a partially-enriched PDF being silently accepted as complete.
+    # Operators who want to accept partials can set ACCEPT_PARTIAL_VISION=true.
+    if status == "partial_vision":
+        if os.environ.get("ACCEPT_PARTIAL_VISION", "").strip().lower() in ("1", "true", "yes"):
+            return True
+        return False
  
     # Fallback: older output.json files predating processing_status.
     enriched_count = len(out.get("enriched_figures") or [])
@@ -920,6 +933,16 @@ def phase_di(cfg: dict, pdf_name: str, force: bool) -> str:
         source_hash = hashlib.sha256(original_bytes).hexdigest()
         hash_blob_name = f"_dicache/{pdf_name}.source_hash"
         upload_blob(cfg, hash_blob_name, source_hash.encode("utf-8"))
+        # Persist the byte size too — reconcile.py uses it as a
+        # Cosmos-independent edit signal (a size change on the same-named blob
+        # means it was edited, so its old chunks must be purged + re-indexed).
+        # Best-effort: a failure here just means reconcile falls back to the
+        # Cosmos/LMT edit signal.
+        try:
+            upload_blob(cfg, f"_dicache/{pdf_name}.source_size",
+                        str(len(original_bytes)).encode("utf-8"))
+        except Exception as _exc:
+            print(f"  warn: could not persist source_size for {pdf_name}: {_exc}")
  
         # If the file isn't a PDF, try to convert it via LibreOffice so
         # the rest of the pipeline (DI submission, PyMuPDF cropping,
@@ -1785,6 +1808,10 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 "document_revision": document_revision,
                 "effective_date": effective_date,
                 "document_number": document_number,
+                # Row-cap markers so the shape-table skill's inputs resolve
+                # (otherwise it logs "skill input was invalid" for these).
+                "rows_truncated": tbl.get("rows_truncated", False),
+                "rows_suppressed_count": tbl.get("rows_suppressed_count", 0),
             })
  
         # Read DI-missed-image warnings (written during _do_crops). When

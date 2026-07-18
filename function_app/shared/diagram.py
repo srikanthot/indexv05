@@ -85,6 +85,10 @@ Return STRICT JSON with these keys:
                Separate items with " | ". If no readable text, return "".
  
 Return ONLY the JSON object. No markdown, no commentary."""
+
+# Harden the system prompt against instructions hidden in scanned-page text/OCR.
+from .prompt_safety import UNTRUSTED_CONTENT_INSTRUCTION as _UNTRUSTED_INSTR
+SYSTEM_PROMPT = SYSTEM_PROMPT + _UNTRUSTED_INSTR
  
  
 FIGURE_REF_RE = re.compile(
@@ -375,9 +379,12 @@ def _extract_json(text: str) -> dict[str, Any]:
  
 def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
     from .config import model_gen_kwargs
+    from .prompt_safety import wrap_untrusted
     client = get_client()
+    # user_text is document-derived (caption + surrounding section text) —
+    # fence it as untrusted so hidden page instructions can't hijack the call.
     user_content = [
-        {"type": "text", "text": user_text},
+        {"type": "text", "text": wrap_untrusted(user_text, "figure caption and context")},
         {
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{image_b64}"},
@@ -401,6 +408,32 @@ def _call_vision(image_b64: str, user_text: str) -> dict[str, Any]:
     return _extract_json(resp.choices[0].message.content or "{}")
  
  
+def _parse_figure_callouts(ocr_text: str) -> list[str]:
+    """Split the pipe-joined OCR blob into discrete callout tokens (labels,
+    values, terminal IDs, part numbers) so each is a searchable/retrievable
+    unit instead of one undifferentiated string. Deduped, capped, trimmed.
+
+    We keep tokens verbatim (the chatbot must SHOW the figure and let the
+    operator read the value — VLMs are unreliable on engineering diagrams, so
+    we never assert a parsed value as fact; this is a retrieval assist only)."""
+    if not ocr_text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in ocr_text.split("|"):
+        t = tok.strip()
+        if not t:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t[:120])
+        if len(out) >= 200:
+            break
+    return out
+
+
 def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     image_b64 = safe_str(data.get("image_b64"))
     figure_id = safe_str(data.get("figure_id"))
@@ -562,13 +595,53 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
             if record["retrieval_eligible"]
             else "ineligible_missing_header_or_page_or_status"
         )
-        record["applies_to_equipment"] = []
+        # Applicability + hazard tags mined from the figure's text (was []).
+        from .content_classifiers import enrich as _enrich_tags
+        from .semantic import _extract_callouts, extract_callout_keywords
+        from .procedures import parse_steps
+        _dgm_headers = [
+            x for x in (record.get("header_1"), record.get("header_2"), record.get("header_3"))
+            if x and str(x).strip()
+        ]
+        _dgm_surround = safe_str(record.get("surrounding_context"))
+        _dgm_text = " ".join([
+            safe_str(record.get("diagram_description")),
+            safe_str(record.get("diagram_ocr_text")),
+            safe_str(record.get("caption")),
+            _dgm_surround,
+        ])
+        _dgm_callouts = _extract_callouts(_dgm_surround) or _extract_callouts(_dgm_text)
+        _dgm_tags = _enrich_tags(_dgm_text, headers=_dgm_headers, callouts=_dgm_callouts)
+        record["applies_to_equipment"] = _dgm_tags["applies_to_equipment"]
         record["applies_to_system"] = [
             x for x in [safe_str(record.get("header_1")), safe_str(record.get("header_2"))] if x
         ]
-        record["applies_to_voltage"] = []
-        record["figure_step_linked"] = bool(record.get("figure_ref"))
-        record["figure_linkage_confidence"] = 0.6 if record.get("figure_ref") else 0.0
+        record["applies_to_voltage"] = _dgm_tags["applies_to_voltage"]
+        record["applies_to_domain"] = _dgm_tags["applies_to_domain"]
+        record["applies_to_phase"] = _dgm_tags["applies_to_phase"]
+        record["hazard_class"] = _dgm_tags["hazard_class"]
+        record["criticality"] = _dgm_tags["criticality"]
+        record["is_prohibition"] = _dgm_tags["is_prohibition"]
+        record["prohibitions"] = _dgm_tags["prohibitions"]
+        record["governing_callouts"] = _dgm_callouts
+        record["callouts"] = extract_callout_keywords(_dgm_text)
+        record["safety_callout"] = bool(record["callouts"])
+        # B5: capture each OCR callout token as a discrete value (was one blob).
+        record["figure_callouts"] = _parse_figure_callouts(safe_str(record.get("diagram_ocr_text")))
+        record["figure_number"] = safe_str(record.get("figure_ref"))
+        # Title = the DI-extracted caption (in scope here; it isn't stored on the
+        # record). Stays empty for figures DI gave no caption — honest, not every
+        # figure has one; figure_number + figure_callouts still identify it.
+        record["figure_title"] = caption
+        # B5: real figure_step_linked — True only when the figure sits inside a
+        # numbered procedure (surrounding text has steps), not merely when a
+        # figure_ref exists. Confidence scaled by the strength of the signal.
+        _ref = record.get("figure_ref")
+        _in_procedure = len(parse_steps(_dgm_surround)) >= 2
+        record["figure_step_linked"] = bool(_ref and _in_procedure)
+        record["figure_linkage_confidence"] = (
+            0.8 if (_ref and _in_procedure) else (0.4 if _ref else 0.0)
+        )
         record["locator_type"] = "none"
         record["locator_value"] = ""
         record["is_locator_artifact"] = False

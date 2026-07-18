@@ -283,11 +283,26 @@ def _build_row_records_for_cluster(
     records where they buy retrieval).
     """
     body_rows = grid[header_rows:]
-    if not (ROW_RECORD_MIN_ROWS <= len(body_rows) <= ROW_RECORD_MAX_ROWS):
-        return []
+    if len(body_rows) < ROW_RECORD_MIN_ROWS:
+        return [], False, 0
+    # Previously: rows > MAX -> return [] (ALL per-row records dropped SILENTLY,
+    # and merged multi-page clusters could exceed MAX even when each page
+    # passed). Now: truncate to the cap, log loudly, and report the count so
+    # the parent table record can flag that row-level retrieval is partial.
+    rows_truncated = False
+    rows_suppressed = 0
+    if len(body_rows) > ROW_RECORD_MAX_ROWS:
+        rows_suppressed = len(body_rows) - ROW_RECORD_MAX_ROWS
+        rows_truncated = True
+        logging.warning(
+            "table cluster has %d body rows > cap %d; emitting first %d row "
+            "records and suppressing %d (parent table markdown remains complete)",
+            len(body_rows), ROW_RECORD_MAX_ROWS, ROW_RECORD_MAX_ROWS, rows_suppressed,
+        )
+        body_rows = body_rows[:ROW_RECORD_MAX_ROWS]
     folded_headers = _fold_headers(grid, header_rows)
     if not folded_headers:
-        return []
+        return [], False, 0
  
     # Map merged-grid body rows to their source-table page. Walk the
     # cluster in order, mirroring the merge logic that trims duplicated
@@ -314,22 +329,27 @@ def _build_row_records_for_cluster(
         prev_grid = tbl_grid
  
     out: list[dict[str, Any]] = []
+    header_labels = [(h or "").strip() for h in folded_headers]
     for i, row_cells in enumerate(body_rows):
-        # Render as "Header: value" pairs joined with semicolons. Empty
-        # values are skipped so a sparse row doesn't render as
-        # "H1:; H2:; H3: x;" with stray separators.
+        # Build header->value pairs from the grid `zip` (correct binding),
+        # keeping BOTH a display string (`row_text`) AND the STRUCTURED,
+        # position-aligned header/value lists. Downstream must consume the
+        # structured lists, NOT re-parse row_text — a cell value containing
+        # ':' or ';' (e.g. a "3:1" ratio or "1:00" time) would otherwise be
+        # mis-split and re-bound to the wrong column.
+        aligned_values = [
+            ((row_cells[j] if j < len(row_cells) else "") or "").strip()
+            for j in range(len(header_labels))
+        ]
         parts: list[str] = []
-        for h, v in zip(folded_headers, row_cells):
-            v_clean = (v or "").strip()
+        pair_headers: list[str] = []
+        pair_values: list[str] = []
+        for h_clean, v_clean in zip(header_labels, aligned_values):
             if not v_clean:
                 continue
-            h_clean = (h or "").strip()
-            if h_clean:
-                parts.append(f"{h_clean}: {v_clean}")
-            else:
-                # Header column was empty (e.g. row-label leftmost
-                # column). Emit value alone so it still indexes.
-                parts.append(v_clean)
+            pair_headers.append(h_clean)
+            pair_values.append(v_clean)
+            parts.append(f"{h_clean}: {v_clean}" if h_clean else v_clean)
         if not parts:
             continue
         row_text = "; ".join(parts)
@@ -338,8 +358,12 @@ def _build_row_records_for_cluster(
             "row_index": i,
             "row_text": row_text,
             "page": page,
+            # Structured, collision-free binding for the index fields.
+            "cell_headers": pair_headers,   # column labels for non-empty cells
+            "cell_values": pair_values,     # aligned values (same length)
+            "all_headers": header_labels,   # full column set (incl. empty cells)
         })
-    return out
+    return out, rows_truncated, rows_suppressed
  
  
 def _bboxes_for_cluster(cluster: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -452,8 +476,10 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
         # splits of one logical table share the same row-record list —
         # row records are cluster-level, not split-level, since they're
         # already at row granularity.
-        row_records = _build_row_records_for_cluster(cluster, grid, header_rows)
- 
+        row_records, rows_truncated, rows_suppressed = _build_row_records_for_cluster(
+            cluster, grid, header_rows
+        )
+
         splits = _split_oversized(md)
         split_count = len(splits)
  
@@ -477,6 +503,10 @@ def extract_table_records(analyze_result: dict[str, Any]) -> list[dict[str, Any]
                 # row records emitted exactly once per logical table
                 # rather than duplicated across every oversized split.
                 "table_rows": row_records if split_idx == 0 else [],
+                # Row-cap visibility: True + count when the cluster exceeded
+                # ROW_RECORD_MAX_ROWS and some per-row records were suppressed.
+                "rows_truncated": rows_truncated if split_idx == 0 else False,
+                "rows_suppressed_count": rows_suppressed if split_idx == 0 else 0,
             })
  
     return out

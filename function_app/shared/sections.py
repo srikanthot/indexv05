@@ -378,16 +378,20 @@ def find_section_for_page_range(
 # paragraphs vs. captions vs. body text, so a literal `find()` of a caption
 # inside its section content silently fails when one path has "—" and the
 # other has " - " or " – ". This map collapses the common mismatches.
-_CAPTION_NORMALIZE_TABLE = str.maketrans({
-    " ": " ",  # NBSP
-    " ": " ", " ": " ", " ": " ",  # en/em/thin space
-    "": "",   # zero-width space
-    "‐": "-", "‑": "-", "‒": "-",  # hyphen variants
-    "–": "-", "—": "-", "―": "-",  # en/em/horizontal-bar
-    "‘": "'", "’": "'",                 # smart single quotes
-    "“": '"', "”": '"',                 # smart double quotes
-    "­": "",   # soft hyphen
-})
+# NOTE: built from explicit code points, not raw literal keys. A previous
+# copy/sync silently stripped the raw zero-width space (U+200B), leaving an
+# empty "" key that made str.maketrans raise at import and took down the whole
+# function app. Keying by ordinal is sync-proof (str.translate accepts it).
+_CAPTION_NORMALIZE_TABLE = {
+    0x00A0: " ",   # NBSP
+    0x2002: " ", 0x2003: " ", 0x2009: " ",  # en / em / thin space
+    0x200B: "",    # zero-width space
+    0x2010: "-", 0x2011: "-", 0x2012: "-",  # hyphen variants
+    0x2013: "-", 0x2014: "-", 0x2015: "-",  # en / em / horizontal bar
+    0x2018: "'", 0x2019: "'",               # smart single quotes
+    0x201C: '"', 0x201D: '"',               # smart double quotes
+    0x00AD: "",    # soft hyphen
+}
  
  
 def _normalize_for_caption_match(s: str) -> str:

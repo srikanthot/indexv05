@@ -61,29 +61,19 @@ _MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)([^*\n]{1,500}?)(?<!\*)\*(?!\*)", re
 # Smart quotes / dashes / other typographic substitutions. Kept as a
 # table because the alternatives (regex + lookup function) are slower
 # and harder to reason about for a fixed-size mapping.
-_TYPOGRAPHIC_MAP = str.maketrans({
-    "‘": "'",   # left single quote
-    "’": "'",   # right single quote
-    "‚": "'",   # single low-9 quote
-    "‛": "'",   # single high-reversed-9 quote
-    "“": '"',   # left double quote
-    "”": '"',   # right double quote
-    "„": '"',   # double low-9 quote
-    "‟": '"',   # double high-reversed-9 quote
-    "′": "'",   # prime
-    "″": '"',   # double prime
-    "–": "-",   # en dash
-    "—": "-",   # em dash
-    "−": "-",   # minus sign
-    "…": "...", # horizontal ellipsis
-    " ": " ",   # non-breaking space
-    " ": " ",   # narrow no-break space
-    "": "",    # zero-width space
-    "‌": "",    # zero-width non-joiner
-    "‍": "",    # zero-width joiner
-    "�": "",    # BOM
-    "­": "",    # soft hyphen
-})
+# NOTE: keyed by ordinal (not raw literals). A file-sync stripped the raw
+# zero-width chars here, leaving empty "" keys that made str.maketrans raise at
+# import. Ordinal keys are sync-proof (str.translate accepts them directly).
+_TYPOGRAPHIC_MAP = {
+    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",   # single quotes
+    0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"',   # double quotes
+    0x2032: "'", 0x2033: '"',                             # prime / double prime
+    0x2013: "-", 0x2014: "-", 0x2212: "-",               # en / em dash, minus
+    0x2026: "...",                                        # ellipsis
+    0x00A0: " ", 0x202F: " ",                            # nbsp, narrow nbsp
+    0x200B: "", 0x200C: "", 0x200D: "", 0xFEFF: "",      # zero-width + BOM
+    0x00AD: "",                                          # soft hyphen
+}
  
 _LINE_HYPHEN_RE = re.compile(r"(\w+)-\s*\n\s*([a-z])")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")

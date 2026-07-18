@@ -407,6 +407,58 @@
         {
           "name": "suggested_for_eval_question",
           "targetName": "suggested_for_eval_question"
+        },
+        {
+          "name": "applies_to_domain",
+          "targetName": "text_applies_to_domain"
+        },
+        {
+          "name": "governing_callouts",
+          "targetName": "text_governing_callouts"
+        },
+        {
+          "name": "hazard_class",
+          "targetName": "text_hazard_class"
+        },
+        {
+          "name": "criticality",
+          "targetName": "text_criticality"
+        },
+        {
+          "name": "is_prohibition",
+          "targetName": "text_is_prohibition"
+        },
+        {
+          "name": "prohibitions",
+          "targetName": "text_prohibitions"
+        },
+        {
+          "name": "low_confidence_ocr",
+          "targetName": "text_low_confidence_ocr"
+        },
+        {
+          "name": "procedure_title",
+          "targetName": "text_procedure_title"
+        },
+        {
+          "name": "procedure_step_text",
+          "targetName": "text_procedure_step_text"
+        },
+        {
+          "name": "procedure_step_count",
+          "targetName": "text_procedure_step_count"
+        },
+        {
+          "name": "chunk_prev_id",
+          "targetName": "text_chunk_prev_id"
+        },
+        {
+          "name": "chunk_next_id",
+          "targetName": "text_chunk_next_id"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "text_applies_to_phase"
         }
       ]
     },
@@ -714,6 +766,54 @@
         {
           "name": "suggested_for_eval_question",
           "targetName": "suggested_for_eval_question"
+        },
+        {
+          "name": "applies_to_domain",
+          "targetName": "dgm_applies_to_domain"
+        },
+        {
+          "name": "hazard_class",
+          "targetName": "dgm_hazard_class"
+        },
+        {
+          "name": "criticality",
+          "targetName": "dgm_criticality"
+        },
+        {
+          "name": "is_prohibition",
+          "targetName": "dgm_is_prohibition"
+        },
+        {
+          "name": "prohibitions",
+          "targetName": "dgm_prohibitions"
+        },
+        {
+          "name": "governing_callouts",
+          "targetName": "dgm_governing_callouts"
+        },
+        {
+          "name": "callouts",
+          "targetName": "dgm_callouts"
+        },
+        {
+          "name": "safety_callout",
+          "targetName": "dgm_safety_callout"
+        },
+        {
+          "name": "figure_callouts",
+          "targetName": "dgm_figure_callouts"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "dgm_applies_to_phase"
+        },
+        {
+          "name": "figure_number",
+          "targetName": "dgm_figure_number"
+        },
+        {
+          "name": "figure_title",
+          "targetName": "dgm_figure_title"
         }
       ]
     },
@@ -815,6 +915,14 @@
         {
           "name": "split_count",
           "source": "/document/enriched_tables/*/split_count"
+        },
+        {
+          "name": "rows_truncated",
+          "source": "/document/enriched_tables/*/rows_truncated"
+        },
+        {
+          "name": "rows_suppressed_count",
+          "source": "/document/enriched_tables/*/rows_suppressed_count"
         }
       ],
       "outputs": [
@@ -1097,6 +1205,58 @@
         {
           "name": "suggested_for_eval_question",
           "targetName": "suggested_for_eval_question"
+        },
+        {
+          "name": "applies_to_domain",
+          "targetName": "tbl_applies_to_domain"
+        },
+        {
+          "name": "hazard_class",
+          "targetName": "tbl_hazard_class"
+        },
+        {
+          "name": "criticality",
+          "targetName": "tbl_criticality"
+        },
+        {
+          "name": "is_prohibition",
+          "targetName": "tbl_is_prohibition"
+        },
+        {
+          "name": "prohibitions",
+          "targetName": "tbl_prohibitions"
+        },
+        {
+          "name": "governing_callouts",
+          "targetName": "tbl_governing_callouts"
+        },
+        {
+          "name": "callouts",
+          "targetName": "tbl_callouts"
+        },
+        {
+          "name": "safety_callout",
+          "targetName": "tbl_safety_callout"
+        },
+        {
+          "name": "table_rows_truncated",
+          "targetName": "tbl_table_rows_truncated"
+        },
+        {
+          "name": "table_rows_suppressed_count",
+          "targetName": "tbl_table_rows_suppressed_count"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "tbl_applies_to_phase"
+        },
+        {
+          "name": "table_number",
+          "targetName": "tbl_table_number"
+        },
+        {
+          "name": "table_title",
+          "targetName": "tbl_table_title"
         }
       ]
     },
@@ -1370,11 +1530,39 @@
         {
           "name": "suggested_for_eval_question",
           "targetName": "sum_suggested_for_eval_question"
+        },
+        {
+          "name": "applies_to_domain",
+          "targetName": "sum_applies_to_domain"
+        },
+        {
+          "name": "hazard_class",
+          "targetName": "sum_hazard_class"
+        },
+        {
+          "name": "criticality",
+          "targetName": "sum_criticality"
+        },
+        {
+          "name": "governing_callouts",
+          "targetName": "sum_governing_callouts"
+        },
+        {
+          "name": "callouts",
+          "targetName": "sum_callouts"
+        },
+        {
+          "name": "safety_callout",
+          "targetName": "sum_safety_callout"
+        },
+        {
+          "name": "applies_to_phase",
+          "targetName": "sum_applies_to_phase"
         }
       ]
     },
     {
-        "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
+      "@odata.type": "#Microsoft.Skills.Text.AzureOpenAIEmbeddingSkill",
       "name": "embed-text-chunks",
       "description": "Ada-002 embeddings for text chunks. Always runs; toc_like chunks are filtered at retrieval. The previous ConditionalSkill cost gate was reverted because Azure's Util.ConditionalSkill with iterated context + $() references is undocumented territory and the failure mode (empty embedding for every row) silently kills vector search.",
       "context": "/document/markdownDocument/*/pages/*",
@@ -1503,6 +1691,10 @@
           {
             "name": "record_type",
             "source": "/document/markdownDocument/*/pages/*/text_record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",
@@ -1799,6 +1991,58 @@
           {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
+          },
+          {
+            "name": "applies_to_domain",
+            "source": "/document/markdownDocument/*/pages/*/text_applies_to_domain"
+          },
+          {
+            "name": "governing_callouts",
+            "source": "/document/markdownDocument/*/pages/*/text_governing_callouts"
+          },
+          {
+            "name": "hazard_class",
+            "source": "/document/markdownDocument/*/pages/*/text_hazard_class"
+          },
+          {
+            "name": "criticality",
+            "source": "/document/markdownDocument/*/pages/*/text_criticality"
+          },
+          {
+            "name": "is_prohibition",
+            "source": "/document/markdownDocument/*/pages/*/text_is_prohibition"
+          },
+          {
+            "name": "prohibitions",
+            "source": "/document/markdownDocument/*/pages/*/text_prohibitions"
+          },
+          {
+            "name": "low_confidence_ocr",
+            "source": "/document/markdownDocument/*/pages/*/text_low_confidence_ocr"
+          },
+          {
+            "name": "procedure_title",
+            "source": "/document/markdownDocument/*/pages/*/text_procedure_title"
+          },
+          {
+            "name": "procedure_step_text",
+            "source": "/document/markdownDocument/*/pages/*/text_procedure_step_text"
+          },
+          {
+            "name": "procedure_step_count",
+            "source": "/document/markdownDocument/*/pages/*/text_procedure_step_count"
+          },
+          {
+            "name": "chunk_prev_id",
+            "source": "/document/markdownDocument/*/pages/*/text_chunk_prev_id"
+          },
+          {
+            "name": "chunk_next_id",
+            "source": "/document/markdownDocument/*/pages/*/text_chunk_next_id"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/markdownDocument/*/pages/*/text_applies_to_phase"
           }
         ]
       },
@@ -1814,6 +2058,10 @@
           {
             "name": "record_type",
             "source": "/document/enriched_figures/*/dgm_record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",
@@ -2074,6 +2322,54 @@
           {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
+          },
+          {
+            "name": "applies_to_domain",
+            "source": "/document/enriched_figures/*/dgm_applies_to_domain"
+          },
+          {
+            "name": "hazard_class",
+            "source": "/document/enriched_figures/*/dgm_hazard_class"
+          },
+          {
+            "name": "criticality",
+            "source": "/document/enriched_figures/*/dgm_criticality"
+          },
+          {
+            "name": "is_prohibition",
+            "source": "/document/enriched_figures/*/dgm_is_prohibition"
+          },
+          {
+            "name": "prohibitions",
+            "source": "/document/enriched_figures/*/dgm_prohibitions"
+          },
+          {
+            "name": "governing_callouts",
+            "source": "/document/enriched_figures/*/dgm_governing_callouts"
+          },
+          {
+            "name": "callouts",
+            "source": "/document/enriched_figures/*/dgm_callouts"
+          },
+          {
+            "name": "safety_callout",
+            "source": "/document/enriched_figures/*/dgm_safety_callout"
+          },
+          {
+            "name": "figure_callouts",
+            "source": "/document/enriched_figures/*/dgm_figure_callouts"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/enriched_figures/*/dgm_applies_to_phase"
+          },
+          {
+            "name": "figure_number",
+            "source": "/document/enriched_figures/*/dgm_figure_number"
+          },
+          {
+            "name": "figure_title",
+            "source": "/document/enriched_figures/*/dgm_figure_title"
           }
         ]
       },
@@ -2089,6 +2385,10 @@
           {
             "name": "record_type",
             "source": "/document/enriched_tables/*/tbl_record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",
@@ -2161,7 +2461,8 @@
           {
             "name": "chunk_bboxes",
             "source": "/document/enriched_tables/*/tbl_chunk_bboxes"
-          }, {
+          },
+          {
             "name": "bbox_mode_available",
             "source": "/document/enriched_tables/*/tbl_bbox_mode_available"
           },
@@ -2392,6 +2693,58 @@
           {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
+          },
+          {
+            "name": "applies_to_domain",
+            "source": "/document/enriched_tables/*/tbl_applies_to_domain"
+          },
+          {
+            "name": "hazard_class",
+            "source": "/document/enriched_tables/*/tbl_hazard_class"
+          },
+          {
+            "name": "criticality",
+            "source": "/document/enriched_tables/*/tbl_criticality"
+          },
+          {
+            "name": "is_prohibition",
+            "source": "/document/enriched_tables/*/tbl_is_prohibition"
+          },
+          {
+            "name": "prohibitions",
+            "source": "/document/enriched_tables/*/tbl_prohibitions"
+          },
+          {
+            "name": "governing_callouts",
+            "source": "/document/enriched_tables/*/tbl_governing_callouts"
+          },
+          {
+            "name": "callouts",
+            "source": "/document/enriched_tables/*/tbl_callouts"
+          },
+          {
+            "name": "safety_callout",
+            "source": "/document/enriched_tables/*/tbl_safety_callout"
+          },
+          {
+            "name": "table_rows_truncated",
+            "source": "/document/enriched_tables/*/tbl_table_rows_truncated"
+          },
+          {
+            "name": "table_rows_suppressed_count",
+            "source": "/document/enriched_tables/*/tbl_table_rows_suppressed_count"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/enriched_tables/*/tbl_applies_to_phase"
+          },
+          {
+            "name": "table_number",
+            "source": "/document/enriched_tables/*/tbl_table_number"
+          },
+          {
+            "name": "table_title",
+            "source": "/document/enriched_tables/*/tbl_table_title"
           }
         ]
       },
@@ -2407,6 +2760,10 @@
           {
             "name": "record_type",
             "source": "/document/enriched_tables/*/tbl_table_rows/*/record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",
@@ -2727,6 +3084,42 @@
           {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
+          },
+          {
+            "name": "applies_to_domain",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/applies_to_domain"
+          },
+          {
+            "name": "hazard_class",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/hazard_class"
+          },
+          {
+            "name": "criticality",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/criticality"
+          },
+          {
+            "name": "is_prohibition",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/is_prohibition"
+          },
+          {
+            "name": "prohibitions",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/prohibitions"
+          },
+          {
+            "name": "governing_callouts",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/governing_callouts"
+          },
+          {
+            "name": "safety_callout",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/safety_callout"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/applies_to_phase"
+          },
+          {
+            "name": "table_row_key",
+            "source": "/document/enriched_tables/*/tbl_table_rows/*/table_row_key"
           }
         ]
       },
@@ -2742,6 +3135,10 @@
           {
             "name": "record_type",
             "source": "/document/sum_record_type"
+          },
+          {
+            "name": "document_title",
+            "source": "/document/metadata_title"
           },
           {
             "name": "source_file",
@@ -2894,6 +3291,34 @@
           {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
+          },
+          {
+            "name": "applies_to_domain",
+            "source": "/document/sum_applies_to_domain"
+          },
+          {
+            "name": "hazard_class",
+            "source": "/document/sum_hazard_class"
+          },
+          {
+            "name": "criticality",
+            "source": "/document/sum_criticality"
+          },
+          {
+            "name": "governing_callouts",
+            "source": "/document/sum_governing_callouts"
+          },
+          {
+            "name": "callouts",
+            "source": "/document/sum_callouts"
+          },
+          {
+            "name": "safety_callout",
+            "source": "/document/sum_safety_callout"
+          },
+          {
+            "name": "applies_to_phase",
+            "source": "/document/sum_applies_to_phase"
           }
         ]
       }

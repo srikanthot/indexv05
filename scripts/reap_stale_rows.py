@@ -108,7 +108,9 @@ def _search_for_stale(endpoint: str, index_name: str, token: str,
     body = {
         "search": "*",
         "filter": filter_expr,
-        "select": "chunk_id,record_type,skill_version,last_indexed_at",
+        # `id` is the index KEY — required for delete actions. Selecting only
+        # chunk_id (a non-key field) made every delete a silent no-op.
+        "select": "id,chunk_id,record_type,skill_version,last_indexed_at",
         "top": top,
     }
     path = f"/indexes/{urllib.parse.quote(index_name)}/docs/search?api-version=2024-11-01-preview"
@@ -120,17 +122,17 @@ def _search_for_stale(endpoint: str, index_name: str, token: str,
  
  
 def _delete_rows(endpoint: str, index_name: str, token: str,
-                 chunk_ids: list[str]) -> int:
-    """Delete rows by chunk_id via the index's docs endpoint. Batched at
+                 ids: list[str]) -> int:
+    """Delete rows by the `id` KEY via the index's docs endpoint. Batched at
     100 to stay under the per-call payload limit."""
     deleted = 0
     path = f"/indexes/{urllib.parse.quote(index_name)}/docs/index?api-version=2024-11-01-preview"
-    for i in range(0, len(chunk_ids), 100):
-        batch = chunk_ids[i:i + 100]
+    for i in range(0, len(ids), 100):
+        batch = ids[i:i + 100]
         body = {
             "value": [
-                {"@search.action": "delete", "chunk_id": cid}
-                for cid in batch
+                {"@search.action": "delete", "id": _id}
+                for _id in batch
             ]
         }
         resp = _post(endpoint, path, body, token)
@@ -186,13 +188,13 @@ def main() -> int:
         if not rows:
             break
         total_seen += len(rows)
-        chunk_ids = [r["chunk_id"] for r in rows if r.get("chunk_id")]
+        ids = [r["id"] for r in rows if r.get("id")]
  
         if args.dry_run:
-            log.info("[dry-run] would delete %d stale rows (sample below):", len(chunk_ids))
+            log.info("[dry-run] would delete %d stale rows (sample below):", len(ids))
             for r in rows[:5]:
                 log.info("  %s | %s | skill=%s | last=%s",
-                         r.get("chunk_id"), r.get("record_type"),
+                         r.get("id"), r.get("record_type"),
                          r.get("skill_version"), r.get("last_indexed_at"))
             break  # one page is enough for dry-run
  
@@ -200,7 +202,7 @@ def main() -> int:
             log.error("Refusing to delete without --yes flag")
             return 1
  
-        deleted = _delete_rows(endpoint, index_name, token, chunk_ids)
+        deleted = _delete_rows(endpoint, index_name, token, ids)
         total_deleted += deleted
         log.info("Deleted %d rows (running total: %d)", deleted, total_deleted)
  

@@ -28,6 +28,10 @@ single dense summary (about 300-500 words) that captures:
   - critical safety or compliance notes
   - notable diagrams/figures referenced
 Do not invent content. Plain prose only, no markdown."""
+
+# Harden against instructions hidden in the (untrusted) manual text.
+from .prompt_safety import UNTRUSTED_CONTENT_INSTRUCTION as _UNTRUSTED_INSTR
+SYSTEM_PROMPT = SYSTEM_PROMPT + _UNTRUSTED_INSTR
  
  
 def _coerce_titles(value: Any) -> list[str]:
@@ -135,10 +139,12 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
             f"{head}\n\n[...middle of document...]\n\n{mid}"
             f"\n\n[...end of document...]\n\n{tail}"
         )
+    from .prompt_safety import wrap_untrusted
     prompt = (
         f"Source file: {source_file}\n\n"
         f"{titles_block}\n\n"
-        f"Manual content (sampled from beginning, middle, end):\n{content_sample}"
+        "Manual content (sampled from beginning, middle, end):\n"
+        f"{wrap_untrusted(content_sample, 'manual content')}"
     )
  
     # Narrowed exception scope (was bare `except Exception`). The bare
@@ -195,7 +201,14 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         f"Source: {source_file}\n"
         f"Document summary:\n{summary_text}"
     )
- 
+
+    # Doc-level applicability + hazard tags mined from the summary + titles.
+    from .content_classifiers import enrich as _enrich_tags
+    from .semantic import _extract_callouts, extract_callout_keywords
+    _sum_text = " ".join([summary_text, " ".join(titles)])
+    _sum_callouts = _extract_callouts(summary_text)
+    _sum_tags = _enrich_tags(_sum_text, headers=None, callouts=_sum_callouts)
+
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -215,9 +228,16 @@ def process_doc_summary(data: dict[str, Any]) -> dict[str, Any]:
         "retrieval_eligible_reason": (
             "eligible_summary_content" if bool(status == "ok") else "summary_generation_failed"
         ),
-        "applies_to_equipment": [],
+        "applies_to_equipment": _sum_tags["applies_to_equipment"],
         "applies_to_system": [],
-        "applies_to_voltage": [],
+        "applies_to_voltage": _sum_tags["applies_to_voltage"],
+        "applies_to_domain": _sum_tags["applies_to_domain"],
+        "applies_to_phase": _sum_tags["applies_to_phase"],
+        "hazard_class": _sum_tags["hazard_class"],
+        "criticality": _sum_tags["criticality"],
+        "governing_callouts": _sum_callouts,
+        "callouts": extract_callout_keywords(_sum_text),
+        "safety_callout": bool(_sum_callouts),
         "procedure_id": "",
         "procedure_step_id": "",
         "procedure_step_order": None,
