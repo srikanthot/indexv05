@@ -30,8 +30,11 @@ from typing import Any
 from .config import index_run_id as _index_run_id, optional_env
 from .di_client import fetch_cached_analysis
 from .enrichment import (
+    extract_chapter,
     is_boilerplate_revision,
     is_valid_page_label,
+    section_path,
+    tables_referenced_normalized,
 )
 from .ids import (
     SKILL_VERSION,
@@ -2356,6 +2359,14 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     num_ocr_min = _numeric_ocr_min_for_pages(source_path, pages_covered)
     low_confidence_ocr = bool(num_ocr_min is not None and num_ocr_min < _num_floor)
 
+    # Enrichment: chapter identifier (for citations), section breadcrumb, and a
+    # normalized table-ref join key. Chapter is taken from the heading chain
+    # ONLY (never body text) so a "see Chapter 3" cross-reference in prose can't
+    # be mistaken for this chunk's chapter.
+    chapter_label, chapter_number = extract_chapter(h1_in, h2_in, h3_in)
+    section_path_str = section_path(h1_in, h2_in, h3_in)
+    tbl_refs_normalized = tables_referenced_normalized(tbl_refs)
+
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
         "parent_id": parent_id_for(source_path, source_file),
@@ -2371,7 +2382,11 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "figures_referenced_normalized": fig_refs_normalized,
         "table_ref": table_ref,
         "tables_referenced": tbl_refs,
+        "tables_referenced_normalized": tbl_refs_normalized,
         "sections_referenced": section_refs,
+        "section_path": section_path_str,
+        "chapter_label": chapter_label,
+        "chapter_number": chapter_number,
         "pages_referenced": page_refs,
         "highlight_text": highlight_text,
         "text_bbox": text_bbox_json,

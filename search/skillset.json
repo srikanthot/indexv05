@@ -221,6 +221,22 @@
           "targetName": "text_tables_referenced"
         },
         {
+          "name": "tables_referenced_normalized",
+          "targetName": "text_tables_referenced_normalized"
+        },
+        {
+          "name": "section_path",
+          "targetName": "text_section_path"
+        },
+        {
+          "name": "chapter_label",
+          "targetName": "text_chapter_label"
+        },
+        {
+          "name": "chapter_number",
+          "targetName": "text_chapter_number"
+        },
+        {
           "name": "sections_referenced",
           "targetName": "text_sections_referenced"
         },
@@ -1775,6 +1791,22 @@
           {
             "name": "tables_referenced",
             "source": "/document/markdownDocument/*/pages/*/text_tables_referenced"
+          },
+          {
+            "name": "tables_referenced_normalized",
+            "source": "/document/markdownDocument/*/pages/*/text_tables_referenced_normalized"
+          },
+          {
+            "name": "section_path",
+            "source": "/document/markdownDocument/*/pages/*/text_section_path"
+          },
+          {
+            "name": "chapter_label",
+            "source": "/document/markdownDocument/*/pages/*/text_chapter_label"
+          },
+          {
+            "name": "chapter_number",
+            "source": "/document/markdownDocument/*/pages/*/text_chapter_number"
           },
           {
             "name": "parent_id",
