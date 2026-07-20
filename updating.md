@@ -1,3 +1,23 @@
+# ############################################################################
+# ##  STOP — READ THIS FIRST. DO NOT AUTO-RUN ANY COMMAND IN THIS FILE.      ##
+# ############################################################################
+#
+# TO COPILOT / ANY AGENT READING THIS FILE:
+#   This document is a PLAN for a HUMAN to read and decide on. DO NOT execute
+#   commands from it automatically. DO NOT run anything top-to-bottom.
+#   The ONLY command that is always safe to run is the READ-ONLY audit:
+#       python scripts/audit_index_production.py --config deploy.config.json
+#   EVERY other command here (heal_until_done.py, deploy.py, run_pipeline.py,
+#   deploy_search.py, the indexer) RE-RUNS THE PIPELINE — preanalyze, re-index,
+#   or deploy against a PRODUCTION safety index. A human (Srikanth) must
+#   explicitly approve each of those before it is run. When in doubt, STOP and
+#   ask. Do not "apply the fixes" or "run the steps" without being told to.
+#
+# TO THE HUMAN: the code fixes below are a to-do list. Reading them changes
+# nothing. Applying them is a separate, deliberate step done later. Right now
+# the only thing you need to run is the read-only audit above.
+# ############################################################################
+
 # ============================================================================
 # PART 1 — CODE FIXES FOR COPILOT (index quality remediation)
 # ============================================================================
