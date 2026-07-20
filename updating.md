@@ -1,3 +1,245 @@
+# ============================================================================
+# PART 1 — CODE FIXES FOR COPILOT (index quality remediation)
+# ============================================================================
+#
+# CONTEXT: This is a SAFETY-CRITICAL RAG index (electric live-wire manuals).
+# A 45-agent cross-checked audit + a full-index run of
+# `scripts/audit_index_production.py` produced verdict = FAIL
+# (4 critical, 13 high, 97 medium over 210,985 records, 100% coverage).
+# Coverage and vector presence PASSED. The failures are field-quality issues.
+#
+# HOW TO USE THIS DOC (Copilot): Work top-down. Each TASK has: the file(s), a
+# grep anchor to find the exact spot, the problem, the exact change, and an
+# ACCEPTANCE check. Do NOT change line numbers blindly — grep for the quoted
+# token. After a batch, re-run the audit (bottom of Part 1) and confirm the
+# target finding category drops. Ask Srikanth before any change marked
+# [DECISION]. Do the [SAFE] tasks first — they are mechanical and low-risk.
+#
+# ----------------------------------------------------------------------------
+# ALREADY DONE — do NOT redo (in commit b0c1c8c on branch
+# safety-indexing-hardening; run `git pull` first):
+#   - scripts/audit_index_production.py  (the audit command itself — NEW)
+#   - run_pipeline.py    : added the real --trigger-indexer flag
+#   - check_index.py     : removed a pasted duplicate that made it a SyntaxError
+#   - deploy_search.py   : rejects a non *.openai.azure.us embedding endpoint
+# ----------------------------------------------------------------------------
+#
+# ============================================================================
+# STEP 1 — TRIAGE YOUR ACTUAL CRITICAL/HIGH FINDINGS FIRST
+# ============================================================================
+# Print your real findings from the report the audit already wrote:
+#
+#   python -c "import json; d=json.load(open('reports/production_audit.json',encoding='utf-8')); [print(f['severity'].upper(),'|',f['category'],'|',f['message'],'| e.g.',f.get('examples')) for f in d['findings'] if f['severity'] in ('critical','high')]"
+#
+# Map each finding's `category` to the fix task below:
+#
+#   category                              -> TASK
+#   ------------------------------------- -> -----------------------------------
+#   required_missing / retrieval_missing  -> TASK 0 (real data gap — MUST FIX)
+#   empty_chunk / placeholder_chunk       -> TASK 0
+#   vectors_missing_for_documents         -> TASK 1
+#   locator_artifact_retrieval_eligible   -> TASK 2
+#   noise_row_retrieval_eligible          -> TASK 2
+#   safety_callout_overflag               -> TASK 3
+#   safety_callout_never_set              -> TASK 3
+#   placeholder_value                     -> TASK 4 (per field)
+#   constant_stub_field                   -> TASK 5 (mostly EXPECTED — see list)
+#   physical_page_* / non_contiguous      -> TASK 6
+#   applies_to_system_is_header_echo      -> TASK 7
+#
+# The 97 medium are DOMINATED by `constant_stub_field` on already-known stub
+# fields (TASK 5) — those are expected and mostly harmless; triage them LAST.
+#
+# ============================================================================
+# TASK 0 [SAFE, HIGHEST PRIORITY] — required/grounding fields empty on some records
+# ============================================================================
+# The audit flags critical `required_missing::<type>::<field>` or
+# `retrieval_missing::<field>` when a retrieval-eligible chunk is missing a
+# field it MUST have (source_file, chunk, physical_pdf_page, header_1,
+# content_class, retrieval_eligible_reason, etc.). For a safety bot this means a
+# chunk that can be served with no citation/page/grounding.
+# ACTION:
+#   1. From STEP 1 output, note the exact <type>.<field> and the example
+#      chunk_id(s).
+#   2. Pull those records and find the pattern:
+#        python scripts/verify_new_fields.py --config deploy.config.json --source-file <PDF>
+#   3. If it is a WHOLE class of records (e.g. every diagram missing X), it is a
+#      pipeline emitter bug — find where that record type is built
+#      (function_app/shared/: page_label.py=text, process_table.py=table/row,
+#      diagram.py=diagram, summary.py=summary) and populate the field.
+#   4. If it is a HANDFUL of records, they are likely partial-index failures —
+#      re-heal those PDFs:  python scripts/heal_until_done.py --config deploy.config.json
+# ACCEPTANCE: re-run audit -> 0 findings of that required_missing/retrieval_missing key.
+#
+# ============================================================================
+# TASK 1 [SAFE] — some documents have NO vectors (vectors_missing_for_documents)
+# ============================================================================
+# Those PDFs are invisible to semantic search. Cause is almost always a
+# per-document embedding failure during indexing (throttling / empty input),
+# NOT the endpoint (global vectors passed).
+# ACTION: re-run the indexer for the listed source_file(s), then re-heal:
+#   python scripts/heal_until_done.py --config deploy.config.json
+# If it persists, check the indexer for embedding WARNINGS (see TASK 8).
+# ACCEPTANCE: re-run audit -> vectors_missing_for_documents count = 0.
+#
+# ============================================================================
+# TASK 2 [SAFE] — non-retrievable content is retrieval-eligible (leak)
+# ============================================================================
+# `locator_artifact_retrieval_eligible` = a TOC/index/locator artifact is being
+# served as an answer. `noise_row_retrieval_eligible` = a table row graded
+# 'noise' is still eligible. Both pollute answers.
+# FILES: function_app/shared/page_label.py (is_locator_artifact / status),
+#        function_app/shared/table_row_quality.py + process_table.py (row quality).
+# CHANGE: where `retrieval_eligible` is computed for a record, force it False
+#   when `is_locator_artifact` is True (or content_class == 'locator_artifact'),
+#   and for table_row when table_row_quality == 'noise'. Grep for
+#   "retrieval_eligible" in those files and add the guard at the assignment.
+# ACCEPTANCE: audit -> both categories = 0.
+#
+# ============================================================================
+# TASK 3 [DECISION+SAFE] — safety_callout over/under-flagging
+# ============================================================================
+# PROBLEM: safety_callout is TRUE on an implausibly high share of text records
+# because the callout regex is case-insensitive and treats NOTE / NOTICE as
+# safety callouts. Over-flagging dilutes the `safety-boost` scoring profile so
+# real DANGER/WARNING chunks lose their ranking edge.
+# FILE: grep for the callout keyword list — likely
+#   function_app/shared/content_classifiers.py and/or process_document.py
+#   (search: "WARNING", "DANGER", "CAUTION", "NOTICE", "callout").
+# CHANGE:
+#   - Treat only DANGER / WARNING / CAUTION as SAFETY callouts (these are the
+#     ANSI Z535 safety signal words). NOTE and NOTICE are informational —
+#     keep classifying them as callouts if you like, but they must NOT set
+#     safety_callout = True.
+#   - Keep matching case-insensitively for detection, but require the signal
+#     word to be a standalone boxed callout token, not a substring.
+# [DECISION for Srikanth]: confirm the exact safety-word set for PSEG manuals.
+# ACCEPTANCE: audit -> safety_callout is TRUE on a plausible minority (<~20%)
+#   of text records; safety_callout_overflag finding gone. Spot-check 10 TRUE
+#   rows are genuine WARNING/DANGER.
+#
+# ============================================================================
+# TASK 3b [SAFE] — table rows carry safety_callout but no `callouts` keyword field
+# ============================================================================
+# PROBLEM: table_row records set safety_callout but never emit the `callouts`
+# collection, so a callout-keyword filter/boost misses every table row.
+# FILE: function_app/shared/process_table.py (the table_row record dict).
+# CHANGE: when a row is a safety callout, also populate `callouts` (and
+# `governing_callouts` if applicable) the same way text records do.
+# ACCEPTANCE: query rows with safety_callout=true and confirm `callouts` is non-empty.
+#
+# ============================================================================
+# TASK 3c [SAFE] — multi-line boxed callouts truncated to first line
+# ============================================================================
+# PROBLEM: governing_callouts keeps only the FIRST line of a multi-line boxed
+# callout, dropping the actionable clause (e.g. keeps "WARNING" but drops
+# "De-energize before servicing").
+# FILE: grep "governing_callouts" in function_app/shared/ (content_classifiers.py
+#   / process_document.py).
+# CHANGE: capture the full callout block (all lines until the box ends), not
+#   just the first line. Preserve the verbatim safety text.
+# ACCEPTANCE: spot-check a known multi-line WARNING — governing_callouts holds
+#   the full text.
+#
+# ============================================================================
+# TASK 4 [SAFE] — placeholder values that pass as "populated"
+# ============================================================================
+# `placeholder_value` findings = a field holds 'unknown'/'N/A'/'none' etc. The
+# main known case is diagram_category defaulting to "unknown".
+# FILE: function_app/shared/diagram.py (grep "unknown").
+# CHANGE: keep "unknown" only as a true last resort; prefer leaving the field
+#   empty OR add a real fallback category so the audit/chatbot can tell
+#   "unclassified" from a real class. [DECISION]: confirm desired behavior.
+# ACCEPTANCE: audit -> placeholder_value for that field drops.
+#
+# ============================================================================
+# TASK 5 [DECISION] — confirmed STUB fields (source of most of the 97 medium)
+# ============================================================================
+# These fields are hardcoded constants for some/all record types. They are NOT
+# corrupting answers (constants, not garbage), but they advertise capabilities
+# the chatbot cannot use. For EACH, pick ONE: (A) wire real data, or
+# (B) remove the field from the skillset projection (search/skillset.json) AND
+# from search/index.json so the schema stops advertising it. Coordinate with the
+# chatbot team + Srikanth before removing anything they read.
+#
+#   FIELD                                  WHERE HARDCODED                      NOTE
+#   -------------------------------------- ------------------------------------ ----------------------------
+#   applies_to_system                      page_label/process_table/diagram     echoes header_1/2 — see TASK 7
+#   figure_step_linked                     page_label,process_table,summary     real ONLY on diagram
+#   figure_linkage_confidence              (same)                               real ONLY on diagram
+#   locator_type = 'none'                  all 4 emitters                       real anchor is in figure_ref/table_ref
+#   locator_value = ''                     all 4 emitters                       consider deriving from refs
+#   chunk_prev_id / chunk_next_id = ''     page_label.py                        documented "reserved"; leave or wire
+#   table_variant_id                       process_table.py                     == table_cluster_id (redundant)
+#   table_integrity_score                  process_table.py                     constant, not computed (see TASK 6b)
+#   embedding_version                      page_label/process_table/diagram     constant; NOT proof vectors landed
+#
+# RECOMMENDED for a first production pass: remove figure_step_linked/
+# figure_linkage_confidence/locator_type/locator_value/table_variant_id from
+# the TEXT/TABLE/SUMMARY projections (keep figure_step_linked/confidence on
+# diagram where it is real). This makes the schema honest and clears most of the
+# 97 medium. Keep chunk_prev/next as documented-reserved.
+# ACCEPTANCE: audit -> constant_stub_field count drops to only the fields you
+#   deliberately keep.
+#
+# ============================================================================
+# TASK 6 [SAFE] — page-coordinate integrity (physical_pdf_page vs pages list)
+# ============================================================================
+# `physical_page_not_min_of_list` / `_end_not_max_of_list` /
+# `physical_pdf_pages_non_contiguous`: the single-page anchor disagrees with the
+# page list, which breaks "jump to the exact page" citations.
+# FILE: function_app/shared/page_label.py (grep "physical_pdf_page",
+#   "_sanitize_page_span"). CHANGE: ensure physical_pdf_page == min(pages) and
+#   physical_pdf_page_end == max(pages), and the list is contiguous, before emit.
+# ACCEPTANCE: audit -> those three categories = 0.
+#
+# TASK 6b [DECISION] — page_width_in/height_in hardcoded 8.5x11 for diagram/table
+# ============================================================================
+# diagram/table records stamp page_width_in=8.5, page_height_in=11.0 while their
+# bboxes are in real-page DI inches. On non-Letter pages this yields wrong crop
+# coords for the "show me the figure" feature.
+# FILE: function_app/shared/diagram.py, process_table.py (grep "8.5", "11.0",
+#   "page_width_in"). CHANGE: read the real page dimensions from the DI page
+#   (as text records already do) instead of the constant.
+# ACCEPTANCE: diagram/table page_width_in/height_in vary by document, match text
+#   records on the same page.
+#
+# ============================================================================
+# TASK 7 [DECISION] — applies_to_system is not a real system tag
+# ============================================================================
+# It just copies header_1/header_2, so a controlled-vocabulary filter
+# (applies_to_system eq 'distribution') never matches. Either add a real
+# classify_system() in content_classifiers.py (controlled vocab: distribution/
+# transmission/substation/metering/protection/gas-distribution/…) and call it in
+# all emitters, OR drop applies_to_system from the routing contract and document
+# it as a header alias. ACCEPTANCE: audit -> applies_to_system_is_header_echo = 0.
+#
+# ============================================================================
+# TASK 8 [DECISION] — silent-partial-index hardening (do LAST, needs care)
+# ============================================================================
+# search/indexer.json has maxFailedItems=10 + failOnUnprocessableDocument=false,
+# and embedding failures are indexer WARNINGS — so docs can drop or land with
+# null vectors while the indexer reports success. The new audit is now your
+# safety net for this, but consider: (a) after each run, alert on indexer
+# warning counts; (b) keep audit_index_production.py as a required gate in
+# Jenkins (it exits 1 on critical). [DECISION with Srikanth] before lowering
+# maxFailedItems, which changes fail behavior.
+#
+# ============================================================================
+# VERIFY LOOP — after each batch of fixes, re-run and drive criticals to 0
+# ============================================================================
+#   python scripts/audit_index_production.py --config deploy.config.json
+#   # GOAL: "VERDICT: PASS" (0 critical, full coverage). Then with --strict to
+#   # also clear high findings:
+#   python scripts/audit_index_production.py --config deploy.config.json --strict
+# NOTE: emitter-code fixes only take effect after the affected PDFs are
+# re-preanalyzed + re-indexed (heal_until_done.py or a deploy). Schema/projection
+# changes (TASK 5) require re-running deploy_search.py + a full reindex.
+#
+# ============================================================================
+# ============================================================================
+
+
 # RUN THE INDEXING PIPELINE ON YOUR LAPTOP — step by step
 
 Follow these in order, top to bottom. Commands are for Windows PowerShell. Do not skip a step.
