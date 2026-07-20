@@ -576,6 +576,18 @@
           "targetName": "dgm_topic_id"
         },
         {
+          "name": "section_path",
+          "targetName": "dgm_section_path"
+        },
+        {
+          "name": "chapter_label",
+          "targetName": "dgm_chapter_label"
+        },
+        {
+          "name": "chapter_number",
+          "targetName": "dgm_chapter_number"
+        },
+        {
           "name": "record_type",
           "targetName": "dgm_record_type"
         },
@@ -961,6 +973,18 @@
         {
           "name": "topic_id",
           "targetName": "tbl_topic_id"
+        },
+        {
+          "name": "section_path",
+          "targetName": "tbl_section_path"
+        },
+        {
+          "name": "chapter_label",
+          "targetName": "tbl_chapter_label"
+        },
+        {
+          "name": "chapter_number",
+          "targetName": "tbl_chapter_number"
         },
         {
           "name": "record_type",
@@ -2272,6 +2296,18 @@
             "source": "/document/enriched_figures/*/dgm_topic_id"
           },
           {
+            "name": "section_path",
+            "source": "/document/enriched_figures/*/dgm_section_path"
+          },
+          {
+            "name": "chapter_label",
+            "source": "/document/enriched_figures/*/dgm_chapter_label"
+          },
+          {
+            "name": "chapter_number",
+            "source": "/document/enriched_figures/*/dgm_chapter_number"
+          },
+          {
             "name": "chunk",
             "source": "/document/enriched_figures/*/dgm_description"
           },
@@ -2593,6 +2629,18 @@
           {
             "name": "topic_id",
             "source": "/document/enriched_tables/*/tbl_topic_id"
+          },
+          {
+            "name": "section_path",
+            "source": "/document/enriched_tables/*/tbl_section_path"
+          },
+          {
+            "name": "chapter_label",
+            "source": "/document/enriched_tables/*/tbl_chapter_label"
+          },
+          {
+            "name": "chapter_number",
+            "source": "/document/enriched_tables/*/tbl_chapter_number"
           },
           {
             "name": "chunk",
