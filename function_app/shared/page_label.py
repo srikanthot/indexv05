@@ -35,6 +35,7 @@ from .enrichment import (
     is_valid_page_label,
     section_path,
     tables_referenced_normalized,
+    topic_id,
 )
 from .ids import (
     SKILL_VERSION,
@@ -2370,6 +2371,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "chunk_id": text_chunk_id(source_path, source_file, layout_ordinal, page_text),
         "parent_id": parent_id_for(source_path, source_file),
+        "topic_id": topic_id(parent_id_for(source_path, source_file), section_path_str),
         "record_type": "text",
         "printed_page_label": label,
         "printed_page_label_end": end_label,

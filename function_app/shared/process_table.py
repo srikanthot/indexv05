@@ -17,6 +17,7 @@ import re
 from typing import Any
  
 from .config import index_run_id as _index_run_id, optional_env
+from .enrichment import section_path, topic_id
 from .ids import (
     SKILL_VERSION,
     chunk_content_hash,
@@ -377,6 +378,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
+        "topic_id": topic_id(parent_id, section_path(h1, h2, h3)),
         "record_type": "table",
         "chunk": markdown,
         "chunk_for_semantic": chunk_for_semantic,

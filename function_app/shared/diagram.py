@@ -24,6 +24,7 @@ from typing import Any
  
 from .aoai import get_client, vision_deployment
 from .di_client import fetch_cached_crop, fetch_precomputed_vision
+from .enrichment import section_path, topic_id
 from .ids import (
     SKILL_VERSION,
     diagram_chunk_id,
@@ -509,6 +510,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     base_record = {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
+        "topic_id": topic_id(parent_id, section_path(h1, h2, h3)),
         "record_type": "diagram",
         "figure_id": figure_id,
         "figure_bbox": bbox_json,

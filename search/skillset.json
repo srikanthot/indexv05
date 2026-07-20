@@ -173,6 +173,10 @@
           "targetName": "text_parent_id"
         },
         {
+          "name": "topic_id",
+          "targetName": "text_topic_id"
+        },
+        {
           "name": "record_type",
           "targetName": "text_record_type"
         },
@@ -568,6 +572,10 @@
           "targetName": "dgm_parent_id"
         },
         {
+          "name": "topic_id",
+          "targetName": "dgm_topic_id"
+        },
+        {
           "name": "record_type",
           "targetName": "dgm_record_type"
         },
@@ -949,6 +957,10 @@
         {
           "name": "parent_id",
           "targetName": "tbl_parent_id"
+        },
+        {
+          "name": "topic_id",
+          "targetName": "tbl_topic_id"
         },
         {
           "name": "record_type",
@@ -1813,6 +1825,10 @@
             "source": "/document/markdownDocument/*/pages/*/text_parent_id"
           },
           {
+            "name": "topic_id",
+            "source": "/document/markdownDocument/*/pages/*/text_topic_id"
+          },
+          {
             "name": "chunk",
             "source": "/document/markdownDocument/*/pages/*"
           },
@@ -2252,6 +2268,10 @@
             "source": "/document/enriched_figures/*/dgm_parent_id"
           },
           {
+            "name": "topic_id",
+            "source": "/document/enriched_figures/*/dgm_topic_id"
+          },
+          {
             "name": "chunk",
             "source": "/document/enriched_figures/*/dgm_description"
           },
@@ -2571,6 +2591,10 @@
             "source": "/document/enriched_tables/*/tbl_parent_id"
           },
           {
+            "name": "topic_id",
+            "source": "/document/enriched_tables/*/tbl_topic_id"
+          },
+          {
             "name": "chunk",
             "source": "/document/enriched_tables/*/tbl_chunk"
           },
@@ -2812,6 +2836,10 @@
           {
             "name": "parent_id",
             "source": "/document/enriched_tables/*/tbl_table_rows/*/parent_id"
+          },
+          {
+            "name": "topic_id",
+            "source": "/document/enriched_tables/*/tbl_topic_id"
           },
           {
             "name": "header_1",
