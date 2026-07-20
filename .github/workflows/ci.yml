@@ -28,6 +28,9 @@ jobs:
       - name: Enrichment helper tests
         run: python tests/test_enrichment.py
 
+      - name: Safety extraction tests
+        run: python tests/test_safety_extraction.py
+
       - name: E2E simulator
         run: python tests/test_e2e_simulator.py
 

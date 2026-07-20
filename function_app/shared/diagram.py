@@ -599,7 +599,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         )
         # Applicability + hazard tags mined from the figure's text (was []).
         from .content_classifiers import enrich as _enrich_tags
-        from .semantic import _extract_callouts, extract_callout_keywords
+        from .semantic import _extract_callouts, extract_callout_keywords, safety_callout_flag
         from .procedures import parse_steps
         _dgm_headers = [
             x for x in (record.get("header_1"), record.get("header_2"), record.get("header_3"))
@@ -627,7 +627,7 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         record["prohibitions"] = _dgm_tags["prohibitions"]
         record["governing_callouts"] = _dgm_callouts
         record["callouts"] = extract_callout_keywords(_dgm_text)
-        record["safety_callout"] = bool(record["callouts"])
+        record["safety_callout"] = safety_callout_flag(record["callouts"])
         # B5: capture each OCR callout token as a discrete value (was one blob).
         record["figure_callouts"] = _parse_figure_callouts(safe_str(record.get("diagram_ocr_text")))
         record["figure_number"] = safe_str(record.get("figure_ref"))

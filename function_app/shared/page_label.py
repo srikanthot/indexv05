@@ -2231,7 +2231,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     # `callouts/any(c: c eq 'DANGER')` and the UI can render a badge.
     # Also surface a boolean for the common case (any callout present).
     # Note: imported lazily to avoid circular import with semantic.py.
-    from .semantic import extract_callout_keywords
+    from .semantic import extract_callout_keywords, safety_callout_flag
     callout_keywords = extract_callout_keywords(page_text)
  
     # Footnotes that sit on this chunk's physical pages. DI tags them
@@ -2402,7 +2402,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "pdf_total_pages": pdf_total_pages,
         "page_resolution_method": page_resolution_method,
         "callouts": callout_keywords,
-        "safety_callout": bool(callout_keywords),
+        "safety_callout": safety_callout_flag(callout_keywords),
         "governing_callouts": governing_callouts,
         "hazard_class": hazard_class,
         "criticality": criticality,

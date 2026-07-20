@@ -50,18 +50,26 @@ _BRANCH_RE = re.compile(
 
 def parse_steps(text: str) -> list[tuple[int, str]]:
     """Return [(step_order, verbatim_step_text), ...] found at line starts.
-    Empty when the text has no numbered-step structure."""
+    Empty when the text has no numbered-step structure.
+
+    The body is the FULL step — from its first line through any wrapped
+    continuation lines and lettered/bulleted sub-steps — up to the next numbered
+    step marker. Capturing only the first line dropped sub-steps and wrapped
+    text, so the chatbot could silently miss part of a step (unsafe)."""
     if not text:
         return []
+    matches = list(_STEP_RE.finditer(text))
     steps: list[tuple[int, str]] = []
-    for m in _STEP_RE.finditer(text):
+    for i, m in enumerate(matches):
         try:
             order = int(m.group(1))
         except (TypeError, ValueError):
             continue
-        body = re.sub(r"[ \t]+", " ", m.group(2).strip())
+        body_start = m.start(2)
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = re.sub(r"\s+", " ", text[body_start:body_end].strip())
         if body:
-            steps.append((order, body))
+            steps.append((order, body[:1500]))
     return steps
 
 

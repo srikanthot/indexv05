@@ -49,10 +49,30 @@ SECTION_REF_RE = re.compile(
 # "CAUTION —", at the start of a line. We capture the keyword + a short
 # tail so a user query like "danger gas leak" can hit chunks that
 # explicitly contain a danger callout.
+# Capture the callout keyword AND its full body — spanning wrapped/boxed lines
+# up to a blank line, the next callout, or end — so a multi-line WARNING keeps
+# its actionable clause ("WARNING\nDe-energize before servicing") instead of
+# being truncated to the first line. Bounded to 300 chars to avoid over-capture.
 SAFETY_CALLOUT_RE = re.compile(
-    r"\b(WARNING|DANGER|CAUTION|NOTICE|NOTE)\b[\s:\-–—]+([^\n]{1,200})",
+    r"\b(WARNING|DANGER|CAUTION|NOTICE|NOTE)\b[\s:\-–—]+"
+    r"([\s\S]{1,300}?)(?=\n[ \t]*\n|\n[ \t]*(?:WARNING|DANGER|CAUTION|NOTICE|NOTE)\b|\Z)",
     re.IGNORECASE,
 )
+
+# ANSI Z535 safety SIGNAL words. Only these set safety_callout=True; NOTE and
+# NOTICE are informational and must not inflate the safety signal (which would
+# dilute the safety-boost ranking and over-count criticality).
+SAFETY_SIGNAL_KEYWORDS = frozenset({"DANGER", "WARNING", "CAUTION"})
+
+
+def safety_callout_flag(callouts) -> bool:
+    """True only if a real ANSI safety signal word (DANGER/WARNING/CAUTION) is
+    present. Accepts either keyword lists (['DANGER']) or formatted callout
+    strings (['DANGER: gas']) — NOTE/NOTICE do not count."""
+    for c in callouts or []:
+        if str(c).split(":", 1)[0].strip().upper() in SAFETY_SIGNAL_KEYWORDS:
+            return True
+    return False
  
  
 def _clean_ref(s: str) -> str:
@@ -98,7 +118,7 @@ def _extract_callouts(text: str) -> list[str]:
     seen: set[str] = set()
     for m in SAFETY_CALLOUT_RE.finditer(text):
         keyword = m.group(1).upper()
-        tail = m.group(2).strip()
+        tail = re.sub(r"\s+", " ", m.group(2)).strip()
         # Strip DI markdown/HTML artifacts that follow a NOTE/NOTICE marker
         # (e.g. "NOTE: <figure>", "NOTE: </table>") -- these are layout tags,
         # not real safety text, and were polluting governing_callouts.

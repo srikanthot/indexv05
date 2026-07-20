@@ -267,6 +267,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         # Per-row applicability + hazard tags (safety numbers live in rows).
         from .content_classifiers import enrich as _enrich_tags
         from .semantic import _extract_callouts as _row_callouts_fn
+        from .semantic import safety_callout_flag
         _row_headers = [x for x in (h1, h2, h3, caption) if x and x.strip()]
         _row_callouts = _row_callouts_fn(row_text)
         _row_tags = _enrich_tags(row_text, headers=_row_headers, callouts=_row_callouts)
@@ -329,7 +330,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
             "is_prohibition": _row_tags["is_prohibition"],
             "prohibitions": _row_tags["prohibitions"],
             "governing_callouts": _row_callouts,
-            "safety_callout": bool(_row_callouts),
+            "safety_callout": safety_callout_flag(_row_callouts),
             "procedure_id": "",
             "procedure_step_id": "",
             "procedure_step_order": None,
@@ -368,7 +369,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
 
     # Applicability + hazard tags for the parent table (was 0% / hardcoded []).
     from .content_classifiers import enrich as _enrich_tags
-    from .semantic import _extract_callouts, extract_callout_keywords
+    from .semantic import _extract_callouts, extract_callout_keywords, safety_callout_flag
     _tbl_headers = [x for x in (h1, h2, h3) if x and x.strip()]
     _tbl_text = " ".join([caption or "", markdown or ""])
     _tbl_callouts = _extract_callouts(markdown)
@@ -442,7 +443,7 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
         "prohibitions": _tbl_tags["prohibitions"],
         "governing_callouts": _tbl_callouts,
         "callouts": _tbl_callout_keywords,
-        "safety_callout": bool(_tbl_callout_keywords),
+        "safety_callout": safety_callout_flag(_tbl_callout_keywords),
         "procedure_id": "",
         "procedure_step_id": "",
         "procedure_step_order": None,

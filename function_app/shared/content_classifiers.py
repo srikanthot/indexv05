@@ -37,8 +37,11 @@ import re
 
 # Explicit numeric voltages: "12 kV", "12.47kV", "115 KV", "480 V", "120/240V".
 # Captures the numeric magnitude and the unit so we can band it.
+# kV magnitude allows a SINGLE leading digit so distribution classes with a
+# one-digit integer part are captured: 2.4, 4.16, 4.8, 7.2, 8.32 kV. Requiring
+# two digits (\d{2,3}) silently dropped these and mis-routed by voltage.
 _VOLTAGE_NUM_RE = re.compile(
-    r"\b(\d{2,3}(?:\.\d{1,2})?)\s*(kV|KV|kv)\b"
+    r"\b(\d{1,3}(?:\.\d{1,2})?)\s*(kV|KV|kv)\b"
     r"|\b(\d{2,4})\s*(V|volts?)\b",
     re.IGNORECASE,
 )
