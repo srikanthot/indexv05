@@ -29,6 +29,10 @@ from typing import Any
  
 from .config import index_run_id as _index_run_id, optional_env
 from .di_client import fetch_cached_analysis
+from .enrichment import (
+    is_boilerplate_revision,
+    is_valid_page_label,
+)
 from .ids import (
     SKILL_VERSION,
     parent_id_for,
@@ -1017,7 +1021,10 @@ def cover_metadata_from_analyze(result: dict[str, Any] | None) -> dict[str, str]
         if not revision:
             m = _REVISION_RE.search(content)
             if m:
-                revision = m.group(1).rstrip(".,;:")
+                cand = m.group(1).rstrip(".,;:")
+                # Reject boilerplate captures like "Revision History" -> "History".
+                if not is_boilerplate_revision(cand):
+                    revision = cand
         if not document_number:
             m = _DOC_NUMBER_RE.search(content)
             if m:
@@ -2003,7 +2010,14 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     )
     if span_clamped:
         page_resolution_method = f"{page_resolution_method}_span_clamped"
- 
+
+    # NOTE: we deliberately do NOT auto-clamp the resolved pages to
+    # _pdf_total_pages_for() here. That page count is not always reliable, and
+    # silently rewriting a correct page against a wrong total would corrupt a
+    # real citation (and break the OCR/footnote/bbox lookups keyed on the true
+    # page). Over-length pages are instead surfaced as a finding by
+    # scripts/audit_index_accuracy.py (page_in_range) for review.
+
     # Prefer the explicit `<!-- PageNumber="..." -->` marker from DI when
     # present in the chunk — for technical manuals it holds the printed
     # label the reader would recognise (e.g. "18-33", "iv", "A-12").
@@ -2018,7 +2032,10 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
     label_is_synthetic = False
     for m in PAGE_NUMBER_MARKER_RE.finditer(page_text or ""):
         candidate = (m.group(1) or "").strip()
-        if candidate:
+        # Gate the raw DI marker through the same validity rule the other label
+        # tiers use, so a mis-tagged marker (a date, "Attachment", OCR junk)
+        # can't win as an authoritative-looking printed label.
+        if candidate and is_valid_page_label(candidate):
             label = candidate
             break
     if not label:
@@ -2044,7 +2061,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         last_marker = ""
         for m in PAGE_NUMBER_MARKER_RE.finditer(page_text):
             cand = (m.group(1) or "").strip()
-            if cand:
+            if cand and is_valid_page_label(cand):
                 last_marker = cand
         end_label = last_marker or (_extract_label(_last_page_segment(page_text)) or "")
         # DI cache fallback for the end label too — same rationale as
