@@ -111,6 +111,25 @@ def main() -> None:
     func_rg = cfg["functionApp"]["resourceGroup"]
     prefix = cfg["search"].get("artifactPrefix") or "mm-manuals"
     search_endpoint = cfg["search"]["endpoint"].rstrip("/")
+
+    # Guard the #1 silent-failure trap: the index vectorizer AND all embedding
+    # skills only speak the Azure-OpenAI protocol, which requires an
+    # *.openai.azure.us / *.openai.azure.com endpoint. A Foundry PROJECT
+    # endpoint (*.services.ai.azure.us) or a bare cognitiveservices endpoint is
+    # accepted by the PUT but then produces EMPTY text_vector for every record
+    # with no error — vector search silently dies. Fail fast instead.
+    aoai_ep = (cfg.get("azureOpenAI") or {}).get("endpoint", "").rstrip("/")
+    if not re.match(r"^https://[^./]+\.openai\.azure\.(us|com)$", aoai_ep):
+        raise SystemExit(
+            "ERROR: azureOpenAI.endpoint must be an Azure-OpenAI endpoint of the "
+            "form https://<resource>.openai.azure.us (Gov) or .openai.azure.com "
+            f"(commercial).\n  Got: {aoai_ep or '(empty)'}\n"
+            "  A Foundry *.services.ai.azure.us PROJECT endpoint or a "
+            "*.cognitiveservices.* endpoint is REJECTED by the embedding skill / "
+            "vectorizer and would silently zero text_vector across the whole "
+            "index. Use the Foundry resource's .openai.azure.us flavor (same "
+            "resource, different suffix)."
+        )
  
     names = {
         "datasource": f"{prefix}-ds",

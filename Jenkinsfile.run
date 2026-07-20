@@ -3,10 +3,11 @@
  *
  *   1. reconcile.py             detect added/edited/deleted PDFs
  *   2. preanalyze.py --incremental
- *   3. wait for indexer to settle
- *   4. check_index.py --coverage --write-status
- *   5. heal_until_done.py       loop force-reindex until 100% or give up
- *   6. write run summary to Cosmos DB
+ *   3. trigger indexer ONLY if changed docs were preanalyzed
+ *   4. wait for indexer to settle
+ *   5. check_index.py --coverage --write-status
+ *   6. heal_until_done.py       loop force-reindex until 100% or give up
+ *   7. write run summary to Cosmos DB
  *
  * Trigger: nightly cron at 02:00 UTC + manual button.
  *
@@ -16,10 +17,10 @@
  *   Search Index Data Contributor (read + delete index records)
  *   Cosmos DB Built-in Data Contributor (write run history + pdf_state)
  */
-
+ 
 pipeline {
     agent any
-
+ 
     parameters {
         choice(
             name: 'TARGET_ENV',
@@ -62,32 +63,32 @@ pipeline {
             description: 'Per-iteration max-wait minutes for the heal loop'
         )
     }
-
+ 
     triggers {
         // Nightly at 02:00 UTC. Adjust to taste.
         cron('0 2 * * *')
     }
-
+ 
     options {
         timestamps()
         ansiColor('xterm')
         timeout(time: 10, unit: 'HOURS')  // preanalyze + 8 heal iterations worst case
         disableConcurrentBuilds()         // only one run at a time per env
     }
-
+ 
     environment {
         AZURE_CLOUD = 'AzureUSGovernment'
         PYTHONUNBUFFERED = '1'
     }
-
+ 
     stages {
-
+ 
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
-
+ 
         stage('Bootstrap') {
             steps {
                 sh '''
@@ -98,7 +99,7 @@ pipeline {
                     pip install --quiet azure-cosmos>=4.5.0
                     az cloud set --name "$AZURE_CLOUD"
                     az login --identity --output none || true
-
+ 
                     # LibreOffice is OPTIONAL but recommended -- enables
                     # native figure extraction from DOCX/PPTX/XLSX. The
                     # pipeline gracefully falls back if it's missing.
@@ -117,7 +118,7 @@ pipeline {
                 '''
             }
         }
-
+ 
         stage('Load config') {
             steps {
                 script {
@@ -128,22 +129,23 @@ pipeline {
                 }
             }
         }
-
+ 
         stage('Run pipeline') {
             steps {
                 script {
                     def triggeredBy = currentBuild.getBuildCauses()
                         .any { it._class.contains('TimerTrigger') } ? 'jenkins-cron' : 'jenkins-manual'
-
+ 
                     def args = [
                         '--config', 'deploy.config.json',
                         '--max-purges', params.MAX_PURGES,
                         '--max-wait-minutes', params.MAX_WAIT_MINUTES,
                         '--triggered-by', triggeredBy,
+                        '--trigger-indexer',
                     ]
                     if (params.SKIP_RECONCILE) { args << '--skip-reconcile' }
                     if (params.SKIP_WAIT)      { args << '--skip-wait' }
-
+ 
                     sh """
                         set -e
                         . .venv/bin/activate
@@ -152,7 +154,7 @@ pipeline {
                 }
             }
         }
-
+ 
         stage('Heal until done') {
             when { expression { return !params.SKIP_HEAL_LOOP } }
             steps {
@@ -167,7 +169,7 @@ pipeline {
             }
         }
     }
-
+ 
     post {
         success {
             echo "Run completed for ${params.TARGET_ENV}. See Power BI dashboard for details."

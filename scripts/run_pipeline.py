@@ -79,6 +79,28 @@ def _parse_iso(s: str):
         return None
 
 
+def trigger_indexer(endpoint: str, indexer_name: str) -> bool:
+    """Kick an on-demand indexer run. Returns True if a run is now in flight.
+    A 409 means the indexer is already running, which is fine — the wait step
+    below will pick it up. Any other non-2xx is a warning, not fatal."""
+    url = f"{endpoint}/indexers/{indexer_name}/run?api-version={API_VERSION}"
+    token = DefaultAzureCredential().get_token(SEARCH_SCOPE).token
+    print()
+    print("=" * 70)
+    print(f"  STEP: trigger indexer {indexer_name} (on-demand run)")
+    print("=" * 70)
+    with httpx.Client(timeout=30.0) as c:
+        resp = c.post(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code in (200, 202):
+        print(f"  triggered (HTTP {resp.status_code})")
+        return True
+    if resp.status_code == 409:
+        print("  already running (HTTP 409) — will wait for the in-flight run")
+        return True
+    print(f"  WARNING: trigger returned HTTP {resp.status_code}: {resp.text[:300]}")
+    return False
+
+
 def wait_for_indexer_idle(endpoint: str, indexer_name: str, max_minutes: int,
                           fresh_after_iso: str | None = None) -> dict:
     """Poll indexer status until it's not 'inProgress'. Returns the
@@ -228,6 +250,10 @@ def main() -> int:
     ap.add_argument("--max-purges", type=int, default=2)
     ap.add_argument("--triggered-by", default="manual",
                     help="Free-text label for the run record (jenkins-cron, jenkins-manual, manual, ...)")
+    ap.add_argument("--trigger-indexer", action="store_true",
+                    help="Explicitly kick an on-demand indexer run after preanalyze "
+                         "instead of waiting up to ~15 min for the indexer's own "
+                         "schedule. Jenkins passes this.")
     ap.add_argument("--auto-heal", action="store_true",
                     help="After the main pipeline, audit coverage. If any PDF is "
                          "in PARTIAL or NOT_STARTED state, automatically purge its "
@@ -285,9 +311,18 @@ def main() -> int:
         if rc != 0:
             overall_rc = max(overall_rc, rc)
 
-    # 3. Wait for the indexer to drain. The indexer's own 15-minute
-    # schedule should pick up new caches automatically; we just watch
-    # for it to finish whatever batch it's on.
+    # 2b. Optionally kick the indexer now so we get a FRESH run (that starts
+    # after pipeline_started_at) instead of waiting up to ~15 min for the
+    # indexer's own schedule. The wait step below requires a fresh run.
+    if args.trigger_indexer:
+        triggered = trigger_indexer(endpoint, indexer_name)
+        step_results["trigger_indexer"] = {"triggered": triggered}
+    else:
+        step_results["trigger_indexer"] = {"skipped": True}
+
+    # 3. Wait for the indexer to drain. If we didn't trigger above, the
+    # indexer's own 15-minute schedule should pick up new caches
+    # automatically; we just watch for it to finish whatever batch it's on.
     if args.skip_wait:
         step_results["wait_indexer"] = {"skipped": True}
     else:
