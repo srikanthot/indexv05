@@ -69,8 +69,18 @@ PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-LABEL_RE = re.compile(r"^(?:[ivxlcdm]+|[A-Za-z]{0,4}[-.\s]?\d{1,4}[A-Za-z]?)$", re.IGNORECASE)
+ROMAN_LABEL_RE = re.compile(r"^[ivxlcdm]+$", re.IGNORECASE)
+ALNUM_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-\s]*$")
 DIGIT_RE = re.compile(r"\d")
+
+
+def _is_valid_label(s: str) -> bool:
+    s = (s or "").strip()
+    if not s:
+        return False
+    if ROMAN_LABEL_RE.match(s):
+        return True
+    return len(s) <= 8 and bool(DIGIT_RE.search(s)) and bool(ALNUM_LABEL_RE.match(s))
 
 
 def _token(scope: str = SEARCH_SCOPE) -> str:
@@ -180,7 +190,7 @@ def _v_page_end(v, rec):
 
 def _v_printed_label(v, rec):
     s = str(v).strip()
-    if not LABEL_RE.match(s):
+    if not _is_valid_label(s):
         return False, f"'{s}' not a well-formed page label"
     # If it looks purely numeric and is NOT flagged synthetic, it should agree
     # with the physical page within a small tolerance.

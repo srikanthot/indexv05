@@ -25,6 +25,9 @@ jobs:
       - name: Unit tests
         run: python tests/test_unit.py
 
+      - name: Enrichment helper tests
+        run: python tests/test_enrichment.py
+
       - name: E2E simulator
         run: python tests/test_e2e_simulator.py
 
