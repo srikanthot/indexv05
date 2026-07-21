@@ -71,7 +71,6 @@ pipeline {
  
     options {
         timestamps()
-        ansiColor('xterm')
         timeout(time: 10, unit: 'HOURS')  // preanalyze + 8 heal iterations worst case
         disableConcurrentBuilds()         // only one run at a time per env
     }
