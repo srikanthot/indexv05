@@ -25,6 +25,8 @@ SEARCH_SCOPE = "https://search.azure.us/.default"
 # New fields to verify, grouped by the record_type they should appear on.
 FIELDS_BY_TYPE: dict[str, list[str]] = {
     "text": [
+        "title", "document_title", "topic_id", "section_path",
+        "chapter_label", "chapter_number", "tables_referenced_normalized",
         "applies_to_voltage", "applies_to_equipment", "applies_to_domain",
         "applies_to_phase", "hazard_class", "criticality", "is_prohibition",
         "prohibitions", "governing_callouts", "safety_callout",
@@ -32,19 +34,25 @@ FIELDS_BY_TYPE: dict[str, list[str]] = {
         "procedure_step_text", "procedure_step_count", "low_confidence_ocr",
     ],
     "table": [
+        "title", "document_title", "topic_id", "section_path",
+        "chapter_label", "chapter_number",
         "table_number", "table_title", "applies_to_voltage",
         "applies_to_equipment", "applies_to_domain", "applies_to_phase",
         "hazard_class", "criticality", "governing_callouts",
     ],
     "table_row": [
+        "title", "document_title", "topic_id",
         "table_row_key", "applies_to_domain", "hazard_class", "criticality",
         "safety_callout",
     ],
     "diagram": [
+        "title", "document_title", "topic_id", "section_path",
+        "chapter_label", "chapter_number",
         "figure_number", "figure_title", "figure_callouts", "figure_step_linked",
         "figure_linkage_confidence", "applies_to_domain", "hazard_class",
     ],
     "summary": [
+        "title", "document_title",
         "applies_to_domain", "applies_to_equipment", "hazard_class", "criticality",
     ],
 }
