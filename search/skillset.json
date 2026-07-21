@@ -112,6 +112,10 @@
         {
           "name": "doctype",
           "targetName": "doc_doctype"
+        },
+        {
+          "name": "title",
+          "targetName": "doc_title"
         }
       ]
     },
@@ -2061,6 +2065,10 @@
             "source": "/document/doc_doctype"
           },
           {
+            "name": "title",
+            "source": "/document/doc_title"
+          },
+          {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
           },
@@ -2406,6 +2414,10 @@
           {
             "name": "doctype",
             "source": "/document/doc_doctype"
+          },
+          {
+            "name": "title",
+            "source": "/document/doc_title"
           },
           {
             "name": "filetype",
@@ -2793,6 +2805,10 @@
           {
             "name": "doctype",
             "source": "/document/doc_doctype"
+          },
+          {
+            "name": "title",
+            "source": "/document/doc_title"
           },
           {
             "name": "filetype",
@@ -3190,6 +3206,10 @@
             "source": "/document/doc_doctype"
           },
           {
+            "name": "title",
+            "source": "/document/doc_title"
+          },
+          {
             "name": "filetype",
             "source": "/document/metadata_storage_file_extension"
           },
@@ -3395,6 +3415,10 @@
           {
             "name": "doctype",
             "source": "/document/doc_doctype"
+          },
+          {
+            "name": "title",
+            "source": "/document/doc_title"
           },
           {
             "name": "filetype",
