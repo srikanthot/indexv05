@@ -269,6 +269,10 @@
           "targetName": "text_chunk_bboxes"
         },
         {
+          "name": "chunk_span_bboxes",
+          "targetName": "text_chunk_span_bboxes"
+        },
+        {
           "name": "bbox_mode_available",
           "targetName": "text_bbox_mode_available"
         },
@@ -1879,6 +1883,10 @@
           {
             "name": "chunk_bboxes",
             "source": "/document/markdownDocument/*/pages/*/text_chunk_bboxes"
+          },
+          {
+            "name": "chunk_span_bboxes",
+            "source": "/document/markdownDocument/*/pages/*/text_chunk_span_bboxes"
           },
           {
             "name": "bbox_mode_available",

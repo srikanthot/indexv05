@@ -1410,6 +1410,89 @@ def _chunk_bboxes_from_line_bboxes(line_bboxes: list[dict[str, Any]]) -> list[di
             "confidence": round(conf, 3),
         })
     return out
+
+
+def _span_union_from_lines(
+    line_bboxes: list[dict[str, Any]],
+    all_lines: list[tuple[str, int, tuple[float, float, float, float]]],
+) -> list[dict[str, Any]]:
+    """PURE geometry (unit-testable): one CONTINUOUS rectangle per page covering
+    the chunk's full text band.
+
+    The per-line matcher leaves gaps — a line whose OCR text doesn't
+    substring-match the chunk gets no box, so a frontend drawing line_bboxes
+    shows "some lines highlight, some don't". This uses the MATCHED lines only
+    to bound the vertical band [ymin..ymax] the chunk occupies on each page,
+    then unions EVERY body line on that page inside that band (matched or not),
+    so no interior line is skipped and the highlight is one clean rectangle
+    per page. `all_lines` is derived["text_bbox_lines"] = [(norm, page, (x,y,w,h))].
+    """
+    if not line_bboxes:
+        return []
+    band: dict[int, list[float]] = {}
+    for b in line_bboxes:
+        p = b.get("page")
+        if not isinstance(p, int):
+            continue
+        y0 = float(b.get("y_in") or 0.0)
+        y1 = y0 + float(b.get("h_in") or 0.0)
+        if p in band:
+            band[p][0] = min(band[p][0], y0)
+            band[p][1] = max(band[p][1], y1)
+        else:
+            band[p] = [y0, y1]
+    if not band:
+        return []
+    lines_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    for _norm, page, bb in all_lines:
+        if page in band:
+            lines_by_page.setdefault(page, []).append(bb)
+    pad = 0.06  # inch tolerance so a line straddling the band edge is included
+    out: list[dict[str, Any]] = []
+    for page in sorted(band):
+        ymin, ymax = band[page]
+        boxes: list[tuple[float, float, float, float]] = [
+            bb for bb in lines_by_page.get(page, [])
+            if bb[1] <= ymax + pad and (bb[1] + bb[3]) >= ymin - pad
+        ]
+        if not boxes:
+            # No body-line data for this page — fall back to the matched union.
+            boxes = [
+                (float(b.get("x_in") or 0.0), float(b.get("y_in") or 0.0),
+                 float(b.get("w_in") or 0.0), float(b.get("h_in") or 0.0))
+                for b in line_bboxes if b.get("page") == page
+            ]
+        if not boxes:
+            continue
+        x0 = min(bb[0] for bb in boxes)
+        y0 = min(bb[1] for bb in boxes)
+        x1 = max(bb[0] + bb[2] for bb in boxes)
+        y1 = max(bb[1] + bb[3] for bb in boxes)
+        out.append({
+            "page": page,
+            "x_in": round(x0, 3),
+            "y_in": round(y0, 3),
+            "w_in": round(max(0.0, x1 - x0), 3),
+            "h_in": round(max(0.0, y1 - y0), 3),
+            "source": "chunk_span",
+            "confidence": 0.9,
+        })
+    return out
+
+
+def _chunk_span_bboxes_for_chunk(
+    line_bboxes: list[dict[str, Any]],
+    source_path: str,
+) -> list[dict[str, Any]]:
+    """Continuous per-page highlight for the whole chunk (see _span_union_from_lines).
+    Emitted as `chunk_span_bboxes`; the frontend should render this instead of
+    line_bboxes for a gap-free highlight."""
+    if not line_bboxes or not source_path:
+        return []
+    all_lines = _derived_for(source_path).get("text_bbox_lines") or []
+    return _span_union_from_lines(line_bboxes, all_lines)
+
+
 # Highlight-text construction is shared with diagram / table / summary
 # skills via shared.text_utils.build_highlight_text — that helper does
 # the same markdown/DI-marker stripping plus Unicode NFC normalize,
@@ -2218,10 +2301,19 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
 
     text_bbox_json = json.dumps(text_bbox_list, separators=(",", ":")) if text_bbox_list else ""
     chunk_bboxes_list = _chunk_bboxes_from_line_bboxes(line_bboxes_list)
+    # Continuous per-page highlight covering the WHOLE chunk (fills the gaps the
+    # per-line matcher leaves). Frontend should render this for a clean,
+    # gap-free highlight instead of the per-line line_bboxes.
+    chunk_span_bboxes_list = _chunk_span_bboxes_for_chunk(line_bboxes_list, source_path)
     line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
     chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
+    chunk_span_bboxes_json = json.dumps(chunk_span_bboxes_list, separators=(",", ":")) if chunk_span_bboxes_list else ""
     bbox_mode_available = [
-        m for m, present in (("chunk", bool(chunk_bboxes_list)), ("line", bool(line_bboxes_list))) if present
+        m for m, present in (
+            ("span", bool(chunk_span_bboxes_list)),
+            ("chunk", bool(chunk_bboxes_list)),
+            ("line", bool(line_bboxes_list)),
+        ) if present
     ]
     page_width_in, page_height_in = _page_dimensions_for(source_path, start_page) or (8.5, 11.0)
     pdf_total_pages = _pdf_total_pages_for(source_path)
@@ -2394,6 +2486,7 @@ def process_page_label(data: dict[str, Any]) -> dict[str, Any]:
         "text_bbox": text_bbox_json,
         "line_bboxes": line_bboxes_json,
         "chunk_bboxes": chunk_bboxes_json,
+        "chunk_span_bboxes": chunk_span_bboxes_json,
         "bbox_mode_available": bbox_mode_available,
         "page_width_in": round(float(page_width_in), 3),
         "page_height_in": round(float(page_height_in), 3),

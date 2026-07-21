@@ -266,8 +266,11 @@ be measured — a tech who can never get a routine spec will improvise.
 **Highlight — draw the box on the real PDF page (your ground‑truth guarantee):**
 - **Page to open:** `physical_pdf_page` (+ `physical_pdf_page_end` for multi‑page). Show
   `printed_page_label` to the user ("p. A‑12").
-- **Geometry:** `text_bbox` (single tight box per page — the "hold box"), or `line_bboxes` (precise per‑line
-  boxes). Both are **JSON strings** — parse them.
+- **Geometry (render `chunk_span_bboxes` — RECOMMENDED):** `chunk_span_bboxes` is **one continuous rectangle
+  per page covering the whole chunk** (it fills the gaps the per‑line matcher leaves, so you never get "some
+  lines highlight, some don't"). Prefer it. Fall back to `text_bbox` (single hold box) or `line_bboxes`
+  (precise per‑line, but gappy) only when `chunk_span_bboxes` is empty. All are **JSON strings** — parse them.
+  `bbox_mode_available` lists which are present (`span` / `chunk` / `line`).
 - **Coordinates:** **inches, origin top‑left.** Each entry is `{page, x_in, y_in, w_in, h_in}` where `page`
   = the physical PDF page. Scale against `page_width_in` / `page_height_in`.
 - Figures use `figure_bbox`; tables use `table_bbox`; `table_row` inherits the parent `table_bbox`.

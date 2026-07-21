@@ -31,6 +31,9 @@ jobs:
       - name: Safety extraction tests
         run: python tests/test_safety_extraction.py
 
+      - name: Chunk-span highlight tests
+        run: python tests/test_chunk_span_bbox.py
+
       - name: E2E simulator
         run: python tests/test_e2e_simulator.py
 

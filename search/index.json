@@ -23,6 +23,7 @@
     { "name": "text_bbox", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "line_bboxes", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "chunk_bboxes", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
+    { "name": "chunk_span_bboxes", "type": "Edm.String", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "bbox_mode_available", "type": "Collection(Edm.String)", "searchable": false, "filterable": true, "retrievable": true, "sortable": false, "facetable": true },
     { "name": "page_width_in", "type": "Edm.Double", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
     { "name": "page_height_in", "type": "Edm.Double", "searchable": false, "filterable": false, "retrievable": true, "sortable": false, "facetable": false },
