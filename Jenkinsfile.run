@@ -78,6 +78,15 @@ pipeline {
     environment {
         AZURE_CLOUD = 'AzureUSGovernment'
         PYTHONUNBUFFERED = '1'
+        // Service-principal credentials (same IDs the main Jenkinsfile uses).
+        // Jenkins authenticates with an SP, NOT a managed identity, so the az
+        // CLI must log in with these — otherwise `az functionapp show` in
+        // deploy_search fails with "please run az login".
+        AZURE_CLIENT_ID     = credentials('azure-client-id')
+        AZURE_CLIENT_SECRET = credentials('azure-client-secret')
+        AZURE_TENANT_ID     = credentials('azure-tenant-id')
+        DEV_AZURE_SUBSCRIPTION_ID  = credentials('DEV_AZURE_SUBSCRIPTION_ID')
+        PROD_AZURE_SUBSCRIPTION_ID = credentials('PROD_AZURE_SUBSCRIPTION_ID')
     }
  
     stages {
@@ -97,7 +106,24 @@ pipeline {
                     pip install --quiet -r requirements.txt
                     pip install --quiet azure-cosmos>=4.5.0
                     az cloud set --name "$AZURE_CLOUD"
-                    az login --identity --output none || true
+                    # Log in with the service principal (Jenkins uses an SP, not
+                    # a managed identity). Fall back to MI only if the SP env
+                    # vars are somehow absent.
+                    if [ -n "${AZURE_CLIENT_ID:-}" ] && [ -n "${AZURE_CLIENT_SECRET:-}" ]; then
+                        az login --service-principal \
+                            -u "$AZURE_CLIENT_ID" \
+                            -p "$AZURE_CLIENT_SECRET" \
+                            --tenant "$AZURE_TENANT_ID" \
+                            --output none
+                    else
+                        az login --identity --output none || true
+                    fi
+                    if [ "${TARGET_ENV}" = "prod" ]; then
+                        az account set --subscription "$PROD_AZURE_SUBSCRIPTION_ID"
+                    else
+                        az account set --subscription "$DEV_AZURE_SUBSCRIPTION_ID"
+                    fi
+                    az account show --query "{name:name, id:id}" -o table || true
  
                     # LibreOffice is OPTIONAL but recommended -- enables
                     # native figure extraction from DOCX/PPTX/XLSX. The
