@@ -506,7 +506,13 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
     # so we synthesize from the physical page number. Same UX rule as
     # text/table: never blank when we know the page.
     printed_label = str(page_number) if isinstance(page_number, int) else ""
- 
+
+    # Real page dimensions supplied by preanalyze in `data` (NO skill-time DI
+    # fetch — that adds 100MB+ analysis loads / network retries to this skill).
+    # Falls back to Letter when preanalyze didn't provide them.
+    _pw = float(data.get("page_width_in") or 8.5)
+    _ph = float(data.get("page_height_in") or 11.0)
+
     base_record = {
         "chunk_id": chunk_id,
         "parent_id": parent_id,
@@ -520,8 +526,8 @@ def process_diagram(data: dict[str, Any]) -> dict[str, Any]:
         "line_bboxes": line_bboxes_json,
         "chunk_bboxes": chunk_bboxes_json,
         "bbox_mode_available": bbox_mode_available,
-        "page_width_in": 8.5,
-        "page_height_in": 11.0,
+        "page_width_in": round(_pw, 3),
+        "page_height_in": round(_ph, 3),
         "bbox_padding_hint_in": 0.05,
         "bbox_version": "2.0.0",
         "image_hash": img_hash,

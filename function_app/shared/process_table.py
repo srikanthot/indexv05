@@ -137,9 +137,12 @@ def process_table(data: dict[str, Any]) -> dict[str, Any]:
     chunk_bboxes_json = json.dumps(chunk_bboxes_list, separators=(",", ":")) if chunk_bboxes_list else ""
     line_bboxes_json = json.dumps(line_bboxes_list, separators=(",", ":")) if line_bboxes_list else ""
     bbox_mode_available = [m for m, ok in (("chunk", bool(chunk_bboxes_list)), ("line", bool(line_bboxes_list))) if ok]
-    page_width_in = 8.5
-    page_height_in = 11.0
- 
+    # Real page dimensions supplied by preanalyze in `data` (NO skill-time DI
+    # fetch — that adds 100MB+ analysis loads / network retries to this skill).
+    # Falls back to Letter when preanalyze didn't provide them.
+    page_width_in = round(float(data.get("page_width_in") or 8.5), 3)
+    page_height_in = round(float(data.get("page_height_in") or 11.0), 3)
+
     chunk_id = table_chunk_id(source_path, source_file, table_index)
     chunk_for_semantic = _build_semantic({
         "source_file": source_file,

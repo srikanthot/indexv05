@@ -1592,6 +1592,25 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
         # process_document.py emits in the live-DI fallback path.
         pages_array = result.get("pages") or []
         pdf_total_pages = len(pages_array) if pages_array else None
+
+        # Per-page REAL dimensions (inches), computed once from DI's already-
+        # loaded pages[]. Stamped onto each figure/table so their bbox/crop
+        # highlights scale correctly on non-Letter / landscape pages instead of
+        # the hardcoded 8.5x11 the skills used to assume. Missing pages just
+        # fall back to Letter downstream (safe).
+        page_dims_by_page: dict[int, tuple[float, float]] = {}
+        for _i, _pg in enumerate(pages_array, start=1):
+            _w = _pg.get("width")
+            _h = _pg.get("height")
+            if not isinstance(_w, (int, float)) or not isinstance(_h, (int, float)):
+                continue
+            _u = str(_pg.get("unit") or "inch").lower()
+            if _u in ("pixel", "pixels"):
+                _w, _h = _w / 96.0, _h / 96.0
+            elif _u in ("centimeter", "cm"):
+                _w, _h = _w / 2.54, _h / 2.54
+            _pn = _pg.get("pageNumber") or _i
+            page_dims_by_page[int(_pn)] = (round(float(_w), 3), round(float(_h), 3))
  
         # Cover metadata extracted ONCE here from the in-memory DI result
         # and propagated through every enriched_figure / enriched_table +
@@ -1683,6 +1702,8 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
             fig_data = {
                 "figure_id": fig_id,
                 "page_number": page,
+                "page_width_in": page_dims_by_page.get(page, (None, None))[0],
+                "page_height_in": page_dims_by_page.get(page, (None, None))[1],
                 "diagram_pages": sorted(all_figure_pages),
                 "multi_page_figure": is_multi_page_figure,
                 "caption": caption,
@@ -1790,6 +1811,8 @@ def phase_output(cfg: dict, pdf_name: str, force: bool) -> str:
                 "table_rows": row_records,
                 "page_start": tbl["page_start"],
                 "page_end": tbl["page_end"],
+                "page_width_in": page_dims_by_page.get(tbl["page_start"], (None, None))[0],
+                "page_height_in": page_dims_by_page.get(tbl["page_start"], (None, None))[1],
                 "markdown": tbl["markdown"],
                 "row_count": tbl["row_count"],
                 "col_count": tbl["col_count"],
