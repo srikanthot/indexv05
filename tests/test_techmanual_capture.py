@@ -59,10 +59,13 @@ def test_callouts_extracted():
     assert any("NOTE" in c for c in callouts), callouts
 
 
-def test_callouts_capped_at_three():
+def test_callouts_not_capped():
+    # The old cap-at-3 was intentionally removed: silently dropping WARNING/
+    # DANGER boxes is a safety-correctness risk, so ALL distinct callouts are
+    # kept (semantic.py _extract_callouts).
     text = "\n".join([f"WARNING: thing {i}" for i in range(10)])
     callouts = _extract_callouts(text)
-    assert len(callouts) == 3, callouts
+    assert len(callouts) == 10, callouts
 
 
 def test_running_artifacts_strips_revision_line():
@@ -82,12 +85,16 @@ def test_running_artifacts_strips_copyright():
     assert "©" not in cleaned, cleaned
 
 
-def test_running_artifacts_strips_doc_ids():
+def test_running_artifacts_preserves_doc_and_part_numbers():
+    # Doc-id / part-number stripping was intentionally REMOVED (see sections.py
+    # _RUNNING_ARTIFACT_PATTERNS): a blanket strip collided with real part
+    # numbers ("GE-THQL-1120-2") and equipment IDs a chatbot answer may hinge
+    # on. So these are PRESERVED, not dropped.
     text = "GD-AS-ATM-001\nReal section content.\nDOC-12345"
     cleaned = _strip_running_artifacts(text)
     assert "Real section content." in cleaned
-    assert "GD-AS-ATM-001" not in cleaned, cleaned
-    assert "DOC-12345" not in cleaned, cleaned
+    assert "GD-AS-ATM-001" in cleaned, cleaned
+    assert "DOC-12345" in cleaned, cleaned
 
 
 def test_running_artifacts_strips_dates():
@@ -348,10 +355,10 @@ def main():
         test_equation_refs_extracted,
         test_section_refs_extracted,
         test_callouts_extracted,
-        test_callouts_capped_at_three,
+        test_callouts_not_capped,
         test_running_artifacts_strips_revision_line,
         test_running_artifacts_strips_copyright,
-        test_running_artifacts_strips_doc_ids,
+        test_running_artifacts_preserves_doc_and_part_numbers,
         test_running_artifacts_strips_dates,
         test_running_artifacts_strips_confidential_stamps,
         test_running_artifacts_preserves_inline_artifact_text,

@@ -220,6 +220,9 @@
             { "fieldName": "table_caption" },
             { "fieldName": "diagram_category" },
             { "fieldName": "callouts" },
+            { "fieldName": "governing_callouts" },
+            { "fieldName": "hazard_class" },
+            { "fieldName": "chapter_label" },
             { "fieldName": "record_subtype" }
           ]
         }

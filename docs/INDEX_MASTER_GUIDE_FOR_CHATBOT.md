@@ -364,7 +364,12 @@ plumbing. Vector field `text_vector` is searchable but not retrievable.
 | `document_revision` | String | search,filter,facet | ⚪ e.g. "Rev C". |
 | `effective_date` | String | filter,facet,sort | ⚪ effective date. |
 | `document_number` | String | search,filter,facet | ⚪ manual/doc number. |
+| `document_title` | String | search,filter | ⚪ mapped from the blob's `metadata_title`. **Often blank** — scanned/Office-to-PDF files carry no Title. See the never-blank rule below. |
 | `supersedes_revision` | String | filter | ⚪ the revision this one replaces. |
+
+> **Citation title — never show a blank title.** `document_title` (from blob `metadata_title`) is empty for any PDF whose Title property is unset (common for scanned live-line manuals). Do **not** render `document_title` alone. Always coalesce with fields that are always present:
+> `title = document_title || document_number || basename(source_file)`
+> This uses only existing fields, needs no reindex, and guarantees a non-empty, identifiable title on every citation. (`chapter_label` + `printed_page_label` complete the citation: "Doc GD-AS-DWM · Chapter 5 · p. 5-7".)
 | `source_url` / `source_path` / `source_hash` | String | filter | ⚪/🔧 blob URL / path / content hash. |
 
 ### H. Table model
