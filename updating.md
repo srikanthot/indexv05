@@ -1,4 +1,32 @@
 # ============================================================================
+# AZURE DIAGNOSTICS NEEDED — indexer "stuck at ~4 docs" (Copilot: run + paste back)
+# ============================================================================
+# The indexer keeps ending in transientFailure after ~4 docs. Likely the
+# function app is running out of memory, but to fix it WITHOUT reducing speed we
+# must confirm the cause + see the plan size. Run ALL of these and paste the
+# output back. Fill <RG>, <FUNC>, <SEARCH>, <INDEXER> from deploy.config.json.
+#
+#   # 1) The exact indexer error (OOM? throttling? a specific doc?):
+#   python -c "import httpx,json; from azure.identity import DefaultAzureCredential; t=DefaultAzureCredential().get_token('https://search.azure.us/.default').token; lr=httpx.get('https://<SEARCH>.search.azure.us/indexers/<INDEXER>/status?api-version=2024-05-01-preview',headers={'Authorization':f'Bearer {t}'}).json().get('lastResult',{}); print('STATUS',lr.get('status')); print('MSG',lr.get('errorMessage')); print('ERRORS',json.dumps((lr.get('errors') or [])[:5],indent=1)); print('WARN',json.dumps((lr.get('warnings') or [])[:5],indent=1))"
+#
+#   # 2) Function app PLAN + RAM ceiling (EP1=3.5GB, EP2=7GB, EP3=14GB):
+#   az functionapp show -g <RG> -n <FUNC> --query "{name:name, plan:appServicePlanId}" -o json
+#   az appservice plan show --ids $(az functionapp show -g <RG> -n <FUNC> --query appServicePlanId -o tsv) --query "{sku:sku.name, tier:sku.tier, capacity:sku.capacity}" -o json
+#
+#   # 3) Current worker-process setting:
+#   az functionapp config appsettings list -g <RG> -n <FUNC> --query "[?name=='FUNCTIONS_WORKER_PROCESS_COUNT' || name=='PYTHON_THREADPOOL_THREAD_COUNT']" -o json
+#
+#   # 4) Memory usage over the last 3h (is it hitting the ceiling?):
+#   az monitor metrics list --resource $(az functionapp show -g <RG> -n <FUNC> --query id -o tsv) --metric MemoryWorkingSet --interval PT5M --query "value[0].timeseries[0].data[-20:].[timeStamp,maximum]" -o table
+#
+#   # 5) Recent indexer runs — when did it START failing? (correlate w/ last week's changes):
+#   python -c "import httpx,json; from azure.identity import DefaultAzureCredential; t=DefaultAzureCredential().get_token('https://search.azure.us/.default').token; h=httpx.get('https://<SEARCH>.search.azure.us/indexers/<INDEXER>/status?api-version=2024-05-01-preview',headers={'Authorization':f'Bearer {t}'}).json().get('executionHistory',[]); print(json.dumps([{'start':r.get('startTime'),'status':r.get('status'),'items':r.get('itemsProcessed'),'failed':r.get('itemsFailed'),'err':(r.get('errorMessage') or '')[:120]} for r in h[:10]],indent=1))"
+#
+# ALSO tell me (from the Azure portal if easier): the function app "Diagnose and
+# solve problems" -> Memory Analysis — is it maxing out RAM around the crash?
+# ============================================================================
+
+# ============================================================================
 # REPOSITORY CLEANUP FOR CLIENT HANDOVER  (Copilot: delete these files)
 # ============================================================================
 # These files are NOT used by the pipeline (verified: 0 code references — they
