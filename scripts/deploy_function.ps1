@@ -118,16 +118,17 @@ $settings = @(
   "SEARCH_INDEXER_NAME=$prefix-indexer",
   "STORAGE_ACCOUNT_NAME=$storageAcctName",
   "STORAGE_CONTAINER_NAME=$($cfg.storage.pdfContainerName)",
-  "AUTO_HEAL_ENABLED=true",
+  # OFF during the bulk backfill: with the 120-min indexer quota, most docs are
+  # "not yet reached", not stuck. Auto-heal re-stamped them all (force_reindex=NOW)
+  # + resetdocs each cycle, RESETTING the high-water-mark so the indexer re-did the
+  # same first ~4 docs forever ("stuck at 4"). Keep false until the corpus is fully
+  # indexed; re-enable only for steady-state catch of genuinely-failed blobs.
+  "AUTO_HEAL_ENABLED=false",
   "AUTO_HEAL_STUCK_AFTER_MIN=60",
   "AUTO_HEAL_MAX_BLOBS_PER_RUN=20",
   "SKILL_VERSION=$skillVersion",
-  # Python worker concurrency. Set to 2 (was 4): the skills hold large DI-analysis
-  # module caches, and 4 processes multiplied that into ~12 GB -> the function app
-  # OOMed after a few big docs and returned 500, which the indexer reported as
-  # transientFailure (the "stuck at ~4 docs" symptom). 2 processes x 16 threads
-  # keeps parallelism; paired with the cache 32->16 cut in page_label.py.
-  "FUNCTIONS_WORKER_PROCESS_COUNT=2",
+  # Python worker concurrency (see bootstrap.py for rationale).
+  "FUNCTIONS_WORKER_PROCESS_COUNT=4",
   "PYTHON_THREADPOOL_THREAD_COUNT=16",
   # Ensure server-side build stays enabled (config-zip flips these off).
   "SCM_DO_BUILD_DURING_DEPLOYMENT=true",

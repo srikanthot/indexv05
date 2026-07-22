@@ -1,29 +1,45 @@
 # ============================================================================
-# AZURE DIAGNOSTICS NEEDED — indexer "stuck at ~4 docs" (Copilot: run + paste back)
+# ROOT CAUSE FOUND — indexer "stuck at ~4 docs" — and THE FIX (Copilot: execute)
 # ============================================================================
-# The indexer keeps ending in transientFailure after ~4 docs. Likely the
-# function app is running out of memory, but to fix it WITHOUT reducing speed we
-# must confirm the cause + see the plan size. Run ALL of these and paste the
-# output back. Fill <RG>, <FUNC>, <SEARCH>, <INDEXER> from deploy.config.json.
+# CONFIRMED from diagnostics (2026-07-22): NOT out-of-memory. The real error is
+#   "Indexer execution time quota of 120 minutes has been reached ... processed
+#    4 documents" — Azure Search's HARD 120-min-per-run limit. The docs are heavy,
+# so only ~4 finish per run. Plan is EP1 (1 vCPU / 3.5GB / capacity 1).
 #
-#   # 1) The exact indexer error (OOM? throttling? a specific doc?):
-#   python -c "import httpx,json; from azure.identity import DefaultAzureCredential; t=DefaultAzureCredential().get_token('https://search.azure.us/.default').token; lr=httpx.get('https://<SEARCH>.search.azure.us/indexers/<INDEXER>/status?api-version=2024-05-01-preview',headers={'Authorization':f'Bearer {t}'}).json().get('lastResult',{}); print('STATUS',lr.get('status')); print('MSG',lr.get('errorMessage')); print('ERRORS',json.dumps((lr.get('errors') or [])[:5],indent=1)); print('WARN',json.dumps((lr.get('warnings') or [])[:5],indent=1))"
+# WHY IT NEVER ADVANCES (the actual bug): the indexer resumes across runs via a
+# high-water-mark on metadata_storage_last_modified. But heal_until_done.py +
+# the auto_heal timer BUMP metadata (force_reindex=NOW) + resetdocs on every doc
+# that "has no summary yet". With the 120-min quota, ~44 docs simply haven't been
+# REACHED yet -- they are NOT stuck -- but the heal loop re-stamps them all to
+# lastModified=NOW every cycle, which RESETS the queue. So the indexer re-does the
+# same first ~4 heavy docs forever. "no summary yet" != "failed".
 #
-#   # 2) Function app PLAN + RAM ceiling (EP1=3.5GB, EP2=7GB, EP3=14GB):
-#   az functionapp show -g <RG> -n <FUNC> --query "{name:name, plan:appServicePlanId}" -o json
-#   az appservice plan show --ids $(az functionapp show -g <RG> -n <FUNC> --query appServicePlanId -o tsv) --query "{sku:sku.name, tier:sku.tier, capacity:sku.capacity}" -o json
+# ---- FIX PART 1: stop the churn so the indexer can ADVANCE (do this first) ----
+#   # Turn OFF auto-heal (it re-stamps not-yet-reached docs and resets the queue):
+#   az functionapp config appsettings set -g <FUNC_RG> -n psegtmfuncdevv01 --settings AUTO_HEAL_ENABLED=false
+#   az functionapp restart -g <FUNC_RG> -n psegtmfuncdevv01
+#   # And DO NOT run heal_until_done.py in bump mode during the bulk backfill.
+#   # Just let the indexer's PT5M schedule run (or trigger it), and it will
+#   # process the next ~4 docs each run and ADVANCE the high-water-mark until 48/48.
 #
-#   # 3) Current worker-process setting:
-#   az functionapp config appsettings list -g <RG> -n <FUNC> --query "[?name=='FUNCTIONS_WORKER_PROCESS_COUNT' || name=='PYTHON_THREADPOOL_THREAD_COUNT']" -o json
+# ---- FIX PART 2: make each 120-min run finish MANY more than 4 docs ----
+#   # You are on EP1 (smallest). Scale UP (more CPU/RAM per instance) + OUT
+#   # (more instances processing docs in parallel). Zero code change, keeps speed:
+#   az appservice plan update -g <PLAN_RG> -n psegtmfuncplandevv01 --sku EP3
+#   az functionapp plan update -g <PLAN_RG> -n psegtmfuncplandevv01 --min-instances 2 --max-burst 3
+#   # (EP2 if EP3 is too costly. This is the SPEED lever the user wants.)
 #
-#   # 4) Memory usage over the last 3h (is it hitting the ceiling?):
-#   az monitor metrics list --resource $(az functionapp show -g <RG> -n <FUNC> --query id -o tsv) --metric MemoryWorkingSet --interval PT5M --query "value[0].timeseries[0].data[-20:].[timeStamp,maximum]" -o table
+# ---- FIX PART 3: confirm + remove the per-doc bottleneck (why 4 docs = 120 min) --
+#   # Almost certainly the embedding endpoint is THROTTLING (429). If so, raising
+#   # the embedding deployment's TPM quota is the single biggest speedup.
+#   # a) Look for throttling/backoff warnings on the indexer:
+#   python -c "import httpx,json; from azure.identity import DefaultAzureCredential; t=DefaultAzureCredential().get_token('https://search.azure.us/.default').token; lr=httpx.get('https://<SEARCH>.search.azure.us/indexers/<INDEXER>/status?api-version=2024-05-01-preview',headers={'Authorization':f'Bearer {t}'}).json().get('lastResult',{}); print(json.dumps(lr.get('warnings',[])[:20],indent=1))"
+#   # b) In the portal: the embedding deployment -> Metrics -> "Rate limited
+#   #    requests" (429s). If >0, raise that deployment's TPM (Tokens Per Minute).
 #
-#   # 5) Recent indexer runs — when did it START failing? (correlate w/ last week's changes):
-#   python -c "import httpx,json; from azure.identity import DefaultAzureCredential; t=DefaultAzureCredential().get_token('https://search.azure.us/.default').token; h=httpx.get('https://<SEARCH>.search.azure.us/indexers/<INDEXER>/status?api-version=2024-05-01-preview',headers={'Authorization':f'Bearer {t}'}).json().get('executionHistory',[]); print(json.dumps([{'start':r.get('startTime'),'status':r.get('status'),'items':r.get('itemsProcessed'),'failed':r.get('itemsFailed'),'err':(r.get('errorMessage') or '')[:120]} for r in h[:10]],indent=1))"
-#
-# ALSO tell me (from the Azure portal if easier): the function app "Diagnose and
-# solve problems" -> Memory Analysis — is it maxing out RAM around the crash?
+# ---- After 1-3: verify progress ----
+#   # Run the indexer, then check the count climbs past 4 toward 48 (no reset):
+#   python scripts/check_index.py   # or your usual count check; expect 48/48
 # ============================================================================
 
 # ============================================================================

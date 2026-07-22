@@ -222,10 +222,7 @@ SETTINGS=(
   # through one worker -- guaranteeing 230s timeouts under any indexer
   # parallelism. 4 processes × 16 threads = 64 concurrent capacity, which
   # comfortably handles dop=6 across 5 per-record skills (30 max concurrent).
-  # 4 -> 2: 4 processes x the large DI caches OOMed (~12 GB) -> HTTP 500 ->
-  # indexer transientFailure ("stuck at ~4 docs"). 2 x 16 threads keeps
-  # parallelism; paired with the cache 32->16 cut in page_label.py.
-  "FUNCTIONS_WORKER_PROCESS_COUNT=2"
+  "FUNCTIONS_WORKER_PROCESS_COUNT=4"
   "PYTHON_THREADPOOL_THREAD_COUNT=16"
   # Keep the server-side build enabled for future deploys.
   "SCM_DO_BUILD_DURING_DEPLOYMENT=true"
