@@ -184,10 +184,19 @@ echo "==> Applying App Settings"
 
 # Extract values from the config file. Empty values are skipped so the
 # script doesn't clobber existing settings with empty strings.
+# Provider-aware, mirroring deploy_function.ps1 + bootstrap.py. In foundry mode the
+# function uses FOUNDRY_* for chat/vision; MODEL_PROVIDER selects the path. Missing
+# these on a fresh function app leaves it misconfigured for Foundry.
+MODEL_PROVIDER=$(jq -r '.modelProvider // "aoai"' "$CONFIG")
 AOAI_ENDPOINT=$(jq -r '.azureOpenAI.endpoint // ""' "$CONFIG")
 AOAI_API_VERSION=$(jq -r '.azureOpenAI.apiVersion // "2024-12-01-preview"' "$CONFIG")
 AOAI_CHAT=$(jq -r '.azureOpenAI.chatDeployment // ""' "$CONFIG")
 AOAI_VISION=$(jq -r '.azureOpenAI.visionDeployment // ""' "$CONFIG")
+AOAI_EMBED=$(jq -r '.azureOpenAI.embedDeployment // ""' "$CONFIG")
+FOUNDRY_ENDPOINT=$(jq -r '.foundry.projectEndpoint // ""' "$CONFIG")
+FOUNDRY_API_VERSION=$(jq -r '.foundry.apiVersion // "2024-10-21"' "$CONFIG")
+FOUNDRY_CHAT=$(jq -r '.foundry.chatModel // ""' "$CONFIG")
+FOUNDRY_EMBED=$(jq -r '.foundry.embedModel // ""' "$CONFIG")
 DI_ENDPOINT=$(jq -r '.documentIntelligence.endpoint // ""' "$CONFIG")
 DI_API_VERSION=$(jq -r '.documentIntelligence.apiVersion // "2024-11-30"' "$CONFIG")
 SEARCH_ENDPOINT=$(jq -r '.search.endpoint // ""' "$CONFIG")
@@ -202,10 +211,16 @@ STORAGE_CONTAINER=$(jq -r '.storage.pdfContainerName // ""' "$CONFIG")
 
 SETTINGS=(
   "AUTH_MODE=mi"
+  "MODEL_PROVIDER=${MODEL_PROVIDER}"
   "AOAI_ENDPOINT=${AOAI_ENDPOINT}"
   "AOAI_API_VERSION=${AOAI_API_VERSION}"
   "AOAI_CHAT_DEPLOYMENT=${AOAI_CHAT}"
   "AOAI_VISION_DEPLOYMENT=${AOAI_VISION}"
+  "AOAI_EMBED_DEPLOYMENT=${AOAI_EMBED}"
+  "FOUNDRY_PROJECT_ENDPOINT=${FOUNDRY_ENDPOINT}"
+  "FOUNDRY_API_VERSION=${FOUNDRY_API_VERSION}"
+  "FOUNDRY_CHAT_MODEL=${FOUNDRY_CHAT}"
+  "FOUNDRY_EMBED_MODEL=${FOUNDRY_EMBED}"
   "DI_ENDPOINT=${DI_ENDPOINT}"
   "DI_API_VERSION=${DI_API_VERSION}"
   "SEARCH_ENDPOINT=${SEARCH_ENDPOINT}"

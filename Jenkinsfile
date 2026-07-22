@@ -420,13 +420,21 @@ show_keys(json.load(open('deploy.config.json')))
                     echo "  ACTION: check (read-only)"
                     echo "=========================================="
  
+                    # NOTE: check_index.py's main() RETURNS after --coverage, so
+                    # --coverage and --check-stuck-indexer MUST be separate runs or
+                    # the stuck-indexer check is silently skipped.
                     echo "[INFO] Checking index coverage..."
                     python scripts/check_index.py \
                         --config deploy.config.json \
                         --coverage \
-                        --check-stuck-indexer \
                         --triggered-by jenkins-${BUILD_NUMBER} \
                         2>&1 | tee check_index_output.log
+
+                    echo "[INFO] Checking for a stuck indexer..."
+                    python scripts/check_index.py \
+                        --config deploy.config.json \
+                        --check-stuck-indexer \
+                        2>&1 | tee -a check_index_output.log
  
                     echo "[INFO] Check complete."
                 '''

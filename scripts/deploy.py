@@ -216,7 +216,7 @@ def main() -> int:
             print("\n  heal_until_done exited 1 — see its output above:")
             print("    • If 'GAVE UP after N iterations' → some PDFs still need time; "
                   "re-run deploy.py later.")
-            print("    • If 'FAIL: same N PDF(s) stuck across 2 consecutive iterations' "
+            print("    • If 'FAIL: same N PDF(s) stuck across <K> consecutive iterations' "
                   "→ those PDFs are deterministically failing. Investigate with:")
             print(f"      python scripts/check_index.py --config {args.config} --bad")
             print("    • Common cause on big PDFs: Function App OOM (exit code 137). "
