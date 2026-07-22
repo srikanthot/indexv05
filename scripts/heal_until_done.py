@@ -209,14 +209,26 @@ def _reset_indexer(client: httpx.Client, endpoint: str, indexer_name: str,
  
 def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
                     cred: DefaultAzureCredential, *, max_minutes: int,
-                    reset_after_zero_minutes: int) -> dict[str, bool]:
-    """Block until the indexer is no longer reporting inProgress, or the
-    deadline elapses. Mirrors run_pipeline.wait_for_indexer_idle."""
+                    reset_after_zero_minutes: int,
+                    max_total_minutes: int = 0) -> dict[str, bool]:
+    """Wait until the indexer is idle. PROGRESS-AWARE — big documents (30+ MB,
+    hundreds of figures) can index for HOURS, so we do NOT give up on a fixed
+    clock. As long as the indexer keeps making progress (itemsProcessed
+    increasing), we keep waiting and extend the window. We only stop an active
+    run if it truly STALLS — no new items for `max_minutes` — or the absolute
+    safety cap `max_total_minutes` elapses (guards against an infinite loop)."""
     url = f"{endpoint}/indexers/{indexer_name}/status?api-version={API_VERSION}"
-    deadline = time.time() + max_minutes * 60
     backoff = 30
+    start = time.time()
+    # Absolute cap: default very generous (8x the stall window, min 12h) so a
+    # long-but-progressing run is never cut off; override with --max-total-minutes.
+    cap_minutes = max_total_minutes if max_total_minutes and max_total_minutes > 0 \
+        else max(max_minutes * 8, 720)
+    absolute_deadline = start + cap_minutes * 60
+    stall_deadline = time.time() + max_minutes * 60   # reset on every progress tick
+    best_items = -1
     zero_started_at: float | None = None
-    while time.time() < deadline:
+    while time.time() < absolute_deadline:
         # Re-acquire token every poll so long waits don't hit 401 expiry loops.
         token = cred.get_token(SEARCH_SCOPE).token
         r = client.get(url, headers={"Authorization": f"Bearer {token}"})
@@ -231,7 +243,13 @@ def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
         items = int(last.get("itemsProcessed") or 0)
         print(f"  indexer={top_status}  lastResult={last_status}  items={items}",
               flush=True)
- 
+
+        # PROGRESS-AWARE: any increase in processed items means it's still
+        # working — push the stall deadline out so a big doc is never cut off.
+        if items > best_items:
+            best_items = items
+            stall_deadline = time.time() + max_minutes * 60
+
         if top_status == "running" and last_status == "inprogress" and items == 0:
             if zero_started_at is None:
                 zero_started_at = time.time()
@@ -242,13 +260,20 @@ def _wait_for_idle(client: httpx.Client, endpoint: str, indexer_name: str,
                 return {"idle": False, "stagnant": True}
         else:
             zero_started_at = None
- 
+
         if top_status != "inprogress" and last_status != "inprogress":
             return {"idle": True, "stagnant": False}
+
+        # Give up THIS wait only if the indexer stalled (no new items) for the
+        # full stall window — NOT just because a fixed clock elapsed.
+        if time.time() >= stall_deadline:
+            print(f"  no indexer progress for {max_minutes} min (items stuck at "
+                  f"{items}); moving to next iteration", flush=True)
+            return {"idle": False, "stagnant": False, "timed_out_running": True}
         time.sleep(backoff)
     print(
-        f"  timeout: indexer still in-progress after {max_minutes} min "
-        "(continuing to next iteration)",
+        f"  absolute wait cap ({cap_minutes} min) reached while still running; "
+        "continuing to next iteration",
         flush=True,
     )
     return {"idle": False, "stagnant": False, "timed_out_running": True}
@@ -267,9 +292,17 @@ def main() -> int:
                     help="Hard cap on iterations (default 8). Worst-case wall "
                          "time = max-iterations * (wait-minutes + grace-minutes).")
     ap.add_argument("--wait-minutes", type=int, default=90,
-                    help="Max minutes to wait for the indexer to go idle each "
-                         "iteration (default 90). Big PDFs need 5-15 min each "
-                         "through the full skill pipeline.")
+                    help="STALL window (default 90): how long to wait with NO "
+                         "new items processed before giving up an active run. "
+                         "The wait is progress-aware — as long as the indexer "
+                         "keeps processing, it keeps waiting (big docs can take "
+                         "hours), so this is a no-progress timeout, not a total "
+                         "clock.")
+    ap.add_argument("--max-total-minutes", type=int, default=0,
+                    help="Absolute safety cap per wait (default 0 = auto: 8x the "
+                         "stall window, min 12h). Only stops a run that is STILL "
+                         "making progress after this long — set high for a big "
+                         "corpus, e.g. 720 for 12h.")
     ap.add_argument("--grace-minutes", type=int, default=5,
                     help="Extra sleep after the indexer goes idle, so downstream "
                          "skill records have time to project into the index "
@@ -389,6 +422,7 @@ def main() -> int:
                 cred,
                 max_minutes=args.wait_minutes,
                 reset_after_zero_minutes=args.reset_after_zero_minutes,
+                max_total_minutes=args.max_total_minutes,
             )
  
             if wait_result.get("stagnant"):
