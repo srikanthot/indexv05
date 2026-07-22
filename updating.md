@@ -7,16 +7,27 @@
 #
 # COPILOT: delete exactly these files (git rm), commit, push:
 #
-#   # --- internal docs (dev analysis / bug notes — not client-facing) ---
+#   # --- redundant / internal docs (dev analysis, duplicates — not client-facing) ---
 #   docs/REAL_WORLD_BUGS_CHECKLIST.md
 #   docs/CONTENT_COMPLETENESS_AUDIT.md
 #   docs/RETRIEVAL_QUALITY_ANALYSIS.md
 #   docs/SPEC_COVERAGE_MAP.md
 #   docs/INDEXING_IMPLEMENTATION_STATUS.md
 #   docs/SAFETY_RAG_ACTION_PLAN.md
+#   docs/SAFETY_CRITICAL_RAG_DESIGN.md
 #   docs/CHATBOT_SCENARIOS.md
+#   docs/WHATS_NEW_IN_INDEX.md
+#   docs/GOTCHAS_AND_FIXES.md
+#   docs/INDEXING_FINAL_SPEC.md
+#   docs/INDEXING_RUNBOOK.md            # redundant with docs/RUNBOOK.md
+#   docs/CHATBOT_INTEGRATION_GUIDE.md   # covered by INDEX_MASTER_GUIDE_FOR_CHATBOT.md
+#   docs/INTEGRATION_GUIDE.md           # covered by INDEX_MASTER_GUIDE_FOR_CHATBOT.md
+#   docs/INDEXING_ANSWERS_FOR_CHATBOT.md
+#   docs/INDEX_CAPABILITIES_FOR_CHATBOT.md
+#   docs/INDEX_FIELD_REFERENCE.md       # covered by INDEX_FIELD_GLOSSARY.md
+#   docs/BICEP_RBAC_CHECKLIST.md        # covered by RBAC_LEAST_PRIVILEGE.md
 #   ss.md
-#   CHATBOT_INTEGRATION.md          # old duplicate of docs/CHATBOT_INTEGRATION_GUIDE.md
+#   CHATBOT_INTEGRATION.md              # old root duplicate
 #
 #   # --- diagnostic / dev scripts (0 code refs; NOT invoked by the pipeline) ---
 #   scripts/bug_evidence_report.py
@@ -45,11 +56,11 @@
 #             audit_index_production, audit_index_accuracy, verify_new_fields
 #   Jenkinsfile, Jenkinsfile.run, Jenkinsfile.deploy
 #   requirements.txt, ruff.toml, .github/, .gitignore, README.md, deploy.config.example.json
-#   docs to KEEP: INDEXING_RUNBOOK, RUNBOOK, CHATBOT_INTEGRATION_GUIDE, INTEGRATION_GUIDE,
-#     INDEX_MASTER_GUIDE_FOR_CHATBOT, INDEX_FIELD_REFERENCE, INDEX_FIELD_GLOSSARY,
-#     INDEX_CAPABILITIES_FOR_CHATBOT, INDEXING_ANSWERS_FOR_CHATBOT, INDEXING_FINAL_SPEC,
-#     BICEP_RBAC_CHECKLIST, RBAC_LEAST_PRIVILEGE, SAFETY_CRITICAL_RAG_DESIGN,
-#     GOTCHAS_AND_FIXES, WHATS_NEW_IN_INDEX
+#   docs to KEEP — ONLY these 4 (+ README.md and updating.md at the root):
+#     docs/RUNBOOK.md                        (the one operational doc — README links to it)
+#     docs/INDEX_MASTER_GUIDE_FOR_CHATBOT.md (the one chatbot/index guide)
+#     docs/INDEX_FIELD_GLOSSARY.md           (the field reference)
+#     docs/RBAC_LEAST_PRIVILEGE.md           (the roles/permissions to grant)
 # ============================================================================
 
 # ############################################################################
