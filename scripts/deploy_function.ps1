@@ -122,8 +122,12 @@ $settings = @(
   "AUTO_HEAL_STUCK_AFTER_MIN=60",
   "AUTO_HEAL_MAX_BLOBS_PER_RUN=20",
   "SKILL_VERSION=$skillVersion",
-  # Python worker concurrency (see bootstrap.py for rationale).
-  "FUNCTIONS_WORKER_PROCESS_COUNT=4",
+  # Python worker concurrency. Set to 2 (was 4): the skills hold large DI-analysis
+  # module caches, and 4 processes multiplied that into ~12 GB -> the function app
+  # OOMed after a few big docs and returned 500, which the indexer reported as
+  # transientFailure (the "stuck at ~4 docs" symptom). 2 processes x 16 threads
+  # keeps parallelism; paired with the cache 32->16 cut in page_label.py.
+  "FUNCTIONS_WORKER_PROCESS_COUNT=2",
   "PYTHON_THREADPOOL_THREAD_COUNT=16",
   # Ensure server-side build stays enabled (config-zip flips these off).
   "SCM_DO_BUILD_DURING_DEPLOYMENT=true",

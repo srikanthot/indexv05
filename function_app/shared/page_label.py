@@ -382,9 +382,13 @@ _ANALYSIS_CACHE: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
 # Net effect: the per-PDF "build once" optimization degraded to "build
 # every chunk". Bound of 32 fits one full batch in memory; each cached
 # entry is ~30-100MB (paragraphs_by_page etc.), so worst-case ~3.2GB
-# memory budget — acceptable on Premium plan workers (~14GB). Drop
-# to a smaller value if Consumption-plan workers are the deploy target.
-_SECTION_INDEX_CACHE_MAX = 32
+# memory budget PER WORKER PROCESS. With FUNCTIONS_WORKER_PROCESS_COUNT=4 that
+# was ~12.8GB across processes -> OOM (HTTP 500 -> indexer transientFailure,
+# the "stuck at ~4 docs" symptom). Cut to 16 (paired with worker count 4->2 in
+# deploy_function): ~1.6GB/process x 2 = ~3.2GB total, well within a Premium
+# plan, while still holding enough PDFs to avoid rebuild thrashing at
+# batchSize=1. Lower further if you deploy to a small/Consumption plan.
+_SECTION_INDEX_CACHE_MAX = 16
 _CACHE_LOCK = threading.Lock()
  
  
