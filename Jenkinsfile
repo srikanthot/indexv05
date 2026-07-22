@@ -74,6 +74,11 @@ pipeline {
             defaultValue: false,
             description: 'For run/deploy: print what would happen without making changes'
         )
+        booleanParam(
+            name: 'SKIP_PREANALYZE',
+            defaultValue: false,
+            description: 'For deploy/run: SKIP preanalyze (DI + vision) and reuse the existing output.json cache. Check this when the documents are already preanalyzed and you only need to (re)create the search artifacts + reindex — avoids re-running the 12-13h preanalyze.'
+        )
     }
  
     options {
@@ -91,6 +96,8 @@ pipeline {
         AZURE_CLOUD = 'AzureUSGovernment'
         PYTHONUNBUFFERED = '1'
         ACTION = "${params.ACTION ?: 'check'}"
+        // Injected into the deploy/run commands: '--skip-preanalyze' or empty.
+        SKIP_PA = "${params.SKIP_PREANALYZE ? '--skip-preanalyze' : ''}"
  
         // Azure credentials (masked automatically by Jenkins)
         AZURE_CLIENT_ID     = credentials('azure-client-id')
@@ -436,6 +443,7 @@ show_keys(json.load(open('deploy.config.json')))
                         --trigger-indexer \
                         --auto-heal \
                         --max-wait-minutes 60 \
+                        $SKIP_PA \
                         2>&1 | tee run_pipeline_output.log
  
                     echo ""
@@ -492,6 +500,7 @@ show_keys(json.load(open('deploy.config.json')))
                     python scripts/deploy.py \
                         --config deploy.config.json \
                         --skip-roles \
+                        $SKIP_PA \
                         2>&1 | tee deploy_output.log
  
                     echo ""
