@@ -1,3 +1,57 @@
+# ============================================================================
+# REPOSITORY CLEANUP FOR CLIENT HANDOVER  (Copilot: delete these files)
+# ============================================================================
+# These files are NOT used by the pipeline (verified: 0 code references — they
+# are internal dev/analysis artifacts or diagnostic scripts). Safe to delete
+# before handing the repo to the client. The KEEP list below must NOT be touched.
+#
+# COPILOT: delete exactly these files (git rm), commit, push:
+#
+#   # --- internal docs (dev analysis / bug notes — not client-facing) ---
+#   docs/REAL_WORLD_BUGS_CHECKLIST.md
+#   docs/CONTENT_COMPLETENESS_AUDIT.md
+#   docs/RETRIEVAL_QUALITY_ANALYSIS.md
+#   docs/SPEC_COVERAGE_MAP.md
+#   docs/INDEXING_IMPLEMENTATION_STATUS.md
+#   docs/SAFETY_RAG_ACTION_PLAN.md
+#   docs/CHATBOT_SCENARIOS.md
+#   ss.md
+#   CHATBOT_INTEGRATION.md          # old duplicate of docs/CHATBOT_INTEGRATION_GUIDE.md
+#
+#   # --- diagnostic / dev scripts (0 code refs; NOT invoked by the pipeline) ---
+#   scripts/bug_evidence_report.py
+#   scripts/diagnose.py
+#   scripts/diagnose_403.py
+#   scripts/diagnose_highlight.py
+#   scripts/diagnose_metadata.py
+#   scripts/index_query_guide.py
+#   scripts/index_schema_diff.py
+#   scripts/inspect_pdf.py
+#   scripts/page_coordinate_audit_full.py
+#   scripts/validate_index_quality.py
+#   scripts/index_quality_report.py
+#   scripts/reap_stale_rows.py        # also buggy (deletes by chunk_id, key is id)
+#   scripts/run_heal_when_auth_ready.sh
+#
+# DO NOT DELETE (the pipeline / operations need these):
+#   function_app/**                                  (the skills — all of it)
+#   search/index.json, skillset.json, indexer.json, datasource.json
+#   scripts/: preanalyze, deploy, deploy_search, deploy_function.{sh,ps1},
+#             run_pipeline, bootstrap, heal_until_done, reconcile, check_index,
+#             assign_roles, mark_current_revisions, preflight, cosmos_writer,
+#             pipeline_lock, convert, reset_indexer.{sh,ps1}, force_reindex_blobs.ps1,
+#             smoke_test, rerun_failed_docs.ps1, cleanup_environment,
+#             audit_all_retrievable_fields, validate_index, validate_page_coordinates,
+#             audit_index_production, audit_index_accuracy, verify_new_fields
+#   Jenkinsfile, Jenkinsfile.run, Jenkinsfile.deploy
+#   requirements.txt, ruff.toml, .github/, .gitignore, README.md, deploy.config.example.json
+#   docs to KEEP: INDEXING_RUNBOOK, RUNBOOK, CHATBOT_INTEGRATION_GUIDE, INTEGRATION_GUIDE,
+#     INDEX_MASTER_GUIDE_FOR_CHATBOT, INDEX_FIELD_REFERENCE, INDEX_FIELD_GLOSSARY,
+#     INDEX_CAPABILITIES_FOR_CHATBOT, INDEXING_ANSWERS_FOR_CHATBOT, INDEXING_FINAL_SPEC,
+#     BICEP_RBAC_CHECKLIST, RBAC_LEAST_PRIVILEGE, SAFETY_CRITICAL_RAG_DESIGN,
+#     GOTCHAS_AND_FIXES, WHATS_NEW_IN_INDEX
+# ============================================================================
+
 # ############################################################################
 # ##  STOP — READ THIS FIRST. DO NOT AUTO-RUN ANY COMMAND IN THIS FILE.      ##
 # ############################################################################
