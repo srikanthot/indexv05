@@ -56,13 +56,18 @@ pipeline {
     parameters {
         choice(
             name: 'ACTION',
-            choices: ['bootstrap', 'check', 'run', 'deploy'],
+            choices: ['bootstrap', 'check', 'run', 'deploy', 'preanalyze', 'deploy-function', 'deploy-search'],
             description: '''What to do:
   bootstrap = ONE-TIME setup (preflight + function + search artifacts; roles assigned separately)
   check  = READ-ONLY index coverage + stuck-indexer check (safe, default)
   run    = Nightly operations (reconcile → preanalyze → indexer only-if-needed → heal → check)
   deploy = Full deployment (bootstrap → function code → search artifacts → preanalyze → heal)
-            WARNING: deploy modifies Azure resources. Use only for initial setup or upgrades.'''
+            WARNING: deploy modifies Azure resources. Use only for initial setup or upgrades.
+  --- granular (run ONE step only) ---
+  preanalyze      = ONLY run preanalyze (DI + vision → output.json cache). No search/function changes.
+  deploy-function = ONLY publish the Function App code + app settings. No search/preanalyze.
+  deploy-search   = ONLY (re)create the search artifacts (index/skillset/indexer/datasource).
+                    Tick RUN_INDEXER to also trigger an indexer run afterwards.'''
         )
         booleanParam(
             name: 'SKIP_TESTS',
@@ -78,6 +83,11 @@ pipeline {
             name: 'SKIP_PREANALYZE',
             defaultValue: false,
             description: 'For deploy/run: SKIP preanalyze (DI + vision) and reuse the existing output.json cache. Check this when the documents are already preanalyzed and you only need to (re)create the search artifacts + reindex — avoids re-running the 12-13h preanalyze.'
+        )
+        booleanParam(
+            name: 'RUN_INDEXER',
+            defaultValue: false,
+            description: 'For the deploy-search action ONLY: also trigger an indexer run after (re)creating the search artifacts. Leave OFF to just update index/skillset/indexer definitions without reindexing.'
         )
     }
  
@@ -98,6 +108,8 @@ pipeline {
         ACTION = "${params.ACTION ?: 'check'}"
         // Injected into the deploy/run commands: '--skip-preanalyze' or empty.
         SKIP_PA = "${params.SKIP_PREANALYZE ? '--skip-preanalyze' : ''}"
+        // For the deploy-search action: 'true' triggers an indexer run afterwards.
+        RUN_INDEXER = "${params.RUN_INDEXER ? 'true' : 'false'}"
  
         // Azure credentials (masked automatically by Jenkins)
         AZURE_CLIENT_ID     = credentials('azure-client-id')
@@ -463,7 +475,7 @@ show_keys(json.load(open('deploy.config.json')))
         // ============================================================
         stage('Confirm Deploy') {
         // ============================================================
-            when { expression { return params.ACTION == 'deploy' } }
+            when { expression { return params.ACTION in ['deploy', 'deploy-function', 'deploy-search'] } }
             steps {
                 script {
                     if (env.BRANCH_NAME == 'main') {
@@ -517,6 +529,81 @@ show_keys(json.load(open('deploy.config.json')))
             }
         }
  
+        // ============================================================
+        stage('Action: preanalyze') {
+        // ============================================================
+            when { expression { return params.ACTION == 'preanalyze' } }
+            steps {
+                sh '''
+                    set -euo pipefail
+                    . .venv/bin/activate
+
+                    echo "=========================================="
+                    echo "  ACTION: preanalyze (DI + vision -> output.json cache ONLY)"
+                    echo "  No search artifacts or function code are touched."
+                    echo "=========================================="
+
+                    # Respects the existing cache (only analyzes what is missing).
+                    # Add --force to re-analyze everything, or --incremental for new docs.
+                    python scripts/preanalyze.py \
+                        --config deploy.config.json \
+                        2>&1 | tee preanalyze_output.log
+
+                    echo "[INFO] Preanalyze complete."
+                '''
+            }
+        }
+
+        // ============================================================
+        stage('Action: deploy-function') {
+        // ============================================================
+            when { expression { return params.ACTION == 'deploy-function' } }
+            steps {
+                sh '''
+                    set -euo pipefail
+                    . .venv/bin/activate
+
+                    echo "=========================================="
+                    echo "  ACTION: deploy-function (Function App CODE + app settings ONLY)"
+                    echo "  No search artifacts or preanalyze are touched."
+                    echo "=========================================="
+
+                    bash scripts/deploy_function.sh deploy.config.json \
+                        2>&1 | tee deploy_function_output.log
+
+                    echo "[INFO] Function code + app settings deployed."
+                '''
+            }
+        }
+
+        // ============================================================
+        stage('Action: deploy-search') {
+        // ============================================================
+            when { expression { return params.ACTION == 'deploy-search' } }
+            steps {
+                sh '''
+                    set -euo pipefail
+                    . .venv/bin/activate
+
+                    echo "=========================================="
+                    echo "  ACTION: deploy-search (index/skillset/indexer/datasource ONLY)"
+                    echo "  Function code + preanalyze are NOT touched."
+                    echo "  RUN_INDEXER=${RUN_INDEXER}"
+                    echo "=========================================="
+
+                    RUN_INDEXER_FLAG=""
+                    if [ "${RUN_INDEXER}" = "true" ]; then RUN_INDEXER_FLAG="--run-indexer"; fi
+
+                    python scripts/deploy_search.py \
+                        --config deploy.config.json \
+                        $RUN_INDEXER_FLAG \
+                        2>&1 | tee deploy_search_output.log
+
+                    echo "[INFO] Search artifacts updated."
+                '''
+            }
+        }
+
     } // stages
  
     post {
