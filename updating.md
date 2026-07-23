@@ -1,71 +1,60 @@
-# Execution plan — fix the "stuck at ~4 docs" stall (code already pushed)
+# Runbook — finish the backfill from Jenkins (no local runs, no reset)
 
-Branch: `safety-indexing-hardening`. Pull it first. Read-only checks are safe;
-everything that re-runs the pipeline needs Srikanth's OK before running.
+Branch: `safety-indexing-hardening` — pull it first. The indexer has ~12 of 48
+docs indexed and is advancing. Goal: drain the remaining ~36 from Jenkins
+WITHOUT resetting what's done.
 
-Resource names (from the last diagnostic):
-`FUNC_RG=psegtmrgdevv01`  `FUNC_APP=psegtmfuncdevv01`
-`SEARCH=psegtmsrchdevv01`  `INDEXER=psegtmindexdev06-indexer`
-`CONTAINER=techmanualsv03`
+## Why it was stuck (confirmed)
+- Azure Search's 120-min per-run quota => only a few heavy docs finish per run.
+- Auto-heal (ON) treated every not-yet-reached doc as "stuck", bumped its blob
+  metadata + `resetdocs` every 30 min => reset the high-water mark => the
+  indexer restarted on the same first docs forever.
 
-## Root cause (confirmed)
-- The indexer hits Azure Search's **120-min per-run quota** and finishes only
-  ~4 heavy docs per run. That part is expected (docs are big; no 429s seen).
-- It NEVER ADVANCES because **auto-heal is ON** and treats every not-yet-reached
-  doc as "stuck" (no summary record yet), bumps its blob metadata + calls
-  `resetdocs` every 30 min → resets the high-water mark → the indexer restarts
-  on the same first ~4 docs forever.
-- Separately, all 48 `_dicache/*.output.json` caches are `skill_version=1.0.0`,
-  so recent enrichment code edits are NOT in the index yet.
-
-## What the pushed code changes do
-1. `function_app/shared/auto_heal.py` — auto-heal now checks indexer status and
-   **skips healing while the indexer is running or still advancing** (only heals
-   a genuinely idle+stalled index). Stops the queue reset.
-2. `function_app/shared/ids.py` — `SKILL_VERSION` default bumped `1.0.0 -> 1.1.0`
-   so preanalyze's cache-version gate rebuilds the caches with current code.
+## What the code now provides
+- `function_app/shared/auto_heal.py` — a guard so auto-heal NEVER resets a
+  running/advancing indexer (only heals a genuinely idle+stalled one).
+- `scripts/backfill_indexer.py` — a resume driver: re-triggers the indexer
+  (NO reset, NO heal, NO preanalyze) until the backlog drains. Safe to re-run;
+  it CONTINUES, never restarts.
+- New Jenkins action **`index-resume`** that runs that driver.
 
 ---
 
-## STEP 1 — stop the stall NOW (no redeploy; instant)
-Turn auto-heal off on the live app so it stops resetting the queue:
-```
-az functionapp config appsettings set -g psegtmrgdevv01 -n psegtmfuncdevv01 --settings AUTO_HEAL_ENABLED=false
-az functionapp restart -g psegtmrgdevv01 -n psegtmfuncdevv01
-```
-Then let the indexer keep running on its 5-min schedule and watch it ADVANCE
-(run this a few times over ~1-2 hours; `itemsProcessed`/high-water should climb
-4 → 8 → … not reset to 4):
-```
-az rest --method get --url "https://psegtmsrchdevv01.search.azure.us/indexers/psegtmindexdev06-indexer/status?api-version=2024-05-01-preview" --resource "https://search.azure.us"
-```
-Each run still caps near ~4 docs (the 120-min quota), but it now moves forward
-until all 48 are indexed.
+## DO THIS (two Jenkins runs)
 
-## STEP 2 — deploy the fixed function code (so auto-heal is safe to leave on)
-Deploy the function app from the pulled branch (your normal path, e.g.
-`scripts/deploy_function.ps1` or the Jenkins `deploy-function` action). After
-this the auto_heal guard is live, so `AUTO_HEAL_ENABLED=true` is safe again
-(it will no longer reset an in-progress backfill).
+### 1) Jenkins ACTION = `deploy-function`
+Deploys the fixed function code (the auto_heal guard). Brief function restart;
+the indexer (Search side) is unaffected and keeps its progress. After this,
+auto-heal can never reset an in-progress backfill again.
 
-## STEP 3 — get your enrichment edits into the index (do after Step 1 is advancing)
-Current caches are stale (`skill_version=1.0.0`); your edits aren't in them.
-1. In your real `deploy.config.json`, set `"skillVersion": "1.1.0"`.
-2. Re-run preanalyze **INCREMENTAL** (NOT `--force`):
-   ```
-   python scripts/preanalyze.py --config deploy.config.json --incremental
-   ```
-   It logs `stale-version <pdf> ... -> rebuild output.json` for all 48 docs and
-   rebuilds them **cheaply** — DI cache and vision sidecars are reused, so there
-   is NO re-DI and NO vision-API cost (minutes, not the 12-13h `--force`).
-3. Reindex to pick up the rebuilt records. With Step 1's fix the indexer will
-   advance to 48/48 across runs.
+### 2) Jenkins ACTION = `index-resume`
+Drives the indexer to drain the remaining docs. It:
+- best-effort sets `AUTO_HEAL_ENABLED=false` (extra safety),
+- re-triggers the indexer run after each 120-min-quota stop,
+- NEVER resets / heals / re-preanalyzes,
+- prints progress and a final coverage number.
 
-## Optional — finish faster
-Each 120-min run does ~4 heavy docs. To speed the backfill, scale the plan up/out
-(EP1 → EP2/EP3, min-instances 2). Not required; it will complete either way.
+Each run is time-boxed (6 rounds / 8 h, under the Jenkins 10-h timeout). If it
+prints `[BUDGET] ... NOT complete`, just **run `index-resume` again** — it picks
+up exactly where it left off. When it prints `[DONE] ... status=success`, the
+backlog is drained (all 48 indexed).
+- `[STUCK]` (exit fail) = one specific document the indexer can't get past;
+  nothing was reset — check that doc / the indexer error printed above.
 
-## How to confirm it's fixed
-- `az rest ... /indexers/.../status` shows `itemsProcessed` climbing run-over-run
-  (not pinned at 4).
-- Final doc count reaches all 48 source PDFs.
+That's it. Nothing here resets the 12 already-done docs.
+
+---
+
+## NOT NOW — separate, deliberate step (your new enrichment fields)
+This backfill indexes with the EXISTING caches (`skill_version=1.0.0`), so your
+recent enrichment code edits are NOT in it. When you actually want those fields:
+1. Set `"skillVersion": "1.1.0"` in `deploy.config.json`.
+2. Jenkins ACTION = `preanalyze` (rebuilds all 48 `output.json` cheaply — reuses
+   DI + vision caches; the version bump triggers the rebuild).
+3. Then `index-resume` again to reindex with the new records.
+Do this only after step 2 above proves the pipeline reaches 48/48.
+
+## Optional — go faster
+Each 120-min run does only a few heavy docs. Scaling the Function App plan
+up/out (EP1 -> EP2/EP3, min-instances 2) makes each run cover more. Not
+required; the backfill completes either way, just in more `index-resume` runs.

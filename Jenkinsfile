@@ -56,7 +56,7 @@ pipeline {
     parameters {
         choice(
             name: 'ACTION',
-            choices: ['bootstrap', 'check', 'run', 'deploy', 'preanalyze', 'deploy-function', 'deploy-search'],
+            choices: ['bootstrap', 'check', 'run', 'deploy', 'preanalyze', 'deploy-function', 'deploy-search', 'index-resume'],
             description: '''What to do:
   bootstrap = ONE-TIME setup (preflight + function + search artifacts; roles assigned separately)
   check  = READ-ONLY index coverage + stuck-indexer check (safe, default)
@@ -67,7 +67,11 @@ pipeline {
   preanalyze      = ONLY run preanalyze (DI + vision → output.json cache). No search/function changes.
   deploy-function = ONLY publish the Function App code + app settings. No search/preanalyze.
   deploy-search   = ONLY (re)create the search artifacts (index/skillset/indexer/datasource).
-                    Tick RUN_INDEXER to also trigger an indexer run afterwards.'''
+                    Tick RUN_INDEXER to also trigger an indexer run afterwards.
+  index-resume    = RESUME an in-progress backfill: re-trigger the existing indexer
+                    (NO reset, NO heal, NO preanalyze) until the 120-min-quota backlog
+                    drains. Safe to re-run — it CONTINUES, never restarts. Use this to
+                    finish indexing the remaining documents.'''
         )
         booleanParam(
             name: 'SKIP_TESTS',
@@ -480,6 +484,57 @@ show_keys(json.load(open('deploy.config.json')))
             }
         }
  
+        // ============================================================
+        stage('Action: index-resume') {
+        // ============================================================
+            when { expression { return params.ACTION == 'index-resume' } }
+            steps {
+                sh '''
+                    set -euo pipefail
+                    . .venv/bin/activate
+
+                    echo "=========================================="
+                    echo "  ACTION: index-resume"
+                    echo "  Resume the backfill: re-trigger the indexer until the"
+                    echo "  120-min-quota backlog drains. NO reset, NO heal, NO"
+                    echo "  preanalyze -- it CONTINUES, it never restarts."
+                    echo "=========================================="
+
+                    # Best-effort: turn OFF the auto-heal timer so it cannot reset the
+                    # indexer's high-water mark mid-backfill. Non-fatal -- the driver
+                    # itself never resets, and the deployed auto_heal guard also skips
+                    # while the indexer is advancing.
+                    FUNC_APP=$(python -c "import json;print(json.load(open('deploy.config.json'))['functionApp']['name'])")
+                    FUNC_RG=$(python -c "import json;print(json.load(open('deploy.config.json'))['functionApp']['resourceGroup'])")
+                    echo "[INFO] Disabling AUTO_HEAL_ENABLED on ${FUNC_APP} (best-effort)..."
+                    if az functionapp config appsettings set -g "${FUNC_RG}" -n "${FUNC_APP}" \
+                           --settings AUTO_HEAL_ENABLED=false >/dev/null 2>&1; then
+                        echo "[INFO] auto-heal disabled for the backfill."
+                    else
+                        echo "[WARN] could not set AUTO_HEAL_ENABLED (continuing; the driver never resets)."
+                    fi
+
+                    echo "[INFO] Driving the indexer to drain the remaining backlog..."
+                    python scripts/backfill_indexer.py \
+                        --config deploy.config.json \
+                        --max-rounds 6 \
+                        --max-hours 8 \
+                        2>&1 | tee backfill_output.log
+
+                    echo ""
+                    echo "[INFO] Coverage after this invocation (informational; partial is expected mid-backfill):"
+                    python scripts/check_index.py \
+                        --config deploy.config.json \
+                        --coverage \
+                        --triggered-by "jenkins-index-resume-${BUILD_NUMBER}" \
+                        2>&1 | tee check_index_output.log || true
+
+                    echo "[INFO] index-resume finished. If not yet all docs, just run"
+                    echo "       this action again -- it continues from where it left off."
+                '''
+            }
+        }
+
         // ============================================================
         stage('Confirm Deploy') {
         // ============================================================
