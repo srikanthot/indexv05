@@ -267,6 +267,33 @@ def _resetdocs_and_run(search_endpoint: str, indexer_name: str,
                             resp.status_code, resp.text[:200])
  
  
+def _indexer_progress(search_endpoint: str, indexer_name: str) -> tuple[str | None, int | None]:
+    """Return (last_run_status, last_run_itemsProcessed) for the indexer, or
+    (None, None) if the status could not be read.
+
+    Used to stop auto-heal from resetting an indexer that is still running or
+    still advancing through a backlog. `status` is the lastResult status
+    ("inProgress" / "success" / "transientFailure" / "reset"); itemsProcessed
+    is how many docs that run handled.
+    """
+    try:
+        token = bearer_token(SEARCH_SCOPE)
+        url = (f"{search_endpoint.rstrip('/')}/indexers/{indexer_name}/status"
+               f"?api-version={_SEARCH_API_VERSION}")
+        with httpx.Client(timeout=30.0) as c:
+            resp = c.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logging.warning("auto_heal: indexer status fetch failed: %d %s",
+                            resp.status_code, resp.text[:200])
+            return (None, None)
+        last = (resp.json().get("lastResult") or {})
+        items = last.get("itemsProcessed")
+        return (last.get("status"), items if isinstance(items, int) else None)
+    except Exception as exc:
+        logging.warning("auto_heal: indexer status error: %s", exc)
+        return (None, None)
+
+
 def auto_heal_run() -> None:
     """One pass of the auto-heal loop. Safe to call repeatedly."""
     if not _is_enabled():
@@ -290,6 +317,31 @@ def auto_heal_run() -> None:
         logging.warning("auto_heal: missing app settings: %s -- skipping", missing)
         return
  
+    # GUARD: never heal while the indexer is running or still advancing.
+    # auto-heal's premise ("no summary record => stuck") is FALSE during an
+    # initial/bulk backfill. Azure Search enforces a 120-min per-run execution
+    # quota; heavy docs mean only a handful finish per run, so most docs simply
+    # have NOT been REACHED yet -- they are not failed. Bumping their blob
+    # metadata + resetdocs RESETS the indexer's high-water mark, so it restarts
+    # on the same first few heavy docs every 30-min cycle and never advances.
+    # Only heal when the indexer is genuinely idle AND made no progress on its
+    # last run (the true "stuck" state). Fail-safe: if status is unreadable, do
+    # NOT heal (a reset mid-backfill is worse than a delayed heal).
+    last_status, items_processed = _indexer_progress(search_endpoint, indexer_name)
+    if last_status == "inProgress":
+        logging.info("auto_heal: indexer run in progress -- skipping "
+                     "(resetdocs would reset its high-water mark)")
+        return
+    if last_status is None:
+        logging.warning("auto_heal: could not read indexer status -- skipping "
+                        "to avoid resetting an active backfill")
+        return
+    if (items_processed or 0) > 0:
+        logging.info("auto_heal: indexer advanced %d doc(s) on its last run "
+                     "(status=%s) -- still working through the backlog, not "
+                     "stuck; skipping heal", items_processed, last_status)
+        return
+
     stuck_after = _stuck_threshold_min()
     max_blobs = _max_blobs_per_run()
     cutoff = datetime.now(UTC) - timedelta(minutes=stuck_after)

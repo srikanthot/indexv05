@@ -96,7 +96,7 @@ $aoaiApi      = $cfg.azureOpenAI.apiVersion;   if (-not $aoaiApi)      { $aoaiAp
 $foundryApi   = $cfg.foundry.apiVersion;       if (-not $foundryApi)   { $foundryApi = '2024-10-21' }
 $diApi        = $cfg.documentIntelligence.apiVersion; if (-not $diApi)  { $diApi = '2024-11-30' }
 $prefix       = $cfg.search.artifactPrefix;    if (-not $prefix)       { $prefix = 'mm-manuals' }
-$skillVersion = $cfg.skillVersion;             if (-not $skillVersion) { $skillVersion = '1.0.0' }
+$skillVersion = $cfg.skillVersion;             if (-not $skillVersion) { $skillVersion = '1.1.0' }
 $storageAcctName = ($cfg.storage.accountResourceId -split '/')[-1]
 
 $settings = @(

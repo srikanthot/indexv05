@@ -5,7 +5,11 @@ Stable, explicit chunk IDs with selector-specific prefixes.
 import hashlib
 import os
  
-SKILL_VERSION = os.environ.get("SKILL_VERSION", "1.0.0")
+# Bump this whenever the enrichment/emitter output format changes. preanalyze's
+# --incremental cache-version gate (_is_pdf_done) rebuilds every _dicache
+# output.json whose stamped skill_version differs from this, so a bump makes
+# code changes actually reach the index instead of replaying a stale cache.
+SKILL_VERSION = os.environ.get("SKILL_VERSION", "1.1.0")
  
  
 def _short_hash(value: str, length: int = 12) -> str:

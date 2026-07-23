@@ -202,7 +202,7 @@ DI_API_VERSION=$(jq -r '.documentIntelligence.apiVersion // "2024-11-30"' "$CONF
 SEARCH_ENDPOINT=$(jq -r '.search.endpoint // ""' "$CONFIG")
 SEARCH_PREFIX=$(jq -r '.search.artifactPrefix // "mm-manuals"' "$CONFIG")
 APPI_CONN=$(jq -r '.appInsights.connectionString // ""' "$CONFIG")
-SKILL_VERSION=$(jq -r '.skillVersion // "1.0.0"' "$CONFIG")
+SKILL_VERSION=$(jq -r '.skillVersion // "1.1.0"' "$CONFIG")
 
 # Storage and indexer-name settings used by the auto_heal timer trigger.
 STORAGE_ACCT_RESOURCE_ID=$(jq -r '.storage.accountResourceId // ""' "$CONFIG")

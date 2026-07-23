@@ -431,7 +431,7 @@ def main() -> int:
             "SEARCH_INDEXER_NAME": f"{prefix}-indexer",
             "STORAGE_ACCOUNT_NAME": storage_acct,
             "STORAGE_CONTAINER_NAME": storage_cfg.get("pdfContainerName") or "",
-            "SKILL_VERSION": cfg.get("skillVersion") or "1.0.0",
+            "SKILL_VERSION": cfg.get("skillVersion") or "1.1.0",
             # AUTO_HEAL on by default — the timer self-heals stuck blobs
             # every 30 min. Operators can disable later via az CLI if
             # needed, but for a fresh deploy "on" is the right default.
