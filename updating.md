@@ -1,60 +1,60 @@
-# Runbook — finish the backfill from Jenkins (no local runs, no reset)
+# Investigation request for Copilot — how is highlighting / page numbers implemented?
 
-Branch: `safety-indexing-hardening` — pull it first. The indexer has ~12 of 48
-docs indexed and is advancing. Goal: drain the remaining ~36 from Jenkins
-WITHOUT resetting what's done.
+Symptom (raised in a manager demo): the citation **page number** and the
+**highlight box** sometimes don't match / land in the wrong place. We need to
+know whether the INDEX data is correct or the FRONTEND/BACKEND is consuming it
+wrongly. You have both the index (Azure) and the frontend/backend code on this
+machine; the indexing agent does not. Please do BOTH parts and report back.
+**Read-only investigation — do not change any code.**
 
-## Why it was stuck (confirmed)
-- Azure Search's 120-min per-run quota => only a few heavy docs finish per run.
-- Auto-heal (ON) treated every not-yet-reached doc as "stuck", bumped its blob
-  metadata + `resetdocs` every 30 min => reset the high-water mark => the
-  indexer restarted on the same first docs forever.
+------------------------------------------------------------------
+## PART A — ground truth from the index (run this)
+Shows exactly what the index provides per record (render page vs display label,
+page size, and the bbox arrays in inches):
 
-## What the code now provides
-- `function_app/shared/auto_heal.py` — a guard so auto-heal NEVER resets a
-  running/advancing indexer (only heals a genuinely idle+stalled one).
-- `scripts/backfill_indexer.py` — a resume driver: re-triggers the indexer
-  (NO reset, NO heal, NO preanalyze) until the backlog drains. Safe to re-run;
-  it CONTINUES, never restarts.
-- New Jenkins action **`index-resume`** that runs that driver.
+    python scripts/inspect_highlight_contract.py --config deploy.config.json --top 5
 
----
+Then re-run it on the EXACT document + page from the demo that looked wrong:
 
-## DO THIS (two Jenkins runs)
+    python scripts/inspect_highlight_contract.py --config deploy.config.json --source-file "<the PDF>" --page <physical page>
 
-### 1) Jenkins ACTION = `deploy-function`
-Deploys the fixed function code (the auto_heal guard). Brief function restart;
-the indexer (Search side) is unaffected and keeps its progress. After this,
-auto-heal can never reset an in-progress backfill again.
+Paste that output into your report.
 
-### 2) Jenkins ACTION = `index-resume`
-Drives the indexer to drain the remaining docs. It:
-- best-effort sets `AUTO_HEAL_ENABLED=false` (extra safety),
-- re-triggers the indexer run after each 120-min-quota stop,
-- NEVER resets / heals / re-preanalyzes,
-- prints progress and a final coverage number.
+------------------------------------------------------------------
+## PART B — read the frontend + backend code and report HOW it uses the fields
+Find, in the chatbot/frontend and the API/backend repos, the code that renders
+citations + draws the highlight box. Report file + function for each answer:
 
-Each run is time-boxed (6 rounds / 8 h, under the Jenkins 10-h timeout). If it
-prints `[BUDGET] ... NOT complete`, just **run `index-resume` again** — it picks
-up exactly where it left off. When it prints `[DONE] ... status=success`, the
-backlog is drained (all 48 indexed).
-- `[STUCK]` (exit fail) = one specific document the indexer can't get past;
-  nothing was reset — check that doc / the indexer error printed above.
+1. **Page number shown to the user** — which index field does the UI display as
+   the citation page? `printed_page_label` (correct) or `physical_pdf_page`
+   (wrong)? Does it ever handle `printed_page_label_is_synthetic` /
+   `printed_page_label_end`?
 
-That's it. Nothing here resets the 12 already-done docs.
+2. **Which page it renders the PDF on** — does it open/scroll to
+   `physical_pdf_page`? Or does it try to use the printed label to pick the page
+   (wrong — the printed label is not the file position)?
 
----
+3. **Which bbox field it draws** — `chunk_span_bboxes`, `chunk_bboxes`,
+   `line_bboxes`, or `text_bbox`? Does it read the per-entry `page` and draw on
+   that physical page (chunks can span pages)?
 
-## NOT NOW — separate, deliberate step (your new enrichment fields)
-This backfill indexes with the EXISTING caches (`skill_version=1.0.0`), so your
-recent enrichment code edits are NOT in it. When you actually want those fields:
-1. Set `"skillVersion": "1.1.0"` in `deploy.config.json`.
-2. Jenkins ACTION = `preanalyze` (rebuilds all 48 `output.json` cheaply — reuses
-   DI + vision caches; the version bump triggers the rebuild).
-3. Then `index-resume` again to reindex with the new records.
-Do this only after step 2 above proves the pipeline reaches 48/48.
+4. **Coordinate conversion (most likely bug)** — how does it turn the box's
+   inch values (`x_in/y_in/w_in/h_in`, origin TOP-LEFT) into screen pixels?
+   - Does it scale by the record's real `page_width_in` / `page_height_in`?
+   - Or does it assume a fixed size (8.5x11 Letter) or a fixed DPI? (Our docs
+     include non-Letter/A4 pages, so a hardcoded size makes boxes drift.)
+   - Does it use the correct origin (top-left) and axis direction?
 
-## Optional — go faster
-Each 120-min run does only a few heavy docs. Scaling the Function App plan
-up/out (EP1 -> EP2/EP3, min-instances 2) makes each run cover more. Not
-required; the backfill completes either way, just in more `index-resume` runs.
+5. **JSON parsing** — the four bbox fields are JSON *strings*. Does the code
+   `JSON.parse` them, and handle empty string / empty array without erroring?
+
+6. **Errors** — quote any errors the team mentioned (parse failures, missing
+   fields, null handling) with the file/line and what field triggered them.
+
+------------------------------------------------------------------
+## Report back
+For each of B1-B6: the file + function, what it currently does, and whether it
+matches the contract printed by PART A. If a value from PART A (e.g. printed
+label "3-7", physical page 42, page size 8.26x11.69) differs from what the UI
+shows, say which side is wrong. That tells us if it's an index fix or a
+frontend/backend fix.
