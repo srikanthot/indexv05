@@ -53,12 +53,12 @@ def _trigger_run(endpoint: str, indexer: str) -> bool:
     with httpx.Client(timeout=30.0) as c:
         resp = c.post(url, headers={"Authorization": f"Bearer {_token()}"})
     if resp.status_code in (200, 202):
-        print("  triggered on-demand run (no reset)")
+        print("  triggered on-demand run (no reset)", flush=True)
         return True
     if resp.status_code == 409:
-        print("  indexer already running (409) — will wait for it")
+        print("  indexer already running (409) — will wait for it", flush=True)
         return True
-    print(f"  WARNING: run trigger returned {resp.status_code}: {resp.text[:200]}")
+    print(f"  WARNING: run trigger returned {resp.status_code}: {resp.text[:200]}", flush=True)
     return False
 
 
@@ -68,11 +68,13 @@ def _wait_until_idle(endpoint: str, indexer: str, max_minutes: int) -> dict:
     url = f"{endpoint}/indexers/{indexer}/status?api-version={API_VERSION}"
     cred = DefaultAzureCredential()
     deadline = time.time() + max_minutes * 60
+    t_start = time.time()
+    poll = 0
     while time.time() < deadline:
         with httpx.Client(timeout=30.0) as c:
             resp = c.get(url, headers={"Authorization": f"Bearer {cred.get_token(SEARCH_SCOPE).token}"})
         if resp.status_code != 200:
-            print(f"  status fetch {resp.status_code}; retrying in 20s")
+            print(f"  status fetch {resp.status_code}; retrying in 20s", flush=True)
             time.sleep(20)
             continue
         body = resp.json()
@@ -80,7 +82,15 @@ def _wait_until_idle(endpoint: str, indexer: str, max_minutes: int) -> dict:
         last = body.get("lastResult") or {}
         last_status = last.get("status") or "unknown"
         items = last.get("itemsProcessed", "?")
-        print(f"  indexer={top}  lastRun={last_status}  itemsProcessed={items}")
+        failed = last.get("itemsFailed", 0)
+        errs = len(last.get("errors") or [])
+        poll += 1
+        mins = (time.time() - t_start) / 60.0
+        # itemsProcessed only ticks when a WHOLE doc commits; a heavy doc can
+        # sit at 0 for many minutes while inProgress. itemsFailed climbing =
+        # the skills are erroring (worry). Both flat + inProgress = grinding.
+        print(f"  [poll {poll} +{mins:.0f}m] indexer={top} lastRun={last_status} "
+              f"itemsProcessed={items} itemsFailed={failed} errors={errs}", flush=True)
         if top != "inProgress" and last_status != "inProgress":
             return last
         time.sleep(20)
