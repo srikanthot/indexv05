@@ -43,6 +43,82 @@
 # ============================================================================
 
 # ============================================================================
+# FOLLOW-UP (2026-07-22b): "made code changes, re-ran preanalyze, re-indexed
+# under a NEW index name, STILL stuck at ~4 docs, index has the SAME 9337
+# chunks as before." There are TWO SEPARATE causes here — do not conflate:
+# ============================================================================
+#
+# CAUSE A = THE STALL (why it stops at ~4). This is the SAME root cause as the
+#   section at the top of this file: the 120-min per-run indexer execution quota
+#   + auto-heal re-stamping not-yet-reached docs and RESETTING the high-water
+#   mark. A brand-new index name does NOT change this: the new indexer starts
+#   fresh, chews through the same first ~4 heavy docs, hits the 120-min quota,
+#   and — if auto-heal is still stamping the unreached docs to lastModified=NOW —
+#   resets to the same 4 forever. THIS IS NOT A PRE-ANALYZE PROBLEM. The fix is
+#   still FIX PART 1-3 at the top (turn OFF auto-heal for the backfill; scale the
+#   plan up/out; clear the embedding 429 throttle), then let the indexer run
+#   repeatedly so it ADVANCES the high-water mark past 4 -> 8 -> ... -> 48/48.
+#
+# CAUSE B = WHY YOUR CODE EDITS DID NOT SHOW UP (why the chunks are identical).
+#   preanalyze bakes the fully-enriched records into _dicache/<pdf>.output.json;
+#   the process-document skill only SERVES that cache (no live rebuild). In the
+#   default --incremental mode, preanalyze SKIPS any PDF that already has an
+#   output.json (_is_pdf_done returned True on processing_status="ok"). So after
+#   you change enrichment/emitter code and re-run --incremental, the cache is NOT
+#   rebuilt and the indexer replays the OLD output.json -> identical chunks, your
+#   edits absent. (Independent of Cause A; it would happen even with no quota.)
+#
+#   CODE FIX APPLIED (branch safety-indexing-hardening, scripts/preanalyze.py,
+#   _is_pdf_done): the incremental "done" check now compares the cached
+#   `skill_version` against the current shared.ids.SKILL_VERSION and returns
+#   NOT-done (rebuild) on a mismatch. Rebuild is CHEAP — phase_di reuses the DI
+#   cache and _vision_one_figure reuses each cached vision sidecar, so only
+#   output.json is re-assembled with the current code (no re-DI, no re-vision).
+#
+#   TO ACTIVATE (Srikanth decides/runs; do NOT auto-run): SKILL_VERSION is an
+#   env var (shared/ids.py, default "1.0.0"). Bump it to a new value in the
+#   environment where preanalyze runs (e.g. SKILL_VERSION=1.1.0 in the Jenkins
+#   preanalyze env / app settings), then run the NORMAL --incremental preanalyze.
+#   It will log "stale-version <pdf> ... -> rebuild output.json" per PDF and
+#   rebuild all caches cheaply. Then re-index. From now on: bump SKILL_VERSION
+#   whenever you change enrichment output, and incremental auto-rebuilds — no
+#   more 12-13h --force, no more silently-ignored edits.
+#
+# ---- COPILOT: please CONFIRM these (Azure creds needed; read-only unless noted) ----
+#   Q1. AUTO_HEAL_ENABLED on the function app right now (must be false for the
+#       backfill). Report the value.
+#         az functionapp config appsettings list -g <FUNC_RG> -n <FUNC_APP> \
+#           --query "[?name=='AUTO_HEAL_ENABLED'].value" -o tsv
+#   Q2. Does the NEW indexer ADVANCE across runs or RESET to 4? Report the
+#       indexer's lastResult (itemsProcessed, finalTrackingState/high-water) from
+#       TWO consecutive runs so we can see 4 -> 8 (advancing) vs 4 -> 4 (reset).
+#         az search ... GET /indexers/<INDEXER>/status?api-version=2024-05-01-preview
+#   Q3. The indexer's lastResult.errorMessage + warnings[]: still
+#       "execution time quota of 120 minutes ... processed 4 documents"? Any
+#       embedding 429 / "rate limited" / throttling warnings? (points to TPM.)
+#   Q4. In the _dicache/ prefix: how many "*.output.json" blobs exist, their
+#       lastModified timestamps, and the `skill_version` field inside 2-3 of
+#       them. This tells us (a) whether preanalyze actually rebuilt with the
+#       current code or skipped stale caches, and (b) how many docs even HAVE a
+#       cache (if it's ~4, preanalyze itself is dying past doc 4 — a THIRD issue).
+#         az storage blob list -c <PDF_CONTAINER> --prefix "_dicache/" \
+#           --num-results * --query "[?ends_with(name,'.output.json')].{n:name,m:properties.lastModified}" -o table
+#
+# WHAT THE ANSWERS DECIDE:
+#   - Q1=true            -> auto-heal is still resetting the queue; that's why a
+#                           fresh index still pins at 4. Set it false, retry.
+#   - Q2 shows 4 -> 4    -> queue is being reset (heal or a metadata bump). Find
+#                           what stamps lastModified=NOW during the run.
+#   - Q2 shows 4 -> 8    -> nothing is broken; it just needs MORE runs (or scale
+#                           up per FIX PART 2) to reach 48. Not stuck — slow.
+#   - Q3 shows 429s      -> raise the embedding deployment TPM (biggest speedup).
+#   - Q4 output.json ~4  -> preanalyze is crashing past doc 4 (send the preanalyze
+#                           log tail for the first un-cached doc). Separate fix.
+#   - Q4 old skill_version + your edits missing -> Cause B confirmed; bump
+#                           SKILL_VERSION and re-run incremental preanalyze.
+# ============================================================================
+
+# ============================================================================
 # REPOSITORY CLEANUP FOR CLIENT HANDOVER  (Copilot: delete these files)
 # ============================================================================
 # These files are NOT used by the pipeline (verified: 0 code references — they

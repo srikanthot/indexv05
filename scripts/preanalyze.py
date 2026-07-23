@@ -846,6 +846,35 @@ def _is_pdf_done(cfg: dict, pdf_name: str) -> bool:
     except Exception:
         return False  # unreadable output.json -> re-run
  
+    # CACHE-VERSION GATE. output.json stamps `skill_version` (== the
+    # shared.ids.SKILL_VERSION in force when it was built). When the
+    # enrichment/emitter code changes, the operator bumps SKILL_VERSION;
+    # any cache carrying a different version is then STALE and must be
+    # rebuilt on the next --incremental run. Without this, --incremental
+    # sees processing_status="ok", declares the PDF done, and the indexer
+    # replays a stale output.json -- so code changes are silently ignored
+    # and the index is byte-identical to the prior run (same chunk count).
+    # The rebuild is cheap: phase_di skips (DI cache reused) and
+    # _vision_one_figure reuses each cached vision sidecar, so only
+    # output.json is reassembled with the current code -- no re-DI, no
+    # re-vision-API. Fail-safe: if the current version can't be resolved,
+    # do NOT invalidate (avoids a mass rebuild on a transient import error).
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "function_app"))
+        from shared.ids import SKILL_VERSION as _current_skill_version
+    except Exception:
+        _current_skill_version = None
+    if _current_skill_version is not None:
+        cached_version = str(out.get("skill_version") or "").strip()
+        if cached_version != str(_current_skill_version).strip():
+            print(
+                f"  stale-version  {pdf_name} (cache skill_version="
+                f"{cached_version or '<none>'} != current "
+                f"{_current_skill_version}) -> rebuild output.json",
+                flush=True,
+            )
+            return False
+
     # PRIMARY signal: processing_status. phase_output sets this to "ok"
     # (or "di_missed_images" / "partial_vision") only AFTER the output
     # was assembled cleanly. If it's any of those, preanalyze completed
