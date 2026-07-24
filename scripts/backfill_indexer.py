@@ -9,8 +9,8 @@ HOW IT WORKS
       2. if all done -> exit success,
       3. if the indexer is still ADVANCING on its own -> just re-trigger a run,
       4. if it STALLED with docs still missing -> force ONLY those missing docs
-         with resetDocs (targeted; does not touch already-indexed docs, does not
-         reset the whole indexer) and run again,
+         by bumping their blob metadata (advances lastModified so change-tracking
+         re-queues them; touches only those docs, no whole-index reset) and run,
       5. wait for the run to settle, then repeat.
 
     It does NOT give up on a per-run timeout (that was the old bug) and it does
@@ -118,35 +118,50 @@ def _trigger_run(endpoint: str, indexer: str) -> None:
         print(f"  WARN: run trigger {r.status_code}: {r.text[:200]}", flush=True)
 
 
-def _force_missing(endpoint: str, indexer: str, account: str, container: str,
-                   suffix: str, missing: list[str], per_run_minutes: int) -> bool:
-    """resetDocs ONLY the missing blobs so the indexer reprocesses them next
-    run, regardless of change-tracking. Does not touch other docs; does not
-    reset the whole indexer. Returns True if the reset was accepted.
-
-    resetDocs FAILS with HTTP 400 ("Cannot reset ... while indexer is currently
-    running"), so we must wait for the indexer to be idle first. The PT5M
-    schedule can start a run between the wait and the call, so retry a few times."""
-    blob_urls = [f"https://{account}.{suffix}/{container}/{quote(n)}" for n in missing]
-    url = f"{endpoint}/indexers/{indexer}/resetdocs?api-version={SEARCH_API}"
-    for attempt in range(1, 4):
-        _wait_until_idle(endpoint, indexer, per_run_minutes)   # resetDocs needs idle
-        with httpx.Client(timeout=30.0) as c:
-            r = c.post(url, headers={"Authorization": f"Bearer {_tok(SEARCH_SCOPE)}",
-                                     "Content-Type": "application/json"},
-                       json={"datasourceDocumentIds": blob_urls})
-        if r.status_code in (200, 202, 204):
-            print(f"  resetDocs on {len(blob_urls)} straggler(s) -> forcing reindex", flush=True)
-            _trigger_run(endpoint, indexer)
-            return True
-        if r.status_code == 400 and "running" in r.text.lower():
-            print(f"  resetDocs 400 (indexer started running again) — "
-                  f"waiting for idle and retrying ({attempt}/3)", flush=True)
-            continue
-        print(f"  WARN: resetDocs {r.status_code}: {r.text[:200]}", flush=True)
-        return False
-    print("  WARN: could not resetDocs (indexer kept running) — will retry next round", flush=True)
+def _bump_metadata(account: str, container: str, suffix: str, name: str,
+                   stamp: str) -> bool:
+    """Advance a blob's lastModified by writing metadata, so the blob indexer's
+    change-tracking picks it up on the next run. PRESERVES existing user metadata
+    (Set-Blob-Metadata REPLACES the whole dict, so we read the current
+    x-ms-meta-* first and re-send them, or we'd wipe taxonomy keys like
+    operationalarea/functionalarea/doctype)."""
+    base = f"https://{account}.{suffix}/{container}/{quote(name)}"
+    hdr = {"Authorization": f"Bearer {_tok(STORAGE_SCOPE)}", "x-ms-version": STORAGE_API}
+    existing: dict[str, str] = {}
+    try:
+        with httpx.Client(timeout=15.0) as c:
+            h = c.request("HEAD", f"{base}?comp=metadata", headers=hdr)
+        if h.status_code == 200:
+            for k, v in h.headers.items():
+                if k.lower().startswith("x-ms-meta-"):
+                    existing[k.lower()[len("x-ms-meta-"):]] = v
+    except Exception as exc:
+        print(f"  WARN: could not read metadata for {name}: {exc}", flush=True)
+    existing["backfill_at"] = stamp
+    put = {**hdr, "Content-Length": "0"}
+    for k, v in existing.items():
+        put[f"x-ms-meta-{k}"] = v
+    with httpx.Client(timeout=30.0) as c:
+        r = c.put(f"{base}?comp=metadata", headers=put)
+    if r.status_code in (200, 201):
+        return True
+    print(f"  WARN: metadata bump {r.status_code} for {name}: {r.text[:160]}", flush=True)
     return False
+
+
+def _force_missing(endpoint: str, indexer: str, account: str, container: str,
+                   suffix: str, missing: list[str]) -> bool:
+    """Force ONLY the missing blobs to reindex by bumping their metadata
+    (advances lastModified -> change-tracking re-queues them), then trigger a
+    run. Touches only the missing docs; the rest keep their state. This is the
+    reliable blob-indexer force — no whole-index reset, and unlike resetDocs it
+    does not need the indexer idle."""
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    bumped = sum(1 for n in missing if _bump_metadata(account, container, suffix, n, stamp))
+    print(f"  bumped lastModified on {bumped}/{len(missing)} straggler(s) "
+          f"-> forcing reindex", flush=True)
+    _trigger_run(endpoint, indexer)
+    return bumped > 0
 
 
 def _wait_until_idle(endpoint: str, indexer: str, max_minutes: int) -> None:
@@ -253,8 +268,7 @@ def main() -> int:
                 return 0
             print(f"  no progress since last round — FORCING {len(missing)} "
                   f"straggler(s) (attempt {force_streak})", flush=True)
-            _force_missing(endpoint, indexer, account, container, suffix, missing,
-                           args.per_run_minutes)
+            _force_missing(endpoint, indexer, account, container, suffix, missing)
 
         prev_indexed = indexed
         _wait_until_idle(endpoint, indexer, args.per_run_minutes)
