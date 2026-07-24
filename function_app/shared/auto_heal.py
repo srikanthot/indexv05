@@ -1,6 +1,6 @@
 """
 Auto-heal stuck blobs in the Azure Search index.
- 
+
 Periodically scans the index for "stuck" PDFs — blobs in the source
 container that have no `summary` record after being eligible for
 processing for some grace period. When found, this module:
@@ -9,11 +9,11 @@ processing for some grace period. When found, this module:
   2. Calls the indexer's resetdocs API to clear failed-items state for
      just those blobs
   3. Triggers an immediate indexer run
- 
+
 This is the production-grade replacement for manually running
 `scripts/force_reindex_blobs.ps1`. It runs every 30 min via a timer
 trigger in function_app.py.
- 
+
 Configuration (App Settings):
   AUTO_HEAL_ENABLED                  -- "true" to enable (default: true)
   AUTO_HEAL_STUCK_AFTER_MIN          -- minutes a blob must be stuck before healing (default: 60)
@@ -23,26 +23,26 @@ Configuration (App Settings):
   SEARCH_INDEXER_NAME                -- name of the target Search indexer
   STORAGE_ACCOUNT_NAME               -- storage account hosting the PDF container
   STORAGE_CONTAINER_NAME             -- blob container holding source PDFs
- 
+
 All Azure calls use the function app's managed identity. No keys needed.
 """
- 
+
 from __future__ import annotations
- 
+
 import logging
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
- 
+
 import httpx
- 
+
 from .config import optional_env
 from .credentials import SEARCH_SCOPE, STORAGE_SCOPE, bearer_token
- 
+
 _SEARCH_API_VERSION = "2024-05-01-preview"
 _STORAGE_API_VERSION = "2024-08-04"
- 
- 
+
+
 def _is_enabled() -> bool:
     # AUTO_HEAL_ENABLED must be set to "true"/"1"/"yes" to enable.
     # If unset OR set to anything else (including "false"), auto-heal stays off.
@@ -51,22 +51,22 @@ def _is_enabled() -> bool:
     # rest of the system is healthy.
     val = (optional_env("AUTO_HEAL_ENABLED", "") or "").strip().lower()
     return val in ("true", "1", "yes", "on")
- 
- 
+
+
 def _stuck_threshold_min() -> int:
     try:
         return max(5, int(optional_env("AUTO_HEAL_STUCK_AFTER_MIN", "60") or "60"))
     except ValueError:
         return 60
- 
- 
+
+
 def _max_blobs_per_run() -> int:
     try:
         return max(1, int(optional_env("AUTO_HEAL_MAX_BLOBS_PER_RUN", "20") or "20"))
     except ValueError:
         return 20
- 
- 
+
+
 # processing_status values that mean a document lost figures/tables or was
 # only partially processed — such a doc must NOT count as "done" even if a
 # summary record exists, so the heal loop re-processes it.
@@ -131,11 +131,11 @@ def _list_done_source_files(search_endpoint: str, index_name: str) -> set[str]:
             sorted(lossy & done)[:10],
         )
     return done - lossy
- 
- 
+
+
 def _list_pdfs_in_container(storage_account: str, container: str) -> list[dict[str, Any]]:
     """List all .pdf blobs in the container with their lastModified timestamps.
- 
+
     Returns list of dicts {name, last_modified} sorted by name.
     Uses AAD-authenticated REST: GET /<container>?restype=container&comp=list&include=metadata.
     """
@@ -177,12 +177,12 @@ def _list_pdfs_in_container(storage_account: str, container: str) -> list[dict[s
             continue
         pdfs.append({"name": name, "last_modified": lm})
     return sorted(pdfs, key=lambda x: x["name"])
- 
- 
+
+
 def _bump_blob_metadata(storage_account: str, container: str, blob_name: str,
                          stamp: str) -> bool:
     """Update blob metadata to force lastModified to advance.
- 
+
     PRESERVES existing user-metadata on the blob. Azure's Set Blob Metadata
     REST API (PUT ?comp=metadata) REPLACES the entire metadata dict — every
     x-ms-meta-* header that's not present on the request is dropped. So
@@ -203,7 +203,7 @@ def _bump_blob_metadata(storage_account: str, container: str, blob_name: str,
         "x-ms-version": _STORAGE_API_VERSION,
         "x-ms-date": datetime.now(UTC).strftime("%a, %d %b %Y %H:%M:%S GMT"),
     }
- 
+
     # 1. GET existing metadata via HEAD on ?comp=metadata. Response headers
     #    include every x-ms-meta-<key> currently set on the blob.
     existing_meta: dict[str, str] = {}
@@ -220,10 +220,10 @@ def _bump_blob_metadata(storage_account: str, container: str, blob_name: str,
         # but we log it so operators know the merge step was skipped.
         logging.warning("auto_heal: could not read existing metadata for %s: %s",
                         blob_name, exc)
- 
+
     # 2. Merge auto_heal_at into existing keys.
     existing_meta["auto_heal_at"] = stamp
- 
+
     # 3. PUT with the full merged set as x-ms-meta-<key> headers.
     put_headers = {**common_headers, "Content-Length": "0"}
     for k, v in existing_meta.items():
@@ -235,15 +235,15 @@ def _bump_blob_metadata(storage_account: str, container: str, blob_name: str,
     logging.warning("auto_heal: metadata bump failed for %s: %d %s",
                     blob_name, resp.status_code, resp.text[:200])
     return False
- 
- 
+
+
 def _resetdocs_and_run(search_endpoint: str, indexer_name: str,
                         blob_urls: list[str]) -> None:
     """Call resetdocs to clear failed-items state, then trigger an indexer run."""
     token = bearer_token(SEARCH_SCOPE)
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     base = search_endpoint.rstrip("/")
- 
+
     # Step 1: resetdocs
     reset_url = f"{base}/indexers/{indexer_name}/resetdocs?api-version={_SEARCH_API_VERSION}"
     body = {"datasourceDocumentIds": blob_urls}
@@ -253,7 +253,7 @@ def _resetdocs_and_run(search_endpoint: str, indexer_name: str,
         logging.warning("auto_heal: resetdocs failed: %d %s",
                         resp.status_code, resp.text[:200])
         # Don't return; metadata bump alone usually still triggers reprocessing
- 
+
     # Step 2: trigger run
     run_url = f"{base}/indexers/{indexer_name}/run?api-version={_SEARCH_API_VERSION}"
     with httpx.Client(timeout=30.0) as c:
@@ -265,8 +265,8 @@ def _resetdocs_and_run(search_endpoint: str, indexer_name: str,
         else:
             logging.warning("auto_heal: indexer run trigger failed: %d %s",
                             resp.status_code, resp.text[:200])
- 
- 
+
+
 def _indexer_progress(search_endpoint: str, indexer_name: str) -> tuple[str | None, int | None]:
     """Return (last_run_status, last_run_itemsProcessed) for the indexer, or
     (None, None) if the status could not be read.
@@ -299,13 +299,13 @@ def auto_heal_run() -> None:
     if not _is_enabled():
         logging.info("auto_heal: disabled (AUTO_HEAL_ENABLED is not truthy)")
         return
- 
+
     search_endpoint = optional_env("SEARCH_ENDPOINT")
     index_name = optional_env("SEARCH_INDEX_NAME")
     indexer_name = optional_env("SEARCH_INDEXER_NAME")
     storage_account = optional_env("STORAGE_ACCOUNT_NAME")
     container = optional_env("STORAGE_CONTAINER_NAME")
- 
+
     missing = [k for k, v in {
         "SEARCH_ENDPOINT": search_endpoint,
         "SEARCH_INDEX_NAME": index_name,
@@ -316,7 +316,7 @@ def auto_heal_run() -> None:
     if missing:
         logging.warning("auto_heal: missing app settings: %s -- skipping", missing)
         return
- 
+
     # GUARD: never heal while the indexer is running or still advancing.
     # auto-heal's premise ("no summary record => stuck") is FALSE during an
     # initial/bulk backfill. Azure Search enforces a 120-min per-run execution
@@ -345,24 +345,24 @@ def auto_heal_run() -> None:
     stuck_after = _stuck_threshold_min()
     max_blobs = _max_blobs_per_run()
     cutoff = datetime.now(UTC) - timedelta(minutes=stuck_after)
- 
+
     logging.info("auto_heal: scanning -- stuck_after=%d min, max_blobs=%d",
                  stuck_after, max_blobs)
- 
+
     # 1. List source_files that have a summary record (= fully done)
     done = _list_done_source_files(search_endpoint, index_name)
     logging.info("auto_heal: index has summary records for %d PDFs", len(done))
- 
+
     # 2. List blobs in container
     pdfs = _list_pdfs_in_container(storage_account, container)
     logging.info("auto_heal: container has %d PDFs", len(pdfs))
- 
+
     # 3. Find blobs without summary record AND old enough to be considered stuck
     stuck = [p for p in pdfs if p["name"] not in done and p["last_modified"] < cutoff]
     if not stuck:
         logging.info("auto_heal: no stuck blobs to heal (all done or recently uploaded)")
         return
- 
+
     # Cap blobs per run to avoid runaway behavior
     stuck = stuck[:max_blobs]
     logging.warning("auto_heal: %d blob(s) stuck for >= %d min -- healing",
@@ -370,7 +370,7 @@ def auto_heal_run() -> None:
     for s in stuck:
         logging.warning("auto_heal:   - %s (last_modified=%s)",
                         s["name"], s["last_modified"].isoformat())
- 
+
     # 4. Bump metadata on each stuck blob
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     bumped: list[str] = []
@@ -379,13 +379,13 @@ def auto_heal_run() -> None:
         if _bump_blob_metadata(storage_account, container, s["name"], stamp):
             bumped.append(s["name"])
             time.sleep(0.1)  # gentle pacing on storage
- 
+
     if not bumped:
         logging.warning("auto_heal: 0 blobs updated -- aborting before resetdocs/run")
         return
- 
+
     # 5. resetdocs + run
     blob_urls = [f"https://{storage_account}.{endpoint_suffix}/{container}/{n}" for n in bumped]
     _resetdocs_and_run(search_endpoint, indexer_name, blob_urls)
- 
+
     logging.info("auto_heal: triggered re-processing of %d blobs", len(bumped))
