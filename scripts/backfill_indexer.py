@@ -172,15 +172,28 @@ def _bump_metadata(account: str, container: str, suffix: str, name: str,
     base = f"https://{account}.{suffix}/{container}/{quote(name)}"
     hdr = {"Authorization": f"Bearer {_tok(STORAGE_SCOPE)}", "x-ms-version": STORAGE_API}
     existing: dict[str, str] = {}
+    # Set-Blob-Metadata REPLACES the whole dict, so we must read the current
+    # metadata first and re-send it. CRITICAL: if that read fails (exception OR
+    # any non-200), we must NOT write — a PUT with only backfill_at would wipe
+    # the blob's taxonomy keys (operationalarea/functionalarea/doctype/title).
+    # So skip the bump for this doc rather than risk data loss.
+    read_ok = False
     try:
         with httpx.Client(timeout=15.0) as c:
             h = c.request("HEAD", f"{base}?comp=metadata", headers=hdr)
         if h.status_code == 200:
+            read_ok = True
             for k, v in h.headers.items():
                 if k.lower().startswith("x-ms-meta-"):
                     existing[k.lower()[len("x-ms-meta-"):]] = v
+        else:
+            print(f"  WARN: metadata read {h.status_code} for {name}; skipping "
+                  f"bump (won't risk wiping its metadata)", flush=True)
     except Exception as exc:
-        print(f"  WARN: could not read metadata for {name}: {exc}", flush=True)
+        print(f"  WARN: metadata read failed for {name}: {exc}; skipping bump",
+              flush=True)
+    if not read_ok:
+        return False
     existing["backfill_at"] = stamp
     put = {**hdr, "Content-Length": "0"}
     for k, v in existing.items():
