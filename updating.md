@@ -1,8 +1,7 @@
 # Why citation page numbers look different
 
-We show the page number exactly as it's printed in the manual. The manuals number
-their pages in different ways depending on the section — some use chapter‑page
-(like "1‑7"), some use plain numbers (like "49"), and the forms pages use labels
-(like "FORM‑008") — so the citations reflect that. They're all correct; nothing is
-wrong. Behind the scenes every page also has a normal PDF page number that we use
-to open the document and place the highlight.
+"1-7" is the page number printed in the manual. "49" is the actual PDF page
+number, which we assign while pre-analyzing the document — we use that one to jump
+to the exact page and to place the highlight, because you can't navigate using the
+printed "1-7". Both are correct; they're just two different page numbers for the
+same page.
