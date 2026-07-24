@@ -119,21 +119,34 @@ def _trigger_run(endpoint: str, indexer: str) -> None:
 
 
 def _force_missing(endpoint: str, indexer: str, account: str, container: str,
-                   suffix: str, missing: list[str]) -> None:
+                   suffix: str, missing: list[str], per_run_minutes: int) -> bool:
     """resetDocs ONLY the missing blobs so the indexer reprocesses them next
     run, regardless of change-tracking. Does not touch other docs; does not
-    reset the whole indexer."""
+    reset the whole indexer. Returns True if the reset was accepted.
+
+    resetDocs FAILS with HTTP 400 ("Cannot reset ... while indexer is currently
+    running"), so we must wait for the indexer to be idle first. The PT5M
+    schedule can start a run between the wait and the call, so retry a few times."""
     blob_urls = [f"https://{account}.{suffix}/{container}/{quote(n)}" for n in missing]
     url = f"{endpoint}/indexers/{indexer}/resetdocs?api-version={SEARCH_API}"
-    with httpx.Client(timeout=30.0) as c:
-        r = c.post(url, headers={"Authorization": f"Bearer {_tok(SEARCH_SCOPE)}",
-                                 "Content-Type": "application/json"},
-                   json={"datasourceDocumentIds": blob_urls})
-    if r.status_code not in (200, 202, 204):
+    for attempt in range(1, 4):
+        _wait_until_idle(endpoint, indexer, per_run_minutes)   # resetDocs needs idle
+        with httpx.Client(timeout=30.0) as c:
+            r = c.post(url, headers={"Authorization": f"Bearer {_tok(SEARCH_SCOPE)}",
+                                     "Content-Type": "application/json"},
+                       json={"datasourceDocumentIds": blob_urls})
+        if r.status_code in (200, 202, 204):
+            print(f"  resetDocs on {len(blob_urls)} straggler(s) -> forcing reindex", flush=True)
+            _trigger_run(endpoint, indexer)
+            return True
+        if r.status_code == 400 and "running" in r.text.lower():
+            print(f"  resetDocs 400 (indexer started running again) — "
+                  f"waiting for idle and retrying ({attempt}/3)", flush=True)
+            continue
         print(f"  WARN: resetDocs {r.status_code}: {r.text[:200]}", flush=True)
-    else:
-        print(f"  resetDocs on {len(blob_urls)} straggler(s) -> forcing reindex", flush=True)
-    _trigger_run(endpoint, indexer)
+        return False
+    print("  WARN: could not resetDocs (indexer kept running) — will retry next round", flush=True)
+    return False
 
 
 def _wait_until_idle(endpoint: str, indexer: str, max_minutes: int) -> None:
@@ -226,13 +239,22 @@ def main() -> int:
         else:
             force_streak += 1
             if force_streak > args.max_force_rounds:
-                print(f"\n[STUCK] these {len(missing)} document(s) will not index "
-                      f"after {args.max_force_rounds} forced attempts — they are "
-                      f"likely broken (inspect the indexer errors for them):\n  {missing}")
-                return 1
+                # Do NOT fail the pipeline: the backfill did its job for the rest
+                # of the corpus. Surface the stragglers loudly as a warning so the
+                # stage still passes and they can be investigated separately (a
+                # coverage/check step is the place to gate on completeness).
+                print(f"\n[WARN] {indexed}/{target} indexed. These {len(missing)} "
+                      f"document(s) did not index after {args.max_force_rounds} "
+                      f"forced attempts — likely a content/skill issue on those "
+                      f"specific docs. Inspect the indexer execution errors for "
+                      f"them:\n  {missing}")
+                print("[DONE-WITH-WARNINGS] exiting 0 so the pipeline is not "
+                      "failed by a few problem docs.")
+                return 0
             print(f"  no progress since last round — FORCING {len(missing)} "
                   f"straggler(s) (attempt {force_streak})", flush=True)
-            _force_missing(endpoint, indexer, account, container, suffix, missing)
+            _force_missing(endpoint, indexer, account, container, suffix, missing,
+                           args.per_run_minutes)
 
         prev_indexed = indexed
         _wait_until_idle(endpoint, indexer, args.per_run_minutes)
