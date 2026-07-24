@@ -1,47 +1,16 @@
-# For Copilot — how does retrieval work when a user asks a question?
+# For Copilot — check how the chatbot retrieves (read-only, just report)
 
-We're not getting the right chunks back in the chatbot. Go through the
-chatbot/backend code and tell me EXACTLY what happens when a question is asked,
-so we can see whether retrieval is set up well. **Read-only — just report, with
-the file + function for each answer.**
+In the chatbot backend, find the function that queries Azure AI Search and tell
+me, with the file + function and the actual values:
 
-Please answer these, in order:
+1. Does the request set `queryType: "semantic"` (semantic ranker ON) and which
+   `semanticConfiguration`? (yes / no + the value)
+2. Is it **hybrid** — does it send BOTH `vectorQueries` (an embedded question)
+   AND `search` text, or only one of them?
+3. What `top` does it request, and how many chunks does it finally pass to the
+   LLM?
+4. Does it read `@search.rerankerScore` / `@search.score` and sort or threshold
+   by it, or does it just take Azure's order?
+5. Does it apply any `$filter` or a `scoringProfile` (e.g. `safety-boost`)?
 
-1. **The flow.** When a user asks a question, trace it: does the code send the
-   question straight to an LLM, or does it first query **Azure AI Search** and
-   then give those results to the LLM? Show the function that does the search.
-
-2. **What kind of search.** For that Azure AI Search call, report which of these
-   it actually uses (quote the request it builds):
-   - keyword / full-text (`searchText`)?
-   - vector / semantic embedding (`vectorQueries` with an embedded query)?
-   - **hybrid** = both together?
-   - Is the **L2 semantic ranker** on (`queryType: "semantic"` + a
-     `semanticConfiguration`)? Which configuration name?
-   - Any `queryRewrites` / query rewriting?
-
-3. **How many results.** What `top` (and vector `k`) does it request? And of
-   those, how many chunks are actually passed to the LLM as context?
-
-4. **Re-ranking / ordering.** After results come back, is there any re-ranking
-   or re-ordering (semantic reranker score, a custom sort, RRF, dedup, pick
-   top-N)? Describe how the final list handed to the LLM is chosen and ordered.
-
-5. **Filters.** Does it apply any `$filter` (e.g. record_type, retrieval_eligible,
-   is_current_revision, is_locator_artifact)? List them.
-
-6. **Fields.** Which index fields does it search over, and which fields does it
-   send to the LLM as the answer context (content, source_file, page, etc.)?
-
-7. **Score.** Azure returns `@search.score` (and `@search.rerankerScore` when the
-   semantic ranker is on). Does the code READ either of these? Does it re-sort /
-   threshold by them, or does it just take Azure's order? Does the query pass a
-   `scoringProfile` (e.g. `safety-boost`) and its `scoringParameters`
-   (`safetytags`)? (Note: the index has scoring profiles but NO
-   defaultScoringProfile, so they apply ONLY if the query names one.)
-
-## Report format
-For each item: the file + function, the ACTUAL value/setting in the code, and a
-one-line verdict (e.g. "hybrid: NO — vector only", "semantic ranker: OFF",
-"top: 5"). At the end, a short summary: is it hybrid + semantic + filtered, or
-is something missing that would explain poor chunk retrieval?
+Just report what the code does — don't change anything.
