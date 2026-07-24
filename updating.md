@@ -33,6 +33,13 @@ Please answer these, in order:
 6. **Fields.** Which index fields does it search over, and which fields does it
    send to the LLM as the answer context (content, source_file, page, etc.)?
 
+7. **Score.** Azure returns `@search.score` (and `@search.rerankerScore` when the
+   semantic ranker is on). Does the code READ either of these? Does it re-sort /
+   threshold by them, or does it just take Azure's order? Does the query pass a
+   `scoringProfile` (e.g. `safety-boost`) and its `scoringParameters`
+   (`safetytags`)? (Note: the index has scoring profiles but NO
+   defaultScoringProfile, so they apply ONLY if the query names one.)
+
 ## Report format
 For each item: the file + function, the ACTUAL value/setting in the code, and a
 one-line verdict (e.g. "hybrid: NO — vector only", "semantic ranker: OFF",
