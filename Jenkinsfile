@@ -517,7 +517,6 @@ show_keys(json.load(open('deploy.config.json')))
                     echo "[INFO] Driving the indexer to drain the remaining backlog..."
                     python scripts/backfill_indexer.py \
                         --config deploy.config.json \
-                        --max-rounds 6 \
                         --max-hours 8 \
                         2>&1 | tee backfill_output.log
 
