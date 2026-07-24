@@ -104,6 +104,50 @@ def _container_pdfs(account: str, container: str, suffix: str) -> list[str]:
     return sorted(set(names))
 
 
+def _cache_status(account: str, container: str, suffix: str, name: str):
+    """HEAD the pre-analyze cache for a PDF. Returns (exists, size_bytes);
+    exists is None if the check itself failed. Used to explain WHY a straggler
+    won't index: no cache -> preanalyze needed; cache present -> index-time skill
+    error. process_document serves _dicache/<pdf>.output.json, so its presence
+    and size is the deciding signal."""
+    url = f"https://{account}.{suffix}/{container}/{quote('_dicache/' + name + '.output.json')}"
+    try:
+        with httpx.Client(timeout=15.0) as c:
+            r = c.request("HEAD", url, headers={"Authorization": f"Bearer {_tok(STORAGE_SCOPE)}",
+                                                "x-ms-version": STORAGE_API})
+        if r.status_code == 200:
+            return True, int(r.headers.get("Content-Length", "0") or 0)
+        if r.status_code == 404:
+            return False, 0
+        print(f"  WARN: cache HEAD {r.status_code} for {name}", flush=True)
+        return None, 0
+    except Exception as exc:
+        print(f"  WARN: cache HEAD failed for {name}: {exc}", flush=True)
+        return None, 0
+
+
+def _diagnose_stragglers(account: str, container: str, suffix: str,
+                         missing: list[str]) -> None:
+    """Print, per straggler, the likely root cause + the fix — so it shows up in
+    the pipeline log without anyone needing blob access."""
+    print("[DIAGNOSIS] why each remaining document did not index:", flush=True)
+    for n in missing:
+        exists, size = _cache_status(account, container, suffix, n)
+        if exists is None:
+            verdict = "could not read its pre-analyze cache (permissions/network?)"
+        elif not exists:
+            verdict = ("NO pre-analyze cache (output.json missing) -> pre-analyze "
+                       f"this doc first, e.g. preanalyze --pdf \"{n}\"")
+        elif size < 500:
+            verdict = (f"pre-analyze cache is empty/stub ({size} B) -> re-run "
+                       f"preanalyze --pdf \"{n}\" (its DI/vision likely failed)")
+        else:
+            verdict = (f"cache present (~{size // 1024} KB) but 0 records indexed "
+                       "-> index-time skill error; check the indexer execution "
+                       "errors for this doc")
+        print(f"    - {n}: {verdict}", flush=True)
+
+
 # ---- indexer control (search side) ------------------------------------------
 
 def _trigger_run(endpoint: str, indexer: str) -> None:
@@ -260,11 +304,11 @@ def main() -> int:
                 # coverage/check step is the place to gate on completeness).
                 print(f"\n[WARN] {indexed}/{target} indexed. These {len(missing)} "
                       f"document(s) did not index after {args.max_force_rounds} "
-                      f"forced attempts — likely a content/skill issue on those "
-                      f"specific docs. Inspect the indexer execution errors for "
-                      f"them:\n  {missing}")
-                print("[DONE-WITH-WARNINGS] exiting 0 so the pipeline is not "
-                      "failed by a few problem docs.")
+                      f"forced attempts:\n  {missing}\n")
+                _diagnose_stragglers(account, container, suffix, missing)
+                print("\n[DONE-WITH-WARNINGS] exiting 0 so the pipeline is not "
+                      "failed by a few problem docs. See the diagnosis above for "
+                      "the fix per document.")
                 return 0
             print(f"  no progress since last round — FORCING {len(missing)} "
                   f"straggler(s) (attempt {force_streak})", flush=True)
